@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, useLayoutEffect } from "react";
+import { useEffect, useState, useRef, useLayoutEffect, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Brain, MessageSquare, X } from "lucide-react";
 import HolographicPanel from "../ui/HolographicPanel";
@@ -61,6 +61,14 @@ export default function MemoryPanel() {
     }
   }, [memories]);
 
+  // Auto-scroll to latest message
+  useEffect(() => {
+    const chatArea = document.getElementById("chat-scroll-area");
+    if (chatArea) {
+      chatArea.scrollTop = chatArea.scrollHeight;
+    }
+  }, [messages]);
+
   return (
     <div ref={panelRef} className="fixed left-6 top-24 bottom-32 w-80 z-40">
       <HolographicPanel
@@ -69,20 +77,20 @@ export default function MemoryPanel() {
         delay={0.3}
         className="h-full flex flex-col"
       >
-        <div ref={memoriesRef} className="flex-1 overflow-y-auto space-y-3">
+        <div ref={memoriesRef} className="flex-1 overflow-hidden flex flex-col space-y-3 min-h-0">
           {/* Recent conversation context */}
-          <div ref={contextRef} className="mb-4">
-            <div className="flex items-center gap-2 mb-2 text-text-secondary text-xs font-orbitron tracking-wider">
+          <div ref={contextRef} className="flex-1 flex flex-col min-h-0">
+            <div className="flex items-center gap-2 mb-2 text-text-secondary text-xs font-orbitron tracking-wider flex-shrink-0">
               <MessageSquare className="w-3 h-3" />
               CURRENT CONVERSATION
             </div>
-            <div className="space-y-2 max-h-48 overflow-y-auto">
+            <div className="space-y-2 overflow-y-auto scroll-smooth flex-1 min-h-0" id="chat-scroll-area">
               {messages.length === 0 ? (
                 <div className="bg-panel-glass/30 rounded-lg p-3 text-xs text-text-secondary/50 font-rajdhani border-l-2 border-reactor-core/30">
                   No messages yet. Say &quot;Hey JARVIS&quot; to start.
                 </div>
               ) : (
-                messages.slice(-5).map((msg, idx) => (
+                messages.slice(-20).map((msg, idx) => (
                   <div
                     key={msg.id}
                     className={`rounded-lg p-2 text-xs font-rajdhani border-l-2 ${
@@ -99,7 +107,9 @@ export default function MemoryPanel() {
                         {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                       </span>
                     </div>
-                    <p className="line-clamp-3 text-text-primary/90">{msg.content}</p>
+                    <p className={`text-text-primary/90 break-words whitespace-pre-wrap ${msg.role === "user" ? "line-clamp-3" : ""}`}>
+                      {msg.content}
+                    </p>
                   </div>
                 ))
               )}
@@ -107,7 +117,7 @@ export default function MemoryPanel() {
           </div>
 
           {/* Stored memories */}
-          <div className="space-y-2">
+          <div className="flex-shrink-0 max-h-[30%] overflow-y-auto space-y-2 mt-3 pt-3 border-t border-panel-border/30">
             <div className="flex items-center gap-2 mb-2 text-text-secondary text-xs font-orbitron tracking-wider">
               <Brain className="w-3 h-3" />
               STORED MEMORIES

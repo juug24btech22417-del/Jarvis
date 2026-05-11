@@ -223,6 +223,11 @@ export function useVoice() {
         const isFinal = lastResult.isFinal;
         const confidence = lastResult[0]?.confidence || 0;
 
+        // Barge-in on interim results too
+        if (currentStateRef.current === "listening" && transcript.trim().length > 0) {
+          window.dispatchEvent(new CustomEvent('jarvis-barge-in'));
+        }
+
         // Update last result time for watchdog
         lastResultTimeRef.current = Date.now();
 
@@ -459,80 +464,157 @@ export function useTextToSpeech() {
   const { isMuted } = useJarvisStore();
   const [isSpeaking, setIsSpeaking] = useState(false);
   const isSpeakingRef = useRef(false);
+  
+  // Streaming Refs
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const activeSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+  const wsRef = useRef<WebSocket | null>(null);
+  const nextStartTimeRef = useRef(0);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
 
-  // Simple speak function using browser's British English voice
-  const speak = useCallback((text: string) => {
-    if (typeof window === "undefined" || !window.speechSynthesis || isMuted) {
-      console.log("[TTS] Cannot speak - muted");
-      return;
-    }
+  // PCM Conversion (s16le to f32)
+  const pcm16ToFloat32 = (int16: Int16Array) => {
+    const out = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) out[i] = int16[i] / 32768;
+    return out;
+  };
 
-    // Cancel any ongoing speech
-    window.speechSynthesis.cancel();
-
-    console.log("[TTS] Speaking:", text.substring(0, 50) + "...");
-
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = "en-GB"; // British English
-    utterance.pitch = 0.9; // Slightly lower for deeper voice
-    utterance.rate = 0.9; // Slightly slower for clarity
-    utterance.volume = 1;
-
-    // Get available voices and find British English
-    const voices = window.speechSynthesis.getVoices();
-
-    // Prefer British English voices
-    const britishVoice = voices.find((v) =>
-      v.lang === "en-GB" || v.lang.includes("GB") || v.lang.includes("UK")
-    );
-
-    // Fallback to any English voice
-    const englishVoice = britishVoice || voices.find((v) => v.lang.startsWith("en"));
-
-    if (englishVoice) {
-      utterance.voice = englishVoice;
-      console.log("[TTS] Using voice:", englishVoice.name, `(${englishVoice.lang})`);
-    }
-
-    // Set refs to track state without causing re-renders
-    isSpeakingRef.current = true;
-    setIsSpeaking(true);
-
-    utterance.onend = () => {
-      console.log("[TTS] Speech ended");
-      isSpeakingRef.current = false;
-      setIsSpeaking(false);
-      utteranceRef.current = null;
-    };
-
-    utterance.onerror = (e) => {
-      console.error("[TTS] Speech error:", e.error);
-      if (e.error !== "canceled" && e.error !== "interrupted") {
-        isSpeakingRef.current = false;
-        setIsSpeaking(false);
+  const stopStreaming = useCallback(() => {
+    activeSourcesRef.current.forEach(src => {
+      try { src.stop(0); } catch {}
+    });
+    activeSourcesRef.current.clear();
+    
+    if (wsRef.current) {
+      if (wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: "cancel" }));
       }
-    };
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    
+    setIsSpeaking(false);
+    isSpeakingRef.current = false;
+  }, []);
 
-    utteranceRef.current = utterance;
+  const speakBrowser = useCallback((text: string) => {
+    if (typeof window === "undefined" || !window.speechSynthesis || isMuted) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = "en-GB";
+    utterance.pitch = 0.9;
+    utterance.rate = 0.9;
+    const voices = window.speechSynthesis.getVoices();
+    const voice = voices.find(v => v.lang.includes("GB")) || voices.find(v => v.lang.startsWith("en"));
+    if (voice) utterance.voice = voice;
+    
+    setIsSpeaking(true);
+    isSpeakingRef.current = true;
+    utterance.onend = () => {
+      setIsSpeaking(false);
+      isSpeakingRef.current = false;
+    };
+    utterance.onerror = () => {
+      setIsSpeaking(false);
+      isSpeakingRef.current = false;
+    };
     window.speechSynthesis.speak(utterance);
   }, [isMuted]);
 
-  const stop = useCallback(() => {
-    if (typeof window !== "undefined" && window.speechSynthesis) {
-      window.speechSynthesis.cancel();
+  const speak = useCallback((text: string) => {
+    if (isMuted) return;
+
+    // Barge-in: Stop any current speech
+    stopStreaming();
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+
+    // Attempt Streaming TTS via Local Bridge
+    try {
+      if (!audioCtxRef.current) {
+        audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+      const ctx = audioCtxRef.current;
+      if (ctx.state === "suspended") ctx.resume();
+      
+      nextStartTimeRef.current = ctx.currentTime + 0.05;
+      
+      console.log("[TTS] Attempting to connect to bridge at ws://127.0.0.1:8787...");
+      const ws = new WebSocket("ws://127.0.0.1:8787");
+      wsRef.current = ws;
+      ws.binaryType = "arraybuffer";
+
+      ws.onopen = () => {
+        console.log("[TTS] 🟢 Streaming bridge connected!");
+        setIsSpeaking(true);
+        isSpeakingRef.current = true;
+        ws.send(JSON.stringify({ type: "speak", text }));
+      };
+
+      ws.onmessage = (ev) => {
+        if (typeof ev.data === "string") {
+          console.log("[TTS] Received control message:", ev.data);
+          return;
+        }
+
+        console.log("[TTS] Received audio binary, size:", ev.data.byteLength);
+        const pcm = new Int16Array(ev.data);
+        const floats = pcm16ToFloat32(pcm);
+        const sampleRate = 24000;
+        
+        const audioBuffer = ctx.createBuffer(1, floats.length, sampleRate);
+        audioBuffer.copyToChannel(floats, 0);
+
+        const src = ctx.createBufferSource();
+        src.buffer = audioBuffer;
+        src.connect(ctx.destination);
+
+        activeSourcesRef.current.add(src);
+        src.onended = () => {
+          activeSourcesRef.current.delete(src);
+          if (activeSourcesRef.current.size === 0 && (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN)) {
+            setIsSpeaking(false);
+            isSpeakingRef.current = false;
+          }
+        };
+
+        const now = ctx.currentTime;
+        if (nextStartTimeRef.current < now) nextStartTimeRef.current = now + 0.01;
+        src.start(nextStartTimeRef.current);
+        nextStartTimeRef.current += audioBuffer.duration;
+      };
+
+      ws.onerror = () => {
+        console.warn("[TTS] Stream bridge unreachable. Falling back to browser TTS.");
+        speakBrowser(text);
+      };
+
+      ws.onclose = () => {
+        wsRef.current = null;
+      };
+    } catch (e) {
+      console.error("[TTS] Streaming setup failed:", e);
+      speakBrowser(text);
     }
-    isSpeakingRef.current = false;
-    setIsSpeaking(false);
-  }, []);
+  }, [isMuted, stopStreaming, speakBrowser]);
+
+  const stop = useCallback(() => {
+    stopStreaming();
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+  }, [stopStreaming]);
 
   const stopSpeaking = useCallback(() => {
-    if (typeof window !== "undefined" && window.speechSynthesis) {
-      window.speechSynthesis.cancel();
-    }
-    isSpeakingRef.current = false;
-    setIsSpeaking(false);
-  }, []);
+    stop();
+  }, [stop]);
+
+  // Listen for barge-in events to stop speaking
+  useEffect(() => {
+    const handleBargeIn = () => {
+      console.log("[TTS] Barge-in detected, stopping audio...");
+      stop();
+    };
+    window.addEventListener('jarvis-barge-in', handleBargeIn);
+    return () => window.removeEventListener('jarvis-barge-in', handleBargeIn);
+  }, [stop]);
 
   return { speak, stop, stopSpeaking, isSpeaking };
 }

@@ -421,7 +421,7 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
     // Search Google - skip if user mentioned youtube, has file extension, or is a Playwright automation command
     const searchMatch = lower.match(/(?:search|google|look up|find)\s+(?:for\s+)?(.+)/);
     const hasFileExtension = /\.(pdf|doc|docx|txt|xlsx|ppt|pptx|jpg|png|mp4|zip)\b/i.test(lower);
-    const isAmazonPriceCheck = /(?:price of|find the price of|price on)\s+.+?\s+on\s+amazon/i.test(lower);
+    const isAmazonPriceCheck = /(?:price of|find the price of|price on|buy|shop for)\s+.+?\s+on\s+amazon/i.test(lower);
     const isFlightSearch = /flights?\s+(?:from\s+)?.+\s+(?:to|from|-)\s+/i.test(lower);
     const isFoodOrder = /(?:order|find|get)\s+.+\s+(?:on|from)\s+(?:zomato|swiggy)/i.test(lower);
     const isWhatsApp = /whatsapp/i.test(lower);
@@ -2509,6 +2509,180 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
           return null;
         }
 
+        case "amazon_buy": {
+          const product = parsed.params.product as string;
+          if (product) {
+            const searchUrl = `https://www.amazon.in/s?k=${encodeURIComponent(product)}`;
+            try {
+              fetch("/api/playwright", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "buy", url: searchUrl, selector: product }),
+              }).catch(err => console.error("Playwright trigger failed:", err));
+              return `Initializing Amazon automation for "${product}", Boss. I'll search for the best match and guide you through the process.`;
+            } catch {
+              return "I couldn't initialize the shopping automation, Boss.";
+            }
+          }
+          return null;
+        }
+
+        case "flight_search": {
+          const { from, to, date } = parsed.params;
+          if (from && to) {
+            fetch("/api/playwright", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "flights", from, to, date }),
+            }).catch(e => console.error("Flight search failed:", e));
+            return `Searching for flights from ${from} to ${to}, Boss. Stand by.`;
+          }
+          return "I need a departure and destination city to search for flights, Boss.";
+        }
+
+        case "food_order": {
+          const { query, platform } = parsed.params;
+          if (query) {
+            fetch("/api/playwright", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "food", query, platform: platform || "zomato" }),
+            }).catch(e => console.error("Food search failed:", e));
+            return `Searching for "${query}" on ${platform || "Zomato"}, Boss. Getting your menu ready.`;
+          }
+          return "What would you like to eat, Boss?";
+        }
+
+        case "whatsapp_send": {
+          const { contact, message } = parsed.params;
+          if (contact) {
+            fetch("/api/playwright", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "whatsapp", contact, message: message || "Hey!" }),
+            }).catch(e => console.error("WhatsApp failed:", e));
+            return `Opening WhatsApp to message "${contact}", Boss.`;
+          }
+          return "Who should I message on WhatsApp, Boss?";
+        }
+
+        case "price_compare": {
+          const { product } = parsed.params;
+          if (product) {
+            fetch("/api/playwright", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "compare", product }),
+            }).catch(e => console.error("Price compare failed:", e));
+            return `Comparing prices for "${product}" across major stores, Boss.`;
+          }
+          return "Which product should I compare prices for, Boss?";
+        }
+
+        case "play_youtube": {
+          const { query } = parsed.params;
+          if (query) {
+            fetch("/api/playwright", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "youtube", query }),
+            }).catch(e => console.error("YouTube failed:", e));
+            return `Searching for "${query}" on YouTube, Boss. Music to my ears.`;
+          }
+          return "What should I play on YouTube, Boss?";
+        }
+
+        case "get_directions": {
+          const { from, to } = parsed.params;
+          if (from && to) {
+            fetch("/api/playwright", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "directions", from, to }),
+            }).catch(e => console.error("Directions failed:", e));
+            return `Getting directions from ${from} to ${to}, Boss. Navigating now.`;
+          }
+          return "I need a start and end location for directions, Boss.";
+        }
+
+        case "job_search": {
+          const { query, location } = parsed.params;
+          if (query) {
+            fetch("/api/playwright", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "jobs", query, location: location || "India" }),
+            }).catch(e => console.error("Job search failed:", e));
+            return `Searching for "${query}" jobs in ${location || "India"}, Boss. Hope you get the offer.`;
+          }
+          return "What kind of jobs should I search for, Boss?";
+        }
+
+        case "compose_email": {
+          const { to, subject, body } = parsed.params;
+          if (to) {
+            fetch("/api/playwright", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "email", to, subject: subject || "No Subject", body: body || "" }),
+            }).catch(e => console.error("Email failed:", e));
+            return `Opening Gmail to compose to ${to}, Boss. Professionalism is key.`;
+          }
+          return "Who are we emailing, Boss?";
+        }
+
+        case "book_movies": {
+          const { query, city } = parsed.params;
+          if (query) {
+            fetch("/api/playwright", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "movies", query, city: city || "Mumbai" }),
+            }).catch(e => console.error("Movie booking failed:", e));
+            return `Finding "${query}" tickets in ${city || "Mumbai"}, Boss. Popcorn ready.`;
+          }
+          return "Which movie are we booking tickets for, Boss?";
+        }
+
+        case "track_package": {
+          const { trackingId, courier } = parsed.params;
+          if (trackingId) {
+            fetch("/api/playwright", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "track", trackingId, courier: courier || "auto" }),
+            }).catch(e => console.error("Tracking failed:", e));
+            return `Tracking package "${trackingId}", Boss. I'll keep an eye on the courier.`;
+          }
+          return "What's the tracking ID, Boss?";
+        }
+
+        case "web_scrape": {
+          const { url, whatToFind } = parsed.params;
+          if (url) {
+            fetch("/api/playwright", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "scrape", url, whatToFind: whatToFind || "general info" }),
+            }).catch(e => console.error("Scrape failed:", e));
+            return `Scraping "${url}" for you, Boss. Extracting the data now.`;
+          }
+          return "I need a URL to scrape, Boss.";
+        }
+
+        case "fill_form": {
+          const { url, fields } = parsed.params;
+          if (url) {
+            fetch("/api/playwright", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "fill", url, fields: fields || {} }),
+            }).catch(e => console.error("Form fill failed:", e));
+            return `Opening ${url} to fill the form for you, Boss.`;
+          }
+          return "I need a URL to fill the form, Boss.";
+        }
+
         case "search_web": {
           const query = parsed.params.query as string;
           if (query) {
@@ -3034,12 +3208,19 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
 
               try {
                 const parsed = JSON.parse(data);
-                // Handle different event types from Claude
-                if (parsed.type === "content_block_delta" && parsed.delta?.text) {
+                
+                // OpenAI / DeepSeek / NVIDIA NIM format
+                if (parsed.choices?.[0]?.delta?.content) {
+                  fullResponse += parsed.choices[0].delta.content;
+                  setStreamingContent(fullResponse);
+                }
+                // Claude format: content_block_delta
+                else if (parsed.type === "content_block_delta" && parsed.delta?.text) {
                   fullResponse += parsed.delta.text;
                   setStreamingContent(fullResponse);
-                } else if (parsed.type === "message_delta" && parsed.delta?.content) {
-                  // Alternative format
+                }
+                // Claude alternative format
+                else if (parsed.type === "message_delta" && parsed.delta?.content) {
                   fullResponse += parsed.delta.content;
                   setStreamingContent(fullResponse);
                 }

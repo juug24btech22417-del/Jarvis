@@ -75,8 +75,10 @@ export default function HolographicPanel({
         </div>
       )}
 
-      {/* Content */}
-      <div className="relative z-10 p-4">{children}</div>
+      {/* Content wrapper - flex-1 to fill space, overflow-hidden to contain children */}
+      <div className="relative z-10 p-4 flex-1 flex flex-col overflow-hidden min-h-0">
+        {children}
+      </div>
     </motion.div>
   );
 }

@@ -17,13 +17,13 @@ async function applyPersonalityWrapper(factualResponse: string, apiKey: string):
         "Authorization": `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: "meta/llama-3.1-8b-instruct",
+        model: "deepseek-ai/deepseek-v4-flash",
         messages: [
           { role: "system", content: PERSONALITY_WRAPPER_PROMPT },
           { role: "user", content: factualResponse },
         ],
-        temperature: 0.7,
-        max_tokens: 256,
+        temperature: 0.75,
+        max_tokens: 512,
       }),
     });
 
@@ -866,7 +866,7 @@ export async function POST(request: Request) {
             "Authorization": `Bearer ${nvidiaApiKey}`,
           },
           body: JSON.stringify({
-            model: process.env.NVIDIA_MODEL || "meta/llama-3.3-70b-instruct",
+            model: process.env.NVIDIA_MODEL || "deepseek-ai/deepseek-v4-flash",
             messages: [
               { role: "system", content: enhancedSystemPrompt },
               ...messages.map((msg: { role: string; content: string }) => ({
@@ -874,8 +874,8 @@ export async function POST(request: Request) {
                 content: msg.content,
               }))
             ],
-            max_tokens: 1024,
-            temperature: 0.7,
+            max_tokens: 768,
+            temperature: 0.75,
             stream: true,
           }),
         });
