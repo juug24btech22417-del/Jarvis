@@ -1,0 +1,124 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// User memories - facts about the user
+model Memory {
+  id        String   @id @default(cuid())
+  content   String
+  category  String   // user_fact, preference, context
+  source    String   // conversation_id or "explicit"
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([category])
+}
+
+// Conversations with JARVIS
+model Conversation {
+  id        String    @id @default(cuid())
+  messages  Message[]
+  summary   String?   // AI-generated summary
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  role           String       // user, assistant
+  content        String
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  createdAt      DateTime     @default(now())
+}
+
+// Tasks and reminders
+model Task {
+  id          String    @id @default(cuid())
+  title       String
+  description String?
+  priority    String    // critical, high, normal, someday
+  category    String?   // work, personal, health, etc.
+  dueDate     DateTime?
+  completed   Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+// Notes with auto-tags
+model Note {
+  id        String   @id @default(cuid())
+  title     String
+  content   String
+  tags      String?  // comma-separated tags
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tags])
+}
+
+// Skill learning plans
+model SkillPlan {
+  id          String   @id @default(cuid())
+  userId      String   @default("default")
+  topic       String
+  difficulty  String
+  duration    Int      // number of days
+  plan        String   // JSON string of the learning plan
+  progress    Int      @default(0) // percentage complete
+  currentDay  Int      @default(1)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([userId])
+}
+
+// Quiz results
+model QuizResult {
+  id        String   @id @default(cuid())
+  userId    String   @default("default")
+  planId    String?
+  topic     String
+  score     Int      // percentage
+  answers   String   // JSON of answers
+  createdAt DateTime @default(now())
+}
+
+// Knowledge Graph - Entities (people, companies, projects, concepts)
+model Entity {
+  id          String       @id @default(cuid())
+  name        String
+  type        String       // PERSON, COMPANY, PROJECT, CONCEPT, LOCATION, SKILL, PREFERENCE, EVENT
+  description String?
+  metadata    String?      // JSON string for encrypted data
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  relations   Relationship[] @relation("sourceEntity")
+  relatedTo   Relationship[] @relation("targetEntity")
+
+  @@index([type])
+  @@index([name])
+}
+
+// Knowledge Graph - Relationships between entities
+model Relationship {
+  id         String   @id @default(cuid())
+  sourceId   String
+  source     Entity   @relation("sourceEntity", fields: [sourceId], references: [id], onDelete: Cascade)
+  targetId   String
+  target     Entity   @relation("targetEntity", fields: [targetId], references: [id], onDelete: Cascade)
+  type       String   // works_at, client_of, knows_about, prefers, friend_of, etc.
+  strength   Float    @default(1.0)  // confidence/relevance score
+  metadata   String?  // JSON string for encrypted data
+  createdAt  DateTime @default(now())
+
+  @@index([sourceId])
+  @@index([targetId])
+  @@index([type])
+}

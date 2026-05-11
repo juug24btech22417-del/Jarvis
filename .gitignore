@@ -1,36 +1,48 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+# Dependency directories
+node_modules/
+jarvis/node_modules/
 
-# dependencies
-/node_modules
-/.pnp
-.pnp.js
-.yarn/install-state.gz
+# Next.js build output
+jarvis/.next/
+jarvis/out/
 
-# testing
-/coverage
+# Environment variables (CRITICAL: Never push these)
+.env
+.env.local
+jarvis/.env
+jarvis/.env.local
+jarvis/.env.production
 
-# next.js
-/.next/
-/out/
+# Database
+*.db
+*.db-journal
+jarvis/dev.db
 
-# production
-/build
+# WhatsApp/Browser sessions
+.whatsapp-session-server/
+.wwebjs_cache/
+.wwebjs_auth/
+jarvis/.whatsapp-session-v3/
+jarvis/.wwebjs_auth/
+jarvis/.wwebjs_cache/
+.claude/
 
-# misc
+# IDE and System files
+.vscode/
+.idea/
 .DS_Store
-*.pem
+desktop.ini
+Thumbs.db
 
-# debug
+# Build logs and traces
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+jarvis/tsconfig.tsbuildinfo
 
-# local env files
-.env*.local
-
-# vercel
-.vercel
-
-# typescript
-*.tsbuildinfo
-next-env.d.ts
+# Media and Screenshots
+*.png
+*.jpg
+*.jpeg
+*.webp
+!jarvis/public/

@@ -1,0 +1,33 @@
+Visual:
+
+Pure black background, fullscreen
+200–300 small glowing particles forming a nebula/galaxy cluster in the center of the screen
+Particles are cyan and electric blue (#00FFFF, #00BFFF, #FFFFFF for the hot core), with a soft glow/bloom effect
+Particles have slight random drift at all times — like floating dust in zero gravity
+
+States & Animations:
+IDLE state:
+
+Particles float loosely and slowly around the center in a soft cloud shape
+Subtle random movement, low velocity, dim glow
+
+ACTIVATED state (triggered by clap / loud sound):
+
+Detect a sharp audio transient via the microphone (Web Audio API or pyaudio)
+On clap detection: particles rapidly collapse inward toward the center forming a tight bright core (implosion)
+Then immediately burst outward in a radial shockwave/starburst explosion
+Bright white-cyan flash at the center during burst
+Particles then settle back into the nebula cloud shape
+
+SPEAKING state:
+
+Particles pulse outward rhythmically, amplitude tied to the TTS audio output level
+Use Web Audio API analyser node on the speech synthesis output to drive particle velocity
+
+Trigger:
+
+Use SpeechSynthesis + SpeechRecognition (Web Speech API) for voice
+Clap = two loud transients within 0.8 seconds activates Jarvis
+On activation, Jarvis says "Yes?" and enters listening mode
+
+Tech: Single index.html file, vanilla JS + HTML5 Canvas. No external libraries needed. Make it look like an Iron Man-style JARVIS ambient display.

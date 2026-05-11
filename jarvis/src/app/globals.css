@@ -1,0 +1,526 @@
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700;800;900&family=Rajdhani:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* === ARC BLUE (Default) === */
+  --reactor-core: #00D4FF;
+  --reactor-glow: #7DF9FF;
+  --accent-color: #7DF9FF;
+
+  --bg-gradient-from: #020810;
+  --bg-gradient-via: #051020;
+  --bg-gradient-to: #020810;
+
+  --panel-glass: rgba(0, 180, 255, 0.06);
+  --panel-border: rgba(0, 212, 255, 0.3);
+  --panel-border-glow: rgba(0, 212, 255, 0.1);
+  --panel-bracket: #00D4FF;
+
+  --text-primary: #E8F4FF;
+  --text-secondary: #7EB8D4;
+
+  --heading-glow: 0 0 20px rgba(0, 212, 255, 0.5), 0 0 40px rgba(0, 212, 255, 0.3);
+  --text-glow: 0 0 10px rgba(0, 212, 255, 0.3);
+
+  --status-online: #00FF9D;
+  --status-offline: #FF2D55;
+  --status-warning: #FF6B2B;
+  --status-error: #FF2D55;
+
+  --theme-font: 'Rajdhani', sans-serif;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-gradient-from);
+  color: var(--text-primary);
+  font-family: var(--theme-font);
+  transition: all 0.5s ease;
+}
+
+body {
+  background: radial-gradient(ellipse at center, var(--bg-gradient-via) 0%, var(--bg-gradient-from) 100%) !important;
+}
+
+/* Force text colors */
+h1, h2, h3, h4, h5, h6, p, span, div {
+  color: var(--text-primary);
+}
+
+.text-secondary {
+  color: var(--text-secondary) !important;
+}
+
+/* === HOLOGRAPHIC PANELS === */
+.holographic-panel {
+  background: var(--panel-glass);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  box-shadow:
+    0 0 20px var(--panel-border-glow),
+    inset 0 0 20px rgba(0, 0, 0, 0.3);
+  transition: all 0.5s ease;
+}
+
+/* === SCAN LINES === */
+.scan-lines {
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    var(--panel-bracket)08 2px,
+    var(--panel-bracket)08 4px
+  );
+  pointer-events: none;
+  transition: background 0.5s ease;
+}
+
+/* === CORNER BRACKETS === */
+.corner-bracket::before,
+.corner-bracket::after {
+  content: '';
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border: 1px solid var(--panel-bracket);
+  transition: border-color 0.5s ease;
+}
+
+.corner-bracket::before {
+  top: -1px;
+  left: -1px;
+  border-right: none;
+  border-bottom: none;
+}
+
+.corner-bracket::after {
+  bottom: -1px;
+  right: -1px;
+  border-left: none;
+  border-top: none;
+}
+
+/* === TYPOGRAPHY === */
+.glow-text {
+  text-shadow: var(--text-glow);
+  transition: text-shadow 0.5s ease;
+}
+
+.glow-heading {
+  text-shadow: var(--heading-glow);
+  transition: text-shadow 0.5s ease;
+}
+
+.glow-border {
+  box-shadow:
+    0 0 10px var(--panel-border-glow),
+    inset 0 0 20px rgba(0, 0, 0, 0.2);
+  transition: box-shadow 0.5s ease;
+}
+
+/* === REACTOR PULSE ANIMATION === */
+@keyframes reactor-pulse {
+  0%, 100% {
+    box-shadow:
+      0 0 20px var(--reactor-glow)66,
+      0 0 40px var(--reactor-glow)44,
+      0 0 60px var(--reactor-glow)22;
+  }
+  50% {
+    box-shadow:
+      0 0 30px var(--reactor-glow)88,
+      0 0 60px var(--reactor-glow)66,
+      0 0 90px var(--reactor-glow)44;
+  }
+}
+
+.reactor-glow {
+  animation: reactor-pulse 3s ease-in-out infinite;
+}
+
+/* === SCROLLBARS === */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.3);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--panel-bracket)55;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--panel-bracket)88;
+}
+
+::-webkit-scrollbar-thumb,
+::-webkit-scrollbar-thumb:hover {
+  transition: background 0.3s ease;
+}
+
+/* === SELECTION === */
+::selection {
+  background: var(--reactor-core)33;
+  color: #fff;
+}
+
+/* === FOCUS STYLES === */
+*:focus {
+  outline: none;
+}
+
+*:focus-visible {
+  outline: 1px solid var(--reactor-core);
+  outline-offset: 2px;
+}
+
+/* === TYPEWRITER === */
+.typewriter-cursor::after {
+  content: '|';
+  animation: blink 1s step-end infinite;
+  color: var(--reactor-core);
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+/* === STATUS INDICATORS === */
+.status-online { color: var(--status-online); }
+.status-offline { color: var(--status-offline); }
+.status-warning { color: var(--status-warning); }
+.status-error { color: var(--status-error); }
+
+/* ============ BATMAN THEME - DARK & MOODY ============ */
+html[data-theme="batman"] {
+  --reactor-core: #FFD700;
+  --reactor-glow: #FFD700;
+  --accent-color: #FFA500;
+
+  --bg-gradient-from: #050505;
+  --bg-gradient-via: #0a0a0a;
+  --bg-gradient-to: #050505;
+
+  --panel-glass: rgba(255, 215, 0, 0.04);
+  --panel-border: rgba(255, 215, 0, 0.2);
+  --panel-border-glow: rgba(255, 215, 0, 0.05);
+  --panel-bracket: #FFD700;
+
+  --text-primary: #FFD700;
+  --text-secondary: #8B7355;
+
+  --heading-glow: 0 0 25px rgba(255, 215, 0, 0.4), 0 0 50px rgba(255, 215, 0, 0.2);
+  --text-glow: 0 0 8px rgba(255, 215, 0, 0.25);
+
+  --status-online: #9ACD32;
+  --status-offline: #FF4500;
+  --status-warning: #FFA500;
+  --status-error: #FF4500;
+
+  --theme-font: 'Orbitron', sans-serif;
+}
+
+html[data-theme="batman"] body {
+  background: radial-gradient(ellipse at center, #0a0a0a 0%, #050505 70%, #020202 100%) !important;
+}
+
+html[data-theme="batman"] {
+  background: #050505 !important;
+}
+
+html[data-theme="batman"] .holographic-panel {
+  background: rgba(20, 20, 20, 0.7);
+  border-color: rgba(255, 215, 0, 0.15);
+  box-shadow: 0 0 15px rgba(0, 0, 0, 0.5), inset 0 0 30px rgba(0, 0, 0, 0.5);
+}
+
+html[data-theme="batman"] .scan-lines {
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(255, 215, 0, 0.015) 2px,
+    rgba(255, 215, 0, 0.015) 4px
+  );
+}
+
+/* Force Batman gold text - ALL TEXT ELEMENTS */
+html[data-theme="batman"] *,
+html[data-theme="batman"] *::before,
+html[data-theme="batman"] *::after {
+  color: #FFD700 !important;
+}
+
+/* Except status colors */
+html[data-theme="batman"] .status-online {
+  color: #9ACD32 !important;
+}
+html[data-theme="batman"] .status-offline,
+html[data-theme="batman"] .status-error {
+  color: #FF4500 !important;
+}
+html[data-theme="batman"] .status-warning {
+  color: #FFA500 !important;
+}
+
+/* ============ STEALTH THEME - MILITARY GREEN ============ */
+html[data-theme="stealth"] {
+  --reactor-core: #88CC00;
+  --reactor-glow: #88CC00;
+  --accent-color: #AADD55;
+
+  --bg-gradient-from: #020802;
+  --bg-gradient-via: #051005;
+  --bg-gradient-to: #020802;
+
+  --panel-glass: rgba(136, 204, 0, 0.03);
+  --panel-border: rgba(136, 204, 0, 0.15);
+  --panel-border-glow: rgba(136, 204, 0, 0.04);
+  --panel-bracket: #88CC00;
+
+  --text-primary: #AADD88;
+  --text-secondary: #668855;
+
+  --heading-glow: 0 0 15px rgba(136, 204, 0, 0.25);
+  --text-glow: none;
+
+  --status-online: #88CC00;
+  --status-offline: #CC3300;
+  --status-warning: #CC9900;
+  --status-error: #CC3300;
+
+  --theme-font: 'Rajdhani', sans-serif;
+}
+
+html[data-theme="stealth"] body {
+  background: radial-gradient(ellipse at center, #051005 0%, #020802 100%);
+}
+
+html[data-theme="stealth"] .holographic-panel {
+  background: rgba(136, 204, 0, 0.02);
+  border-color: rgba(136, 204, 0, 0.12);
+}
+
+/* ============ IRON MAN THEME - RED & GOLD ============ */
+html[data-theme="ironman"] {
+  --reactor-core: #FF3131;
+  --reactor-glow: #FFD700;
+  --accent-color: #FF6B6B;
+
+  --bg-gradient-from: #0a0000;
+  --bg-gradient-via: #1a0000;
+  --bg-gradient-to: #0a0000;
+
+  --panel-glass: rgba(255, 49, 49, 0.1);
+  --panel-border: rgba(255, 49, 49, 0.45);
+  --panel-border-glow: rgba(255, 49, 49, 0.2);
+  --panel-bracket: #FFD700;
+
+  --text-primary: #FFD700;
+  --text-secondary: #FFA07A;
+
+  --heading-glow: 0 0 25px rgba(255, 215, 0, 0.6), 0 0 50px rgba(255, 49, 49, 0.4);
+  --text-glow: 0 0 10px rgba(255, 215, 0, 0.35);
+
+  --status-online: #FFD700;
+  --status-offline: #FF3131;
+  --status-warning: #FFA500;
+  --status-error: #FF3131;
+
+  --theme-font: 'Orbitron', sans-serif;
+}
+
+html[data-theme="ironman"] body {
+  background: radial-gradient(ellipse at center, #3a0000 0%, #1a0000 50%, #0a0000 100%) !important;
+}
+
+html[data-theme="ironman"] {
+  background: #0a0000 !important;
+}
+
+html[data-theme="ironman"] .holographic-panel {
+  background: rgba(60, 0, 0, 0.6);
+  border-color: rgba(255, 49, 49, 0.4);
+  box-shadow:
+    0 0 25px rgba(255, 49, 49, 0.2),
+    inset 0 0 20px rgba(0, 0, 0, 0.4);
+}
+
+html[data-theme="ironman"] .scan-lines {
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(255, 49, 49, 0.05) 2px,
+    rgba(255, 49, 49, 0.05) 4px
+  );
+}
+
+/* Force Iron Man gold text - ALL TEXT ELEMENTS */
+html[data-theme="ironman"] *,
+html[data-theme="ironman"] *::before,
+html[data-theme="ironman"] *::after {
+  color: #FFD700 !important;
+}
+
+/* Except for specific elements that need different colors */
+html[data-theme="ironman"] .status-online {
+  color: #00FF00 !important;
+}
+html[data-theme="ironman"] .status-offline,
+html[data-theme="ironman"] .status-error {
+  color: #FF3131 !important;
+}
+html[data-theme="ironman"] .status-warning {
+  color: #FFA500 !important;
+}
+
+html[data-theme="ironman"] .reactor-glow {
+  animation: ironman-pulse 2s ease-in-out infinite;
+}
+
+@keyframes ironman-pulse {
+  0%, 100% {
+    box-shadow:
+      0 0 25px rgba(255, 49, 49, 0.7),
+      0 0 50px rgba(255, 215, 0, 0.5),
+      0 0 75px rgba(255, 49, 49, 0.4);
+  }
+  50% {
+    box-shadow:
+      0 0 40px rgba(255, 49, 49, 0.9),
+      0 0 80px rgba(255, 215, 0, 0.7),
+      0 0 120px rgba(255, 49, 49, 0.6);
+  }
+}
+
+/* ============ CRIMSON THEME - BLOOD RED ============ */
+html[data-theme="crimson"] {
+  --reactor-core: #FF3131;
+  --reactor-glow: #FF6B6B;
+  --accent-color: #FF6B6B;
+
+  --bg-gradient-from: #0a0000;
+  --bg-gradient-via: #1a0000;
+  --bg-gradient-to: #0a0000;
+
+  --panel-glass: rgba(255, 49, 49, 0.08);
+  --panel-border: rgba(255, 49, 49, 0.4);
+  --panel-border-glow: rgba(255, 49, 49, 0.12);
+  --panel-bracket: #FF3131;
+
+  --text-primary: #FFD700;
+  --text-secondary: #FFA07A;
+
+  --heading-glow: 0 0 25px rgba(255, 49, 49, 0.6), 0 0 50px rgba(255, 49, 49, 0.3);
+  --text-glow: 0 0 12px rgba(255, 49, 49, 0.35);
+
+  --status-online: #32CD32;
+  --status-offline: #FF0000;
+  --status-warning: #FFA500;
+  --status-error: #FF0000;
+
+  --theme-font: 'Rajdhani', sans-serif;
+}
+
+html[data-theme="crimson"] body {
+  background: radial-gradient(ellipse at center, #2a0000 0%, #1a0000 100%);
+}
+
+html[data-theme="crimson"] .holographic-panel {
+  background: rgba(40, 0, 0, 0.5);
+  border-color: rgba(255, 49, 49, 0.35);
+}
+
+/* ============ QUANTUM THEME - PURPLE & CYAN ============ */
+html[data-theme="quantum"] {
+  --reactor-core: #BF00FF;
+  --reactor-glow: #00FFFF;
+  --accent-color: #00FFFF;
+
+  --bg-gradient-from: #05000a;
+  --bg-gradient-via: #0a001a;
+  --bg-gradient-to: #05000a;
+
+  --panel-glass: rgba(191, 0, 255, 0.1);
+  --panel-border: rgba(191, 0, 255, 0.45);
+  --panel-border-glow: rgba(0, 255, 255, 0.2);
+  --panel-bracket: #BF00FF;
+
+  --text-primary: #00FFFF;
+  --text-secondary: #DA70D6;
+
+  --heading-glow: 0 0 25px rgba(191, 0, 255, 0.6), 0 0 50px rgba(0, 255, 255, 0.4);
+  --text-glow: 0 0 12px rgba(0, 255, 255, 0.4);
+
+  --status-online: #00FF7F;
+  --status-offline: #FF1493;
+  --status-warning: #FFD700;
+  --status-error: #FF1493;
+
+  --theme-font: 'Orbitron', sans-serif;
+}
+
+html[data-theme="quantum"] body {
+  background: radial-gradient(ellipse at center, #1a0033 0%, #0a001a 60%, #05000a 100%);
+}
+
+html[data-theme="quantum"] .holographic-panel {
+  background: rgba(30, 0, 50, 0.5);
+  border-color: rgba(191, 0, 255, 0.4);
+  box-shadow:
+    0 0 25px rgba(0, 255, 255, 0.2),
+    inset 0 0 20px rgba(191, 0, 255, 0.1);
+}
+
+html[data-theme="quantum"] .scan-lines {
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(191, 0, 255, 0.06) 2px,
+    rgba(0, 255, 255, 0.04) 4px
+  );
+}
+
+html[data-theme="quantum"] .reactor-glow {
+  animation: quantum-pulse 2.5s ease-in-out infinite;
+}
+
+@keyframes quantum-pulse {
+  0%, 100% {
+    box-shadow:
+      0 0 25px rgba(191, 0, 255, 0.6),
+      0 0 50px rgba(0, 255, 255, 0.4),
+      0 0 75px rgba(191, 0, 255, 0.3);
+  }
+  50% {
+    box-shadow:
+      0 0 40px rgba(191, 0, 255, 0.8),
+      0 0 80px rgba(0, 255, 255, 0.6),
+      0 0 120px rgba(191, 0, 255, 0.5);
+  }
+}
+
+/* Utility classes */
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
