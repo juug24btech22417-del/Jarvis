@@ -59,6 +59,8 @@ interface JarvisStore {
   // Voice
   isListening: boolean;
   setIsListening: (listening: boolean) => void;
+  alwaysListening: boolean;
+  setAlwaysListening: (listening: boolean) => void;
   isMuted: boolean;
   setIsMuted: (muted: boolean) => void;
   voiceLevel: number;
@@ -138,6 +140,8 @@ export const useJarvisStore = create<JarvisStore>((set) => ({
   // Voice
   isListening: false,
   setIsListening: (isListening) => set({ isListening }),
+  alwaysListening: true,
+  setAlwaysListening: (alwaysListening) => set({ alwaysListening }),
   isMuted: false,
   setIsMuted: (isMuted) => set({ isMuted }),
   voiceLevel: 0,

@@ -148,8 +148,12 @@ export function useVoice() {
   const watchdogIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const manualActivationRef = useRef(false);
   const lastToggleTimeRef = useRef<number>(0);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
 
-  const { setState, state, isMuted, setIsListening: setStoreIsListening } = useJarvisStore();
+  const { state, isMuted, alwaysListening, setState, setVoiceLevel, setIsListening: setStoreIsListening } = useJarvisStore();
 
   // Keep ref in sync
   useEffect(() => {
@@ -205,15 +209,24 @@ export function useVoice() {
         setIsListeningLocal(false);
         isStartingRef.current = false;
 
-        // Clear any pending restart
-        if (restartTimeoutRef.current) {
-          clearTimeout(restartTimeoutRef.current);
-          restartTimeoutRef.current = null;
+        // AUTO-RESTART for "Always Listening" luxury mode
+        if (alwaysListening && !isMuted && state !== "listening") {
+          console.log("[Voice] Auto-restarting background listener...");
+          if (restartTimeoutRef.current) clearTimeout(restartTimeoutRef.current);
+          restartTimeoutRef.current = setTimeout(() => {
+            try {
+              if (recognitionRef.current && !isStartingRef.current) {
+                isStartingRef.current = true;
+                recognitionRef.current.start();
+              }
+            } catch (e) {
+              console.error("[Voice] Auto-restart failed:", e);
+              isStartingRef.current = false;
+            }
+          }, 300); // Tiny delay to let the OS release the mic
+        } else {
+          console.log("[Voice] Recognition stopped - auto-restart disabled or in listening mode");
         }
-
-        // DO NOT auto-restart - only start when explicitly triggered by user or wake word
-        // This prevents the mic from flickering on/off rapidly
-        console.log("[Voice] Recognition stopped - waiting for explicit trigger");
       };
 
       recognition.onresult = (event: SpeechRecognitionEvent) => {
@@ -316,37 +329,82 @@ export function useVoice() {
 
       recognitionRef.current = recognition;
       console.log("[Voice] Recognition instance stored in ref");
-
-      // Start recognition for wake word detection
-      // Mic must be ON to detect "hey jarvis" even when in other apps
-      console.log("[Voice] Starting wake word detection...");
-      try {
-        isStartingRef.current = true;
-        recognition.start();
-      } catch (e) {
-        console.error("[Voice] Failed to start:", e);
-        isStartingRef.current = false;
-      }
     } catch (err) {
       console.error("[Voice] Error creating recognition:", err);
       setInitError(`Error creating: ${err}`);
     }
 
-    // WATCHDOG REMOVED - was causing mic flickering
-    // Recognition will be started explicitly when needed
-
-    return () => {
-      console.log("[Voice] Cleanup - stopping recognition");
-      if (restartTimeoutRef.current) {
-        clearTimeout(restartTimeoutRef.current);
-      }
+    // Audio Level Analysis for "Luxury" Visuals
+    const startAudioAnalysis = async () => {
       try {
-        recognitionRef.current?.abort();
-      } catch {
-        // Ignore
+        if (!streamRef.current) {
+          streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+        }
+        
+        if (!audioContextRef.current) {
+          audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        }
+        
+        const ctx = audioContextRef.current;
+        if (ctx.state === "suspended") await ctx.resume();
+        
+        const source = ctx.createMediaStreamSource(streamRef.current);
+        analyserRef.current = ctx.createAnalyser();
+        analyserRef.current.fftSize = 256;
+        source.connect(analyserRef.current);
+        
+        const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
+        
+        const updateLevel = () => {
+          if (!analyserRef.current) return;
+          analyserRef.current.getByteFrequencyData(dataArray);
+          
+          // Calculate average volume
+          let sum = 0;
+          for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
+          const average = sum / dataArray.length;
+          
+          // Boost and normalize for visual effect
+          const level = Math.min(1, (average / 128) * 1.5);
+          setVoiceLevel(level);
+          
+          animationFrameRef.current = requestAnimationFrame(updateLevel);
+        };
+        
+        updateLevel();
+      } catch (e) {
+        console.error("[Voice] Audio analysis failed:", e);
       }
     };
-  }, [checkWakeWord, isMuted, setState]);
+
+    if (alwaysListening && !isMuted) {
+      startAudioAnalysis();
+      
+      console.log("[Voice] Starting Always-On background listener...");
+      try {
+        const rec = recognitionRef.current;
+        if (rec && !isStartingRef.current) {
+          isStartingRef.current = true;
+          rec.start();
+        }
+      } catch (e) {
+        console.error("[Voice] Failed to start background listener:", e);
+        isStartingRef.current = false;
+      }
+    }
+
+    return () => {
+      console.log("[Voice] Cleanup - stopping recognition and analysis");
+      if (restartTimeoutRef.current) clearTimeout(restartTimeoutRef.current);
+      if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+      
+      try {
+        recognitionRef.current?.abort();
+        streamRef.current?.getTracks().forEach(t => t.stop());
+        audioContextRef.current?.close();
+      } catch { /* Ignore */ }
+    };
+  }, [checkWakeWord, isMuted, alwaysListening, setState, setVoiceLevel]);
 
   // Reset when going idle
   useEffect(() => {
@@ -404,34 +462,42 @@ export function useVoice() {
     }, 2000);
   }, []);
 
-  // Auto-start/stop based on state - SIMPLIFIED to prevent flickering
-  // Only start/stop when state changes, not based on isListening feedback
+  // Auto-start/stop based on state - UPDATED for Always-On
   useEffect(() => {
-    if (!recognitionRef.current) return;
+    if (!recognitionRef.current || isMuted) return;
 
-    // Debounce: prevent rapid state changes (1 second)
     const now = Date.now();
-    if (now - lastToggleTimeRef.current < 1000) {
-      return;
-    }
+    if (now - lastToggleTimeRef.current < 500) return;
 
     if (state === "listening") {
-      // User activated mic - start listening for commands
-      if (!isStartingRef.current && !isListening) {
-        console.log("[Voice] Auto-starting for listening state");
+      // If we are in "listening" mode, we want to ensure the mic is active for the command
+      if (!isListening && !isStartingRef.current) {
+        console.log("[Voice] Ensuring mic is active for command listening");
         try {
           isStartingRef.current = true;
           recognitionRef.current.start();
         } catch (e) {
-          console.error("[Voice] Auto-start failed:", e);
+          console.error("[Voice] Command start failed:", e);
+          isStartingRef.current = false;
+        }
+      }
+    } else if (alwaysListening) {
+      // If Always-On is enabled, we want the mic active in ALL OTHER states (idle, speaking, thinking)
+      // to allow for wake word detection and barge-in.
+      if (!isListening && !isStartingRef.current) {
+        console.log("[Voice] Ensuring mic is active for Always-On mode (state: " + state + ")");
+        try {
+          isStartingRef.current = true;
+          recognitionRef.current.start();
+        } catch (e) {
+          console.error("[Voice] Always-On auto-start failed:", e);
           isStartingRef.current = false;
         }
       }
     } else {
-      // In thinking/speaking/idle states - stop mic to prevent capturing unintended speech
-      // User can manually toggle to re-enable
+      // Always-On is OFF, and we are not in listening mode -> Mic should be OFF
       if (isListening && !isStartingRef.current) {
-        console.log("[Voice] Auto-stopping for state:", state);
+        console.log("[Voice] Stopping mic as Always-On is disabled");
         try {
           isStartingRef.current = true;
           recognitionRef.current.stop();
@@ -440,7 +506,7 @@ export function useVoice() {
         }
       }
     }
-  }, [state]);
+  }, [state, alwaysListening, isMuted]);
 
   const setFinalTranscriptWrapper = useCallback((text: string) => {
     setFinalTranscript(text);

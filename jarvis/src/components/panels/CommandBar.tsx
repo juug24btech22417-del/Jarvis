@@ -49,8 +49,23 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
   const sendBtnRef = useRef<HTMLButtonElement>(null);
   const visualizerRef = useRef<HTMLDivElement>(null);
   const [, setStreamingContent] = useState("");
-  const { state, isListening, isStreaming, addMessage, setState, messages, userName, tasks, memories, setCurrentVideo, setGeneratedCode, setActivePanel } =
-    useJarvisStore();
+  const { 
+    state, 
+    setState, 
+    isListening, 
+    isStreaming, 
+    alwaysListening,
+    isMuted,
+    voiceLevel, 
+    addMessage, 
+    messages, 
+    userName, 
+    tasks, 
+    memories, 
+    setCurrentVideo, 
+    setGeneratedCode, 
+    setActivePanel 
+  } = useJarvisStore();
   const {
     interimTranscript,
     isSupported: voiceSupported,
@@ -3370,12 +3385,14 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
                 createRipple(e, voiceBtnRef.current!, 'rgba(0, 212, 255, 0.4)');
                 handleVoiceToggle();
               }}
-              className={`p-3 rounded-full transition-colors flex-shrink-0 relative overflow-hidden ${
+              className={`p-3 rounded-full transition-all duration-300 flex-shrink-0 relative overflow-hidden ${
                 isListening
                   ? input.trim()
-                    ? "bg-accent-green hover:bg-accent-green/80"
+                    ? "bg-accent-green shadow-[0_0_15px_rgba(0,255,100,0.5)]"
                     : "bg-accent-red animate-pulse"
-                  : "bg-panel-glass hover:bg-panel-border"
+                  : (alwaysListening && !isMuted)
+                    ? "bg-panel-glass shadow-[0_0_10px_rgba(0,212,255,0.3)] ring-1 ring-reactor-core/30"
+                    : "bg-panel-glass hover:bg-panel-border"
               }`}
               disabled={!voiceSupported}
               title={
@@ -3383,7 +3400,9 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
                   ? input.trim()
                     ? "Send voice command"
                     : "Stop listening"
-                  : "Start voice input (or say 'Hey JARVIS')"
+                  : alwaysListening
+                    ? "Always-On Active (say 'Hey JARVIS')"
+                    : "Start voice input"
               }
             >
               {isListening ? (
@@ -3393,7 +3412,7 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
                   <Square className="w-5 h-5 text-white" />
                 )
               ) : (
-                <Mic className="w-5 h-5 text-reactor-core" />
+                <Mic className={`w-5 h-5 ${alwaysListening && !isMuted ? "text-reactor-core animate-pulse" : "text-reactor-core/50"}`} />
               )}
             </button>
           </div>
