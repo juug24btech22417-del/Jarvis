@@ -1,47 +1,68 @@
 # 💠 J.A.R.V.I.S.
 ### Just A Rather Very Intelligent System
 
-[![Version](https://img.shields.io/badge/OS-v0.1.0--Alpha-00d4ff.svg?style=for-the-badge&logo=probot&logoColor=white)](https://github.com/)
-[![License](https://img.shields.io/badge/Protocol-Stark--Class-red.svg?style=for-the-badge)](https://github.com/)
-[![Built With](https://img.shields.io/badge/Powered--By-Next.js--14-white.svg?style=for-the-badge&logo=nextdotjs&logoColor=black)](https://nextjs.org/)
+[![System Status](https://img.shields.io/badge/OS-v0.1.0--Alpha-00d4ff.svg?style=for-the-badge&logo=probot&logoColor=white)](https://github.com/)
+[![Protocol](https://img.shields.io/badge/Protocol-Stark--Class-red.svg?style=for-the-badge)](https://github.com/)
+[![Core Tech](https://img.shields.io/badge/Neural--Engine-Next.js--14-white.svg?style=for-the-badge&logo=nextdotjs&logoColor=black)](https://nextjs.org/)
 
-> **"Systems online. Good morning, Boss."**
+> **"All systems functional. I've prepared your workspace, Boss."**
 
-Welcome to the future of personal intelligence. **J.A.R.V.I.S.** is not just a dashboard; it's a cinematic, Iron Man-inspired AI ecosystem designed to centralize your digital world into a single, holographic command center.
-
----
-
-## 💎 The Experience
-
-### 🌌 Kinetic Holographic UI
-Step into the suit. JARVIS features a state-of-the-art **3D Arc Reactor** heart, powered by **Three.js** and **React Three Fiber**. Every panel is a glassmorphic masterpiece, utilizing **Framer Motion** for physics-based interactions that feel alive.
-
-### 👁️ Biometric Sentinel
-The system doesn't just wait; it watches. With **Vision AI** and **Gesture Detection**, JARVIS recognizes your face and responds to your hands. It’s the ultimate fusion of Computer Vision and high-end automation.
-
-### 🛰️ Web Intelligence & Deep Research
-Harness the power of the **Sentinel Engine**. JARVIS uses **Firecrawl** and **Playwright** to crawl the web at light speed, extracting data, tracking prices, and summarizing the world's information before you even finish your coffee.
+J.A.R.V.I.S. is a comprehensive, Iron Man-inspired AI ecosystem. It is designed not just to respond, but to act—integrating deeply with your OS, web services, and social communication channels through a cinematic, holographic interface.
 
 ---
 
-## ⚡ System Capabilities
+## 💎 The Holographic Interface
 
-| Protocol | Description |
-| :--- | :--- |
-| **COMM-LINK** | Real-time bridges for **WhatsApp**, **Telegram**, and **Instagram**. |
-| **INTEL-VAULT** | Secure, encrypted memory storage for your most sensitive data. |
-| **MEDIA-CORE** | Full **Spotify** integration and high-speed **YouTube** transcription. |
-| **RESEARCH-AI** | Multi-LLM support (OpenAI, Gemini, Anthropic) for deep-dive analysis. |
-| **AUTO-PILOT** | Browser automation that handles your repetitive tasks silently. |
+### 🌀 Arc Reactor Core
+The system's heartbeat. A fully interactive **3D Arc Reactor** built with **Three.js** and **React Three Fiber**. It visualizes system load, voice activity, and boot sequences in real-time.
+
+### 🌌 Kinetic HUD & Glassmorphism
+Every panel in JARVIS is a glassmorphic masterpiece. Powered by **Framer Motion**, the UI responds to hover, gestures, and voice commands with fluid, physics-based animations.
+
+---
+
+## ⚡ System Protocols (38+ Modules)
+
+### 🧠 NEURAL CORE: Intelligence & Memory
+*   **Memory Panel**: Persistent context storage for long-term intelligence.
+*   **Intelligence Vault**: Secure, encrypted storage for sensitive data.
+*   **Research AI**: Deep-dive analysis using **OpenAI**, **Gemini**, and **Anthropic** models.
+*   **Local LLM**: Run high-privacy models directly on your hardware.
+*   **Skill Trainer**: AI-driven learning modules for personal growth.
+
+### 🛰️ SENTINEL EYES: Web & Vision
+*   **Sentinel Vision**: High-speed screen capture and AI analysis. Ask *"What do you see?"* to analyze your current workflow.
+*   **Firecrawl & Playwright**: Industrial-grade web scraping and browser automation.
+*   **Price Tracker**: Real-time monitoring for products across the web.
+*   **NASA Explorer**: Direct feed from NASA's astronomical data and imagery.
+*   **Vision AI**: Hand and face tracking via **MediaPipe** for gesture-based control.
+
+### 📱 OMNI-LINK: Communication & Social
+*   **Communication Hub**: A unified interface for **WhatsApp**, **Telegram**, and **Instagram**.
+*   **Smart Emailer**: Natural language email composition with advanced recipient parsing.
+*   **Meeting Bot**: Specialized tools for **Zoom**, **Teams**, and **Google Meet**.
+*   **IFTTT Workflows**: Trigger complex IoT and web automations instantly.
+
+### 🎼 MULTIMEDIA & UTILITIES
+*   **Spotify Core**: Complete playback control and "Back in Black" protocol.
+*   **YouTube Intelligence**: High-speed transcript extraction and video insights.
+*   **Transcription Panel**: Multi-modal audio-to-text processing.
+*   **Code IDE**: Integrated code viewer and generator for quick development.
+
+### 🛡️ SYSTEM COMMANDS (OS Integration)
+*   **Hardware Control**: Volume manipulation, mute/unmute, and brightness controls.
+*   **Status HUD**: Real-time diagnostics for battery, network, and system health.
+*   **File Search**: High-speed OS-level file discovery and retrieval.
+*   **Clipboard Intel**: Read from and write to the system clipboard via voice.
 
 ---
 
 ## 🛠️ Hardware & Software Specs
 
-*   **Reactor Core**: Next.js 14 (App Router) & TypeScript
-*   **Optics**: MediaPipe, Face-api.js, & Hugging Face
+*   **Logic Engine**: Next.js 14 (App Router) & TypeScript
+*   **Optics**: MediaPipe, Face-api.js, & Hugging Face Inference
 *   **Neural Link**: Zustand Global State & Prisma ORM
-*   **Aesthetics**: Tailwind CSS & Glassmorphism Design System
+*   **Aesthetics**: Tailwind CSS, Three.js, & GSAP Animations
 
 ---
 
@@ -54,28 +75,29 @@ cd Jarvis
 npm install
 ```
 
-### 2. Calibrate Sensors
-Rename `.env.example` to `.env.local` and inject your API keys. JARVIS needs these to connect to the global network.
+### 2. Calibrate API Sensors
+Inject your credentials into `.env.local`:
+*   **AI**: OpenAI, Anthropic, Gemini, Hugging Face
+*   **Web**: Firecrawl, Tavily
+*   **Social**: Spotify, Telegram, Instagram
+*   **Database**: SQLite/Prisma
 
-### 3. Power Up
+### 3. Engage Systems
 ```bash
-# Ignite the database
 npx prisma db push
-
-# Engage systems
 npm run dev
 ```
 
 ---
 
-## 🛡️ Sentinel Protocols
+## 🛡️ Sentinel Status: Alpha-1
 
-This system is currently in **Alpha-1** development. Future updates include enhanced holographic depth, deeper home automation, and advanced predictive analytics.
+JARVIS is constantly evolving. Future updates include **Enhanced Holographic Depth**, **Advanced Predictive Analytics**, and **Full Home Integration (Stark-Home)**.
 
-**"I've updated the HUD, Boss. Everything looks nominal."**
+**"I've updated the HUD, Boss. The world is at your fingertips."**
 
 ---
 
 <p align="center">
-  Built with ❤️ by a visionary.
+  Built with ❤️ for the future.
 </p>
