@@ -58,9 +58,15 @@ interface JarvisStore {
 
   // Voice
   isListening: boolean;
-  setIsListening: (listening: boolean) => void;
+  setIsListening: (isListening: boolean) => void;
   alwaysListening: boolean;
-  setAlwaysListening: (listening: boolean) => void;
+  setAlwaysListening: (alwaysListening: boolean) => void;
+  sentinelActive: boolean;
+  setSentinelActive: (sentinelActive: boolean) => void;
+  biometricActive: boolean;
+  setBiometricActive: (biometricActive: boolean) => void;
+  isSpeaking: boolean;
+  setIsSpeaking: (isSpeaking: boolean) => void;
   isMuted: boolean;
   setIsMuted: (muted: boolean) => void;
   voiceLevel: number;
@@ -83,7 +89,7 @@ interface JarvisStore {
   addMemory: (memory: Omit<Memory, "id">) => void;
 
   // UI
-  activePanel: "chat" | "tasks" | "memory" | "notes" | "code" | "skill-trainer" | "image-generator" | "summarizer" | "web-scraper" | "nasa" | "huggingface" | "ifttt" | "browser" | "local-llm" | "vision" | "automation" | "price-tracker" | "transcription" | null;
+  activePanel: "chat" | "tasks" | "memory" | "notes" | "code" | "skill-trainer" | "image-generator" | "summarizer" | "web-scraper" | "firecrawl" | "playwright" | "whatsapp" | "instagram" | "telegram" | "security" | "vault" | "dungeon" | "habits" | "time-capsule" | "voice-notes" | "nasa" | "huggingface" | "ifttt" | "browser" | "local-llm" | "vision" | "automation" | "price-tracker" | "transcription" | null;
   setActivePanel: (panel: JarvisStore["activePanel"]) => void;
   showBriefing: boolean;
   setShowBriefing: (show: boolean) => void;
@@ -91,6 +97,10 @@ interface JarvisStore {
   // User
   userName: string;
   setUserName: (name: string) => void;
+
+  // User Interaction
+  userInteracted: boolean;
+  setUserInteracted: (interacted: boolean) => void;
 
   // Media Player
   currentVideo: { id: string; title: string; channel: string; embedUrl: string } | null;
@@ -101,6 +111,16 @@ interface JarvisStore {
   generatedCode: { language: string; code: string; description: string } | null;
   setGeneratedCode: (code: JarvisStore["generatedCode"]) => void;
   clearGeneratedCode: () => void;
+  currentScreenshot: string | null;
+  setCurrentScreenshot: (screenshot: string | null) => void;
+
+  // Automation Logs
+  playwrightLogs: string[];
+  setPlaywrightLogs: (logs: string[]) => void;
+  addPlaywrightLog: (log: string) => void;
+  firecrawlLogs: string[];
+  setFirecrawlLogs: (logs: string[]) => void;
+  addFirecrawlLog: (log: string) => void;
 }
 
 export const useJarvisStore = create<JarvisStore>((set) => ({
@@ -142,8 +162,14 @@ export const useJarvisStore = create<JarvisStore>((set) => ({
   setIsListening: (isListening) => set({ isListening }),
   alwaysListening: true,
   setAlwaysListening: (alwaysListening) => set({ alwaysListening }),
+  sentinelActive: true, // "Sentinel Eyes" passive vision
+  setSentinelActive: (sentinelActive) => set({ sentinelActive }),
+  biometricActive: false, // "Biometric" face recognition
+  setBiometricActive: (biometricActive) => set({ biometricActive }),
   isMuted: false,
-  setIsMuted: (isMuted) => set({ isMuted }),
+  setIsMuted: (isMuted: boolean) => set({ isMuted }),
+  isSpeaking: false,
+  setIsSpeaking: (isSpeaking: boolean) => set({ isSpeaking }),
   voiceLevel: 0,
   setVoiceLevel: (voiceLevel) => set({ voiceLevel }),
 
@@ -190,6 +216,10 @@ export const useJarvisStore = create<JarvisStore>((set) => ({
   userName: "Boss",
   setUserName: (userName) => set({ userName }),
 
+  // User Interaction
+  userInteracted: false,
+  setUserInteracted: (userInteracted) => set({ userInteracted }),
+
   // Media Player
   currentVideo: null,
   setCurrentVideo: (currentVideo) => set({ currentVideo }),
@@ -199,4 +229,13 @@ export const useJarvisStore = create<JarvisStore>((set) => ({
   generatedCode: null,
   setGeneratedCode: (generatedCode) => set({ generatedCode }),
   clearGeneratedCode: () => set({ generatedCode: null }),
+  currentScreenshot: null,
+  setCurrentScreenshot: (currentScreenshot) => set({ currentScreenshot }),
+  // Automation Logs
+  playwrightLogs: [],
+  setPlaywrightLogs: (playwrightLogs) => set({ playwrightLogs }),
+  addPlaywrightLog: (log) => set((state) => ({ playwrightLogs: [...state.playwrightLogs, log] })),
+  firecrawlLogs: [],
+  setFirecrawlLogs: (firecrawlLogs) => set({ firecrawlLogs }),
+  addFirecrawlLog: (log) => set((state) => ({ firecrawlLogs: [...state.firecrawlLogs, log] })),
 }));

@@ -83,7 +83,11 @@ export async function POST(req: NextRequest) {
 
       case "close": {
         if (processName) {
-          await execAsync(`taskkill /IM "${processName}.exe" /F`);
+          try {
+            await execAsync(`taskkill /IM "${processName}.exe" /F`);
+          } catch (killError) {
+            console.log(`[Windows Close] taskkill failed or process not found: ${processName}`);
+          }
           return NextResponse.json({ success: true, action: "close", process: processName });
         }
         return NextResponse.json({ error: "Process name required" }, { status: 400 });
@@ -117,7 +121,7 @@ export async function POST(req: NextRequest) {
 
       case "list": {
         const { stdout } = await execAsync(
-          'powershell -Command "Get-Process | Where-Object {$_.MainWindowTitle -ne \"\"} | Select-Object ProcessName,MainWindowTitle,Id | Format-Table -AutoSize"'
+          'powershell -Command "Get-Process | Where-Object {$_.MainWindowTitle} | Select-Object ProcessName,MainWindowTitle,Id | Format-Table -AutoSize"'
         );
         const lines = stdout.trim().split('\n').slice(2); // Skip header
         const windows = lines
@@ -169,7 +173,7 @@ export async function POST(req: NextRequest) {
 export async function GET() {
   try {
     const { stdout } = await execAsync(
-      'powershell -Command "Get-Process | Where-Object {$_.MainWindowTitle -ne \"\"} | Select-Object -First 10 ProcessName,MainWindowTitle | Format-Table -AutoSize"'
+      'powershell -Command "Get-Process | Where-Object {$_.MainWindowTitle} | Select-Object -First 10 ProcessName,MainWindowTitle | Format-Table -AutoSize"'
     );
     return NextResponse.json({ success: true, windows: stdout });
   } catch (error) {

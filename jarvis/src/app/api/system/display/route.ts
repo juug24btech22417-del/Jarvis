@@ -28,14 +28,14 @@ async function setBrightness(level: number): Promise<{success: boolean; actualBr
   try {
     // Use Windows brightness API
     const psCommand = `
-      $monitor = Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods -ErrorAction SilentlyContinue
+      $monitor = Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods -ErrorAction SilentlyContinue;
       if ($monitor) {
-        $monitor.WmiSetBrightness(1, ${brightness})
-        Write-Output "SUCCESS"
+        $monitor.WmiSetBrightness(1, ${brightness});
+        Write-Output \\"SUCCESS\\";
       } else {
-        Write-Output "NO_MONITOR"
+        Write-Output \\"NO_MONITOR\\";
       }
-    `;
+    `.replace(/\r?\n/g, ' ');
 
     const { stdout } = await execAsync(`powershell -Command "${psCommand}"`);
     console.log("[Brightness] PowerShell result:", stdout.trim());
@@ -52,8 +52,8 @@ async function setBrightness(level: number): Promise<{success: boolean; actualBr
       return { success: false, error: "Monitor doesn't support DDC/CI brightness control" };
     }
 
-    if (after !== null && Math.abs(after - brightness) <= 5) {
-      // Close enough (within 5%)
+    if (after !== null && Math.abs(after - brightness) <= 15) {
+      // Close enough (within 15% to account for hardware stepping)
       return { success: true, actualBrightness: after };
     }
 

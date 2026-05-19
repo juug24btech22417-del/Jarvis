@@ -11,7 +11,10 @@ import {
   HardDrive,
   Thermometer,
   Activity,
-  X
+  X,
+  Eye,
+  Scan,
+  ShieldCheck
 } from "lucide-react";
 import { useJarvisStore } from "@/store/jarvis.store";
 import gsap from "gsap";
@@ -53,7 +56,7 @@ export default function StatusHUD() {
   const [pcStats, setPcStats] = useState<PCStats | null>(null);
   const [showDetails, setShowDetails] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const { isMuted, setIsMuted, state } = useJarvisStore();
+  const { isMuted, setIsMuted, state, sentinelActive, biometricActive } = useJarvisStore();
 
   // Fetch PC stats from API
   const fetchPCStats = useCallback(async () => {
@@ -284,6 +287,49 @@ export default function StatusHUD() {
               </div>
             )}
           </div>
+          
+          {/* Autonomous Status Indicators */}
+          <div className="flex items-center gap-3 border-l border-panel-border pl-4">
+            <AnimatePresence>
+              {sentinelActive && (
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.5 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.5 }}
+                  className="flex items-center gap-1 group"
+                  title="Sentinel Eyes: Passively observing screen"
+                >
+                  <motion.div
+                    animate={{ opacity: [0.4, 1, 0.4] }}
+                    transition={{ duration: 2, repeat: Infinity }}
+                  >
+                    <Eye className="w-4 h-4 text-reactor-core glow-icon" />
+                  </motion.div>
+                  <span className="font-rajdhani text-[10px] text-reactor-core hidden lg:block uppercase tracking-tighter">Sentinel</span>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+              {biometricActive && (
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.5 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.5 }}
+                  className="flex items-center gap-1 group"
+                  title="Biometric Recognition: Scanning for Boss"
+                >
+                  <motion.div
+                    animate={{ scale: [1, 1.1, 1] }}
+                    transition={{ duration: 1.5, repeat: Infinity }}
+                  >
+                    <Scan className="w-4 h-4 text-accent-green glow-icon" />
+                  </motion.div>
+                  <span className="font-rajdhani text-[10px] text-accent-green hidden lg:block uppercase tracking-tighter">Biometric</span>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
 
           {/* Network */}
           <Wifi className="w-4 h-4 text-text-secondary" />
@@ -502,6 +548,39 @@ export default function StatusHUD() {
                   ))}
                 </div>
               )}
+
+              {/* Autonomous Features Details */}
+              <div className="mt-4 pt-4 border-t border-panel-border">
+                <span className="font-rajdhani text-text-secondary text-sm block mb-2 uppercase tracking-widest opacity-70">
+                  Autonomous Protocols
+                </span>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-text-secondary/70 flex items-center gap-2">
+                      <Eye className="w-3 h-3" /> Sentinel Vision
+                    </span>
+                    <span className={`text-[10px] font-orbitron ${sentinelActive ? "text-reactor-core" : "text-text-secondary/30"}`}>
+                      {sentinelActive ? "ACTIVE" : "OFFLINE"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-text-secondary/70 flex items-center gap-2">
+                      <Scan className="w-3 h-3" /> Biometric Link
+                    </span>
+                    <span className={`text-[10px] font-orbitron ${biometricActive ? "text-accent-green" : "text-text-secondary/30"}`}>
+                      {biometricActive ? "ENCRYPTED" : "OFFLINE"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-text-secondary/70 flex items-center gap-2">
+                      <ShieldCheck className="w-3 h-3" /> Always-On Voice
+                    </span>
+                    <span className="text-[10px] font-orbitron text-reactor-core">
+                      NOMINAL
+                    </span>
+                  </div>
+                </div>
+              </div>
 
               {/* Last Updated */}
               <div className="mt-4 pt-2 border-t border-panel-border text-center">

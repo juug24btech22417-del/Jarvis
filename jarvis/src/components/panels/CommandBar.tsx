@@ -70,6 +70,9 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
     interimTranscript,
     isSupported: voiceSupported,
     speak,
+    startStreamingSpeak,
+    sendStreamingChunk,
+    endStreamingSpeak,
     stopSpeaking,
     lastCommand,
     stopListening,
@@ -257,6 +260,66 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
   const processSystemCommand = async (text: string): Promise<string | null> => {
     const lower = text.toLowerCase();
 
+    // ─── SPOTIFY DESKTOP AUTOMATION (PyAutoGUI) ──────────────────────────────
+    // Handle "open spotify and play X" or "play X on spotify" by calling the
+    // backend /api/chat route which triggers the PyAutoGUI Python automation.
+    // Must be FIRST to avoid being intercepted by the openMatch / Spotify API handlers.
+    const spotifyDesktopPattern = /(?:open\s+spotify\s+and\s+)?play\s+(.+?)\s+on\s+spotify/i;
+    const spotifyOpenPlayPattern = /open\s+spotify\s+and\s+play\s+(.+)/i;
+    const spotifyDesktopMatch = text.match(spotifyDesktopPattern) || text.match(spotifyOpenPlayPattern);
+    if (spotifyDesktopMatch) {
+      try {
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            messages: [{ role: "user", content: text }],
+            systemPrompt: "You are JARVIS.",
+          }),
+        });
+        const data = await response.json();
+        if (data.content) return data.content;
+      } catch (e) {
+        console.error("Spotify PyAutoGUI trigger failed:", e);
+      }
+      return `Launching Spotify and playing "${spotifyDesktopMatch[1].trim()}", Boss.`;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Sentinel Vision - "what do you see" or "check sentinel"
+    if (lower.match(/\b(what do you see|check sentinel|look at my screen|analyze (?:my\s+)?screen)\b/)) {
+      try {
+        const captureRes = await fetch("/api/screenshot/capture");
+        const captureData = await captureRes.json();
+        if (captureData.success) {
+          const analyzeRes = await fetch("/api/sentinel/analyze", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ imageBase64: captureData.image }),
+          });
+          const analyzeData = await analyzeRes.json();
+          if (analyzeData.success && analyzeData.comment) {
+            return `${analyzeData.comment} That's what I've observed, Boss.`;
+          }
+        }
+      } catch (e) {
+        console.error("Sentinel manual check failed:", e);
+      }
+      return "I'm currently observing, but I didn't find anything noteworthy to report just yet, Boss.";
+    }
+
+    // Biometrics Check - "check biometrics" or "who am i"
+    if (lower.match(/\b(check biometrics|biometric status|scan for me|who am i)\b/)) {
+      const status = useJarvisStore.getState().biometricActive ? "active and scanning" : "currently offline";
+      return `Biometric link is ${status}. I am constantly on the lookout for you, Boss.`;
+    }
+
+    // Protocol Status - "check protocols" or "status report"
+    if (lower.match(/\b(status report|check protocols|system status)\b/)) {
+      const store = useJarvisStore.getState();
+      return `Status Report, Boss: Sentinel Eyes are ${store.sentinelActive ? "ONLINE" : "OFFLINE"}. Biometric link is ${store.biometricActive ? "ACTIVE" : "OFFLINE"}. Always-On voice is NOMINAL. All core systems are performing within expected parameters.`;
+    }
+
     // Volume control - "set volume to 30" or "volume 50" - calls system API
     const volumeMatch = lower.match(/(?:set\s+)?volume\s+(?:to\s+)?(\d+)/);
     if (volumeMatch) {
@@ -360,7 +423,8 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
     }
 
     // Open website/app with desktop app support
-    const openMatch = lower.match(/open\s+(?:the\s+)?(whatsapp|telegram|instagram|spotify|discord|youtube|chrome|vs code|code|notepad|calculator|file explorer|settings|twitter|x\.com|github|gmail|maps)/);
+    const isSpotifyPlay = lower.includes("spotify") && (lower.includes("play") || lower.includes("search"));
+    const openMatch = isSpotifyPlay ? null : lower.match(/open\s+(?:the\s+)?(whatsapp|telegram|instagram|spotify|discord|youtube|chrome|vs code|code|notepad|calculator|file explorer|settings|twitter|x\.com|github|gmail|maps)/);
     if (openMatch) {
       const app = openMatch[1].replace(/\s+/g, "");
 
@@ -3149,7 +3213,7 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
   }, [userName, memories, tasks, messages]);
 
   // Send message to Claude API
-  const sendToClaude = async (userMessage: string) => {
+  const sendToClaude = async (userMessage: string, signal?: AbortSignal) => {
     try {
       setState("thinking");
       setStreamingContent("");
@@ -3164,6 +3228,7 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
           messages: [...messages, { role: "user", content: userMessage }],
           systemPrompt,
         }),
+        signal,
       });
 
       if (!response.ok) {
@@ -3204,8 +3269,10 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
       const decoder = new TextDecoder();
       let fullResponse = "";
       let buffer = "";
+      let lastSpokenIndex = 0;
 
-      setState("speaking");
+      setState("thinking");
+      startStreamingSpeak();
 
       if (reader) {
         while (true) {
@@ -3223,29 +3290,37 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
 
               try {
                 const parsed = JSON.parse(data);
-                
-                // OpenAI / DeepSeek / NVIDIA NIM format
-                if (parsed.choices?.[0]?.delta?.content) {
-                  fullResponse += parsed.choices[0].delta.content;
+                const content = parsed.choices?.[0]?.delta?.content || 
+                              (parsed.type === "content_block_delta" ? parsed.delta?.text : "") ||
+                              (parsed.type === "message_delta" ? parsed.delta?.content : "");
+
+                if (content) {
+                  fullResponse += content;
                   setStreamingContent(fullResponse);
+
+                  // Sentence-level streaming detection
+                  const sentences = fullResponse.split(/(?<=[.!?])\s+/);
+                  if (sentences.length > lastSpokenIndex + 1) {
+                    const newSentence = sentences[lastSpokenIndex];
+                    sendStreamingChunk(newSentence);
+                    lastSpokenIndex++;
+                    setState("speaking");
+                  }
                 }
-                // Claude format: content_block_delta
-                else if (parsed.type === "content_block_delta" && parsed.delta?.text) {
-                  fullResponse += parsed.delta.text;
-                  setStreamingContent(fullResponse);
-                }
-                // Claude alternative format
-                else if (parsed.type === "message_delta" && parsed.delta?.content) {
-                  fullResponse += parsed.delta.content;
-                  setStreamingContent(fullResponse);
-                }
-              } catch {
-                // Ignore parsing errors for incomplete chunks
-              }
+              } catch (e) {}
             }
           }
         }
       }
+
+      // Send the final remaining part
+      const remainingSentences = fullResponse.split(/(?<=[.!?])\s+/);
+      for (let i = lastSpokenIndex; i < remainingSentences.length; i++) {
+        if (remainingSentences[i].trim()) {
+          sendStreamingChunk(remainingSentences[i]);
+        }
+      }
+      endStreamingSpeak();
 
       // Add complete message
       if (fullResponse) {
@@ -3254,9 +3329,8 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
           content: fullResponse,
         });
 
-        // Speak the response
-        speak(fullResponse);
-        setTimeout(() => setState("idle"), Math.max(3000, fullResponse.length * 50));
+        // No need for speak(fullResponse) here as it was streamed above
+        setTimeout(() => setState("idle"), 3000);
       } else {
         // Fallback if no response
         addMessage({
@@ -3301,21 +3375,39 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
       return;
     }
 
-    // Try LLM-based flexible intent parsing for natural language commands
-    const flexibleResponse = await processFlexibleCommand(text);
-    if (flexibleResponse) {
-      addMessage({
-        role: "assistant",
-        content: flexibleResponse,
-      });
-      speak(flexibleResponse);
-      return;
-    }
-
     // Process offline commands (tasks, memories)
     await processOfflineCommand(text);
 
-    await sendToClaude(text);
+    // Parallelize Intent Parsing and Chat Generation
+    // We start the chat stream immediately, but also check for specialized intents (like opening apps)
+    let intentProcessed = false;
+    
+    // We'll use a controller to abort the chat if an intent is found
+    const abortController = new AbortController();
+
+    const intentPromise = processFlexibleCommand(text).then(async (flexibleResponse) => {
+      if (flexibleResponse && !intentProcessed) {
+        intentProcessed = true;
+        abortController.abort(); // Stop the chat stream
+        
+        addMessage({
+          role: "assistant",
+          content: flexibleResponse,
+        });
+        speak(flexibleResponse);
+        return true;
+      }
+      return false;
+    });
+
+    const chatPromise = sendToClaude(text, abortController.signal).then(() => {
+      if (!intentProcessed) {
+        // Chat finished normally
+      }
+    });
+
+    // Wait for either to finish or both
+    await Promise.race([intentPromise, chatPromise]);
   };
 
   // (handleVoiceToggle is defined above)

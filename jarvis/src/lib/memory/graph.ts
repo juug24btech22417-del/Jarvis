@@ -40,6 +40,7 @@ export interface EntityData {
   name: string;
   type: EntityType | string;
   description?: string;
+  category?: string;
   metadata?: Record<string, string>; // Unencrypted metadata like email, phone
   encryptedMetadata?: Record<string, string>; // Sensitive data to encrypt
 }
@@ -131,7 +132,6 @@ export async function findEntityByName(name: string): Promise<{ id: string; name
     where: {
       name: {
         contains: name,
-        mode: "insensitive",
       },
     },
   });
@@ -357,8 +357,8 @@ export async function searchEntities(query: string, limit: number = 10): Promise
   const entities = await prisma.entity.findMany({
     where: {
       OR: [
-        { name: { contains: query, mode: "insensitive" } },
-        { description: { contains: query, mode: "insensitive" } },
+        { name: { contains: query } },
+        { description: { contains: query } },
       ],
     },
     take: limit,

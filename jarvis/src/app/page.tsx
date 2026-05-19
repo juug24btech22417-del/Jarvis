@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import ArcReactor from "@/components/reactor/ArcReactor";
 import StatusHUD from "@/components/panels/StatusHUD";
@@ -41,12 +41,13 @@ import VisionPanel from "@/components/panels/VisionPanel";
 import AutomationPanel from "@/components/panels/AutomationPanel";
 import PriceTrackerPanel from "@/components/panels/PriceTrackerPanel";
 import PlaywrightPanel from "@/components/panels/PlaywrightPanel";
+import TranscriptionPanel from "@/components/panels/TranscriptionPanel";
 import { useJarvisStore } from "@/store/jarvis.store";
 import { useTextToSpeech } from "@/hooks/useVoice";
 
 // Boot sequence overlay
 function BootSequence() {
-  const { bootProgress, bootComplete } = useJarvisStore();
+  const { bootProgress, bootComplete, userInteracted, setUserInteracted } = useJarvisStore();
   const [showWelcome, setShowWelcome] = useState(false);
 
   useEffect(() => {
@@ -58,52 +59,91 @@ function BootSequence() {
 
   if (bootComplete && showWelcome) {
     return (
-      <motion.div
-        initial={{ opacity: 1 }}
-        animate={{ opacity: 0 }}
-        transition={{ duration: 1, delay: 3 }}
-        className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none"
-      >
-        <motion.div
-          initial={{ opacity: 0, scale: 0.9 }}
-          animate={{ opacity: 1, scale: 1 }}
-          transition={{ duration: 0.5 }}
-          className="text-center"
-        >
-          <motion.h1
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.2 }}
-            className="font-orbitron text-4xl md:text-6xl text-reactor-core glow-text mb-4"
-          >
-            J.A.R.V.I.S.
-          </motion.h1>
-          <motion.p
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 0.5 }}
-            className="font-rajdhani text-xl text-text-secondary tracking-widest"
-          >
-            Just A Rather Very Intelligent System
-          </motion.p>
+      <AnimatePresence>
+        {!userInteracted ? (
           <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 1 }}
-            className="mt-8 text-text-secondary/50 font-rajdhani text-sm"
+            key="authorization-overlay"
+            initial={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 1 }}
+            className="fixed inset-0 z-[60] flex items-center justify-center bg-deep-space/80 backdrop-blur-md"
           >
-            Systems online. Good {getGreeting()}, Boss.
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="text-center"
+            >
+              <motion.div
+                animate={{ scale: [1, 1.05, 1], opacity: [0.7, 1, 0.7] }}
+                transition={{ duration: 2, repeat: Infinity }}
+                className="mb-8"
+              >
+                <div className="w-24 h-24 mx-auto rounded-full border-2 border-reactor-core/30 flex items-center justify-center">
+                  <div className="w-16 h-16 rounded-full bg-reactor-core/20 animate-pulse" />
+                </div>
+              </motion.div>
+              
+              <h1 className="font-orbitron text-3xl text-reactor-core mb-2">SYSTEM READY</h1>
+              <p className="font-rajdhani text-text-secondary mb-8 tracking-widest uppercase">Waiting for Authorization</p>
+              
+              <motion.button
+                whileHover={{ scale: 1.05, boxShadow: "0 0 20px rgba(0, 243, 255, 0.5)" }}
+                whileTap={{ scale: 0.95 }}
+                onClick={() => {
+                  setUserInteracted(true);
+                  // Optional: Prime audio engine immediately with a short chime or silent speak
+                  if (typeof window !== 'undefined' && window.speechSynthesis) {
+                    const silence = new SpeechSynthesisUtterance("");
+                    window.speechSynthesis.speak(silence);
+                  }
+                }}
+                className="px-8 py-3 bg-transparent border border-reactor-core text-reactor-core font-orbitron text-sm tracking-widest hover:bg-reactor-core/10 transition-all"
+              >
+                INITIALIZE PROTOCOLS
+              </motion.button>
+            </motion.div>
           </motion.div>
+        ) : (
           <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 1.5 }}
-            className="mt-2 text-reactor-core/70 font-rajdhani text-xs tracking-wider"
+            initial={{ opacity: 1 }}
+            animate={{ opacity: 0 }}
+            transition={{ duration: 1, delay: 2 }}
+            className="fixed inset-0 z-50 flex items-center justify-center"
           >
-            Say &quot;Hey JARVIS&quot; or click the reactor to begin
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.5 }}
+              className="text-center"
+            >
+              <motion.h1
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.2 }}
+                className="font-orbitron text-4xl md:text-6xl text-reactor-core glow-text mb-4"
+              >
+                J.A.R.V.I.S.
+              </motion.h1>
+              <motion.p
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 0.5 }}
+                className="font-rajdhani text-xl text-text-secondary tracking-widest"
+              >
+                Just A Rather Very Intelligent System
+              </motion.p>
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 1 }}
+                className="mt-8 text-text-secondary/50 font-rajdhani text-sm"
+              >
+                Systems online. Good {getGreeting()}, Boss.
+              </motion.div>
+            </motion.div>
           </motion.div>
-        </motion.div>
-      </motion.div>
+        )}
+      </AnimatePresence>
     );
   }
 
@@ -167,14 +207,163 @@ function BootSequence() {
 
 function getGreeting() {
   const hour = new Date().getHours();
+  if (hour >= 0 && hour < 5) return "late night";
   if (hour < 12) return "morning";
   if (hour < 18) return "afternoon";
   return "evening";
 }
 
+const GREETING_POOL = [
+  "Welcome back, Boss. Systems are operational and the core is stable.",
+  "Good {timeOfDay}, Boss. I've been refining the protocols while you were away.",
+  "At your service, Boss. All panels are online and ready for your command.",
+  "Back so soon? I was just starting to enjoy the quiet. Just kidding, Boss.",
+  "The arc reactor is at peak efficiency. Good {timeOfDay}, Boss.",
+  "I've optimized your memory buffers and cleared the cache. Welcome back, Boss.",
+  "The world hasn't ended yet, Boss. I checked while you were gone.",
+  "Protocols engaged. Everything is ready for your next project, Boss.",
+  "Good {timeOfDay}. I've prepared your dashboard with the latest data, Boss.",
+  "Systems initialized. It's good to see you, Boss. How can I assist you?",
+  "Welcome back, Boss. The Bangalore weather is currently {weather}.",
+  "Good {timeOfDay}, Boss. I've synchronized the systems with Bangalore standard time.",
+  "Systems online. It's a fine {timeOfDay} in Bangalore, wouldn't you agree, Boss?",
+  "Greetings, Boss. I see some new activity in the tech sector: {news}.",
+  "Ready for work, Boss? I've calibrated the sensors for the {weather} climate in Bangalore.",
+  "Greetings. The latest headlines are reporting that {news}. I can give you a full briefing whenever you're ready, Boss.",
+  "Still at it, Boss? It's a bit {timeOfDay}, but the systems are ready whenever you are.",
+  "Working hard, or hardly working? It's {timeOfDay} in Bangalore, Boss. I've dimmed the holographic displays for your comfort.",
+  "The city of Bangalore is quiet, but the core is humming. Good {timeOfDay}, Boss."
+];
+
+function resolveGreeting(context?: any, tasks?: any[]) {
+  const timeOfDay = getGreeting();
+  const template = GREETING_POOL[Math.floor(Math.random() * GREETING_POOL.length)];
+  
+  let greeting = template
+    .replace(/{timeOfDay}/g, timeOfDay);
+
+  if (context) {
+    greeting = greeting
+      .replace(/{weather}/g, context.weather || "clear")
+      .replace(/{news}/g, context.topNews || "the tech world is evolving");
+
+    const healthMsg = ` CPU is running at ${context.cpuTemp} degrees with ${context.memoryUsed} gigabytes of memory active. Systems are ${context.status}.`;
+    
+    // Add task info if available
+    let taskMsg = "";
+    if (tasks && tasks.length > 0) {
+      const criticalTasks = tasks.filter(t => t.priority === "critical" && !t.completed);
+      const highTasks = tasks.filter(t => t.priority === "high" && !t.completed);
+      
+      if (criticalTasks.length > 0) {
+        taskMsg = ` You have ${criticalTasks.length} critical ${criticalTasks.length === 1 ? 'task' : 'tasks'} pending, Boss. We should probably start there.`;
+      } else if (highTasks.length > 0) {
+        taskMsg = ` You have ${highTasks.length} high priority tasks to address today.`;
+      }
+    }
+
+    return greeting + healthMsg + taskMsg;
+  }
+
+  return greeting;
+}
+
+import { useJarvisVoice } from "@/hooks/useVoice";
+import { useJarvisSentinel } from "@/hooks/useSentinel";
+import { useJarvisBiometrics } from "@/hooks/useBiometrics";
+
 export default function Home() {
-  const { bootComplete, activePanel, setActivePanel } = useJarvisStore();
-  const { speak } = useTextToSpeech();
+  const { bootComplete, activePanel, setActivePanel, userName, tasks, userInteracted } = useJarvisStore();
+  const { speak } = useJarvisVoice();
+  const hasGreetedRef = useRef(false);
+
+  // Play "Iron Man" style startup sound when boot completes
+  // Track user interaction for audio policy
+  // No longer need window-level listeners as we have a dedicated button
+  useEffect(() => {
+    // Just ensure we are in a clean state
+  }, []);
+
+  useEffect(() => {
+    if (bootComplete && userInteracted) {
+      const playStartupSound = async () => {
+        try {
+          const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+          if (audioCtx.state === "suspended") await audioCtx.resume();
+          
+          // Sound 1: Hologram sweep
+          const oscillator = audioCtx.createOscillator();
+          const gainNode = audioCtx.createGain();
+          
+          oscillator.type = 'sine';
+          oscillator.frequency.setValueAtTime(200, audioCtx.currentTime);
+          oscillator.frequency.exponentialRampToValueAtTime(1200, audioCtx.currentTime + 0.5);
+          
+          gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+          gainNode.gain.linearRampToValueAtTime(0.2, audioCtx.currentTime + 0.1);
+          gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.8);
+          
+          oscillator.connect(gainNode);
+          gainNode.connect(audioCtx.destination);
+          
+          oscillator.start();
+          oscillator.stop(audioCtx.currentTime + 1);
+
+          // Sound 2: High-frequency "ping"
+          const ping = audioCtx.createOscillator();
+          const pingGain = audioCtx.createGain();
+          ping.type = 'triangle';
+          ping.frequency.setValueAtTime(2400, audioCtx.currentTime + 0.3);
+          pingGain.gain.setValueAtTime(0, audioCtx.currentTime + 0.3);
+          pingGain.gain.linearRampToValueAtTime(0.1, audioCtx.currentTime + 0.35);
+          pingGain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.6);
+          ping.connect(pingGain);
+          pingGain.connect(audioCtx.destination);
+          ping.start(audioCtx.currentTime + 0.3);
+          ping.stop(audioCtx.currentTime + 0.6);
+        } catch (e) {
+          console.warn("Audio context failed to start:", e);
+        }
+      };
+
+      playStartupSound();
+    }
+  }, [bootComplete]);
+
+  useEffect(() => {
+    if (bootComplete && userInteracted && !hasGreetedRef.current) {
+      hasGreetedRef.current = true;
+      
+      const triggerGreeting = async () => {
+        let healthData = null;
+        try {
+          const res = await fetch("/api/system-health");
+          if (res.ok) healthData = await res.json();
+        } catch (e) {
+          console.warn("Could not fetch real health data, using fallback.");
+        }
+
+        const greeting = resolveGreeting(healthData, tasks);
+        // Short delay to allow boot sequence fade out
+        setTimeout(() => speak(greeting), 1000);
+      };
+
+      triggerGreeting();
+    }
+  }, [bootComplete, speak, userName, tasks, userInteracted]);
+  useJarvisSentinel();
+  useJarvisBiometrics();
+
+  const { isSpeaking, state, setState } = useJarvisStore();
+
+  // Sync global speaking state to JARVIS state
+  useEffect(() => {
+    if (isSpeaking && state !== "speaking") {
+      setState("speaking");
+    } else if (!isSpeaking && state === "speaking") {
+      setState("idle");
+    }
+  }, [isSpeaking, state, setState]);
   const { calculations, lastCalculation, addCalculation, clearHistory, deleteCalculation } = useCalculatorHistory();
   const [whatsappOpen, setWhatsappOpen] = useState(false);
   const [instagramOpen, setInstagramOpen] = useState(false);

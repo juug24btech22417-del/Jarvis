@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 import { exec } from "child_process";
+import { promisify } from "util";
+import fs from "fs";
+import path from "path";
 import { parseCommand, JARVISContext, buildSystemPrompt, parseIntentWithLLM, PERSONALITY_WRAPPER_PROMPT } from "@/lib/jarvis/personality";
+
+const execAsync = promisify(exec);
 import { retrieveRelevantMemories, formatMemoryContextAsPrompt } from "@/lib/memory/retriever";
 import { extractAndStoreMemories } from "@/lib/memory/extractor";
 
@@ -251,7 +256,7 @@ function generateOfflineResponse(lastMessage: string): string {
       "It's not about how much we lost, it's about how much we have left. - Tony Stark",
       "If you're nothing without the suit, then you shouldn't have it. - Tony Stark",
     ];
-    return quotes[Math.floor(Math.random() * jokes.length)]; // Fixed potential bug: jokes should be quotes
+    return quotes[Math.floor(Math.random() * quotes.length)]; 
   }
 
   // Coin flip
@@ -370,6 +375,67 @@ export async function POST(request: Request) {
 
     const lastMessage = messages[messages.length - 1]?.content?.toLowerCase() || "";
 
+    // GHOST TYPIST / PYAUTOGUI SYSTEM CONTROL
+    const writeMatch = lastMessage.match(/^(?:write\s*down|writedown|type\s*down|type\s+this)\s+(.+)$/i);
+    if (writeMatch) {
+      const textToWrite = writeMatch[1].trim();
+      try {
+        console.log(`[Chat] Triggering Ghost Typist to write: "${textToWrite}"`);
+        
+        // 1. Launch notepad via child_process
+        exec("start notepad", { windowsHide: true });
+        
+        // 2. Schedule the PyAutoGUI typing in 1.2 seconds (giving notepad time to focus)
+        setTimeout(async () => {
+          try {
+            const escapedText = textToWrite.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+            
+            const pythonScript = [
+              "import pygetwindow as gw",
+              "import pyautogui",
+              "import time",
+              "time.sleep(0.2)",
+              "wins = gw.getWindowsWithTitle('Notepad') or gw.getWindowsWithTitle('Untitled')",
+              "if wins:",
+              "    win = wins[0]",
+              "    try:",
+              "        if win.isMinimized:",
+              "            win.restore()",
+              "        win.activate()",
+              "    except Exception:",
+              "        pass",
+              "    time.sleep(0.5)",
+              `    pyautogui.write('${escapedText}', interval=0.05)`,
+              "else:",
+              `    pyautogui.write('${escapedText}', interval=0.05)`
+            ].join("\n");
+
+            const scratchDir = path.join(process.cwd(), "scratch");
+            if (!fs.existsSync(scratchDir)) {
+              fs.mkdirSync(scratchDir, { recursive: true });
+            }
+            const scriptPath = path.join(scratchDir, "ghost_write.py");
+            fs.writeFileSync(scriptPath, pythonScript);
+
+            await execAsync(`python "${scriptPath}"`);
+            
+            try {
+              fs.unlinkSync(scriptPath);
+            } catch (cleanupErr) {}
+          } catch (err) {
+            console.error("Ghost Typist PyAutoGUI typing failed:", err);
+          }
+        }, 1200);
+
+        return NextResponse.json({
+          content: `Right away, Boss. Launching Notepad and typing: "${textToWrite}". Look at your screen!`,
+          playwrightAction: true
+        });
+      } catch (error) {
+        console.error("Ghost Typist trigger error:", error);
+      }
+    }
+
     const weatherApiKey = process.env.WEATHER_API_KEY;
     const serperApiKey = process.env.SERPER_API_KEY;
     const hasWeatherApi = weatherApiKey && weatherApiKey.trim() !== "" && weatherApiKey !== "your-api-key-here";
@@ -477,25 +543,210 @@ export async function POST(request: Request) {
       }
     }
 
+    // SPOTIFY PLAYBACK AUTOMATION
+    const spotifyPlayPattern = /(?:open\s+spotify\s+and\s+)?play\s+(.+?)\s+on\s+spotify/i;
+    const spotifyOpenPlayPattern = /open\s+spotify\s+and\s+play\s+(.+)/i;
+    const spotifyPlayMatch = lastMessage.match(spotifyPlayPattern) || lastMessage.match(spotifyOpenPlayPattern);
+
+    if (spotifyPlayMatch) {
+      const songName = spotifyPlayMatch[1].trim();
+      try {
+        console.log(`[Chat] Triggering Spotify playback script for: "${songName}"`);
+        const escapedSong = songName.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+        const pythonScript = [
+          "import win32gui",
+          "import win32con",
+          "import win32process",
+          "import pyautogui",
+          "import time",
+          "import subprocess",
+          "import sys",
+          "",
+          "def get_spotify_pids():",
+          "    pids = []",
+          "    try:",
+          "        output = subprocess.check_output('tasklist /fi \"imagename eq spotify.exe\" /fo csv', shell=True).decode('utf-8', errors='ignore')",
+          "        for line in output.strip().split('\\n'):",
+          "            parts = line.split(',')",
+          "            if len(parts) > 1 and \"spotify.exe\" in parts[0].lower():",
+          "                pid_str = parts[1].replace('\"', '')",
+          "                try:",
+          "                    pids.append(int(pid_str))",
+          "                except ValueError:",
+          "                    pass",
+          "    except:",
+          "        pass",
+          "    return pids",
+          "",
+          "def find_spotify_window():",
+          "    spotify_pids = get_spotify_pids()",
+          "    if not spotify_pids:",
+          "        return None",
+          "    hwnd_list = []",
+          "    def enum_windows_callback(hwnd, extra):",
+          "        _, pid = win32process.GetWindowThreadProcessId(hwnd)",
+          "        if pid in spotify_pids:",
+          "            class_name = win32gui.GetClassName(hwnd)",
+          "            if class_name == 'Chrome_WidgetWin_1':",
+          "                hwnd_list.append(hwnd)",
+          "        return True",
+          "    win32gui.EnumWindows(enum_windows_callback, None)",
+          "    return hwnd_list[0] if hwnd_list else None",
+          "",
+          "try:",
+          "    spotify_pids_before = get_spotify_pids()",
+          "    was_running = len(spotify_pids_before) > 0",
+          "    print(f'Was running: {was_running}')",
+          "",
+          "    subprocess.Popen('start spotify', shell=True)",
+          "    hwnd = None",
+          "    for _ in range(16):",
+          "        hwnd = find_spotify_window()",
+          "        if hwnd:",
+          "            break",
+          "        time.sleep(0.5)",
+          "",
+          "    if hwnd:",
+          "        if not was_running:",
+          "            print('Fresh launch: waiting 4.0 seconds for UI to initialize...')",
+          "            time.sleep(4.0)",
+          "",
+          "        # Restore and force foreground focus",
+          "        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)",
+          "        time.sleep(0.5)",
+          "        try:",
+          "            win32gui.SetForegroundWindow(hwnd)",
+          "        except Exception as fe:",
+          "            print(f'SetForegroundWindow warning: {fe}')",
+          "        time.sleep(0.5)",
+          "",
+          "        # Maximize the window to secure perfect coordinates & focus lock",
+          "        win32gui.ShowWindow(hwnd, win32con.SW_MAXIMIZE)",
+          "        time.sleep(0.8)",
+          "",
+          "        rect = win32gui.GetWindowRect(hwnd)",
+          "        left, top, right, bottom = rect",
+          "",
+          "        # Click in top-left sidebar to guarantee keyboard focus is active in Spotify",
+          "        pyautogui.click(left + 150, top + 150)",
+          "        time.sleep(0.3)",
+          "        pyautogui.click(left + 150, top + 150)",
+          "        time.sleep(0.5)",
+          "",
+          "        # Focus Search Input (Ctrl+L)",
+          "        pyautogui.hotkey('ctrl', 'l')",
+          "        time.sleep(0.3)",
+          "        pyautogui.hotkey('ctrl', 'l')",
+          "        time.sleep(0.5)",
+          "        pyautogui.hotkey('ctrl', 'a')",
+          "        time.sleep(0.2)",
+          "        pyautogui.press('backspace')",
+          "        time.sleep(0.2)",
+          "",
+          "        # Redundant backspace clearing",
+          "        for _ in range(15):",
+          "            pyautogui.press('backspace')",
+          "",
+          "        pyautogui.write(\"" + escapedSong + "\", interval=0.05)",
+          "        time.sleep(0.5)",
+          "        pyautogui.press('enter')",
+          "        time.sleep(2.0)",
+          "",
+          "        # Scan screenshot for green play button circle",
+          "        img = pyautogui.screenshot()",
+          "        visited = set()",
+          "        found_play_btn = False",
+          "        for y in range(140, 300, 2):",
+          "            for x in range(100, 1800, 2):",
+          "                if (x, y) in visited:",
+          "                    continue",
+          "                r, g, b = img.getpixel((x, y))[:3]",
+          "                if r < 60 and g > 180 and b < 120:",
+          "                    pixels = []",
+          "                    queue = [(x, y)]",
+          "                    visited.add((x, y))",
+          "                    while queue:",
+          "                        cx, cy = queue.pop(0)",
+          "                        pixels.append((cx, cy))",
+          "                        for dx, dy in [(-2, 0), (2, 0), (0, -2), (0, 2)]:",
+          "                            nx, ny = cx + dx, cy + dy",
+          "                            if 100 <= nx < 1800 and 140 <= ny < 300 and (nx, ny) not in visited:",
+          "                                nr, ng, nb = img.getpixel((nx, ny))[:3]",
+          "                                if nr < 60 and ng > 180 and nb < 120:",
+          "                                    visited.add((nx, ny))",
+          "                                    queue.append((nx, ny))",
+          "                    if len(pixels) > 50:",
+          "                        min_x = min(p[0] for p in pixels)",
+          "                        max_x = max(p[0] for p in pixels)",
+          "                        min_y = min(p[1] for p in pixels)",
+          "                        max_y = max(p[1] for p in pixels)",
+          "                        center_x = (min_x + max_x) // 2",
+          "                        center_y = (min_y + max_y) // 2",
+          "                        pyautogui.click(center_x, center_y)",
+          "                        print(f\"SUCCESS: Clicked green play button at ({center_x}, {center_y})\")",
+          "                        found_play_btn = True",
+          "                        break",
+          "            if found_play_btn:",
+          "                break",
+          "",
+          "        if not found_play_btn:",
+          "            print(\"Fallback: Clicking default coordinates directly\")",
+          "            pyautogui.click(1297, 223)",
+          "            time.sleep(0.5)",
+          "            pyautogui.click(675, 205)",
+          "            print(\"SUCCESS\")",
+          "    else:",
+          "        print(\"Spotify app window not found\")",
+          "except Exception as e:",
+          "    print(f\"Error: {e}\")"
+        ].join("\n");
+ 
+        const scratchDir = path.join(process.cwd(), "scratch");
+        if (!fs.existsSync(scratchDir)) {
+          fs.mkdirSync(scratchDir, { recursive: true });
+        }
+        const scriptPath = path.join(scratchDir, "spotify_play.py");
+        fs.writeFileSync(scriptPath, pythonScript);
+ 
+        const pythonExe = fs.existsSync("C:\\Users\\dhruv\\AppData\\Local\\Programs\\Python\\Python311\\python.exe")
+          ? "C:\\Users\\dhruv\\AppData\\Local\\Programs\\Python\\Python311\\python.exe"
+          : "python";
+ 
+        execAsync(`"${pythonExe}" -u "${scriptPath}" > "${path.join(scratchDir, "spotify_debug.log")}" 2>&1`).then(() => {
+          try { fs.unlinkSync(scriptPath); } catch {}
+        }).catch(err => {
+          console.error("Spotify PyAutoGUI execution failed:", err);
+          fs.writeFileSync(path.join(scratchDir, "spotify_error.log"), err.stack || String(err));
+        });
+ 
+        return NextResponse.json({
+          content: `Right away, Boss! 🎵 I am launching Spotify now. Please **do not click anything or switch windows** for the next 5 seconds so I can search and start playing "${songName}" perfectly!`,
+          playwrightAction: true
+        });
+      } catch (error) {
+        console.error("Spotify trigger error:", error);
+      }
+    }
+
     // AUTO CHECKOUT AUTOMATION
-    const checkoutPattern = /(?:buy|checkout|purchase)\s+(.+?)\s+on\s+(amazon|bestbuy|target|walmart)/i;
-    const checkoutMatch = lastMessage.match(checkoutPattern);
+    const checkoutPattern = /(?:buy|checkout|purchase|order|shop\s*for)\s+(.+?)\s+(?:on|from)\s+(amazon|bestbuy|target|walmart)/i;
+    const openAndOrderPattern = /open\s+(amazon|bestbuy|target|walmart)\s+and\s+(?:order|buy|checkout|purchase|search\s*for)\s+(.+)/i;
+    const checkoutMatch = lastMessage.match(checkoutPattern) || lastMessage.match(openAndOrderPattern);
 
     if (checkoutMatch) {
-      const product = checkoutMatch[1].trim();
-      const store = checkoutMatch[2].toLowerCase();
+      const isOpenAndOrder = lastMessage.match(openAndOrderPattern);
+      const product = isOpenAndOrder ? checkoutMatch[2].trim() : checkoutMatch[1].trim();
+      const store = isOpenAndOrder ? checkoutMatch[1].toLowerCase() : checkoutMatch[2].toLowerCase();
       
       try {
         console.log(`[Chat] Triggering Playwright auto-checkout for ${product} on ${store}...`);
         const { playwrightService } = await import('@/services/PlaywrightService');
         
-        // Determine URL based on store
         let url = `https://www.${store}.com/s?k=${encodeURIComponent(product)}`;
         if (store === 'amazon') {
           url = `https://www.amazon.in/s?k=${encodeURIComponent(product)}`;
         }
         
-        // Start checkout sequence
         playwrightService.automateCheckout(url, 'button, .a-button-text').catch(console.error);
         
         return NextResponse.json({
@@ -509,11 +760,14 @@ export async function POST(request: Request) {
 
     // FLIGHT SEARCH AUTOMATION
     const flightPattern = /(?:search|find|check|look for|book)\s+(?:flights?|tickets?)\s+(?:from\s+)?(.+?)\s+(?:to|from|-)\s+(.+?)(?:\s+on\s+(.+))?$/i;
-    const flightMatch = lastMessage.match(flightPattern);
+    const openAndFlightPattern = /open\s+google\s+flights\s+and\s+(?:search|find|check|look for|book)\s+(?:flights?|tickets?)\s+(?:from\s+)?(.+?)\s+(?:to|from|-)\s+(.+?)(?:\s+on\s+(.+))?$/i;
+    const flightMatch = lastMessage.match(flightPattern) || lastMessage.match(openAndFlightPattern);
+    
     if (flightMatch) {
-      const from = flightMatch[1].trim();
-      const to = flightMatch[2].trim();
-      const date = flightMatch[3]?.trim();
+      const isOpenAndFlight = lastMessage.match(openAndFlightPattern);
+      const from = isOpenAndFlight ? flightMatch[1].trim() : flightMatch[1].trim();
+      const to = isOpenAndFlight ? flightMatch[2].trim() : flightMatch[2].trim();
+      const date = isOpenAndFlight ? flightMatch[3]?.trim() : flightMatch[3]?.trim();
       try {
         console.log(`[Chat] Triggering flight search: ${from} → ${to}`);
         const { playwrightService } = await import('@/services/PlaywrightService');
@@ -529,10 +783,13 @@ export async function POST(request: Request) {
 
     // FOOD ORDERING AUTOMATION
     const foodPattern = /(?:order|find|search|get)\s+(.+?)\s+(?:on|from)\s+(zomato|swiggy)/i;
-    const foodMatch = lastMessage.match(foodPattern);
+    const openAndFoodPattern = /open\s+(zomato|swiggy)\s+and\s+(?:order|find|search|get)\s+(.+)/i;
+    const foodMatch = lastMessage.match(foodPattern) || lastMessage.match(openAndFoodPattern);
+    
     if (foodMatch) {
-      const query = foodMatch[1].trim();
-      const platform = foodMatch[2].toLowerCase() as 'zomato' | 'swiggy';
+      const isOpenAndFood = lastMessage.match(openAndFoodPattern);
+      const query = isOpenAndFood ? foodMatch[2].trim() : foodMatch[1].trim();
+      const platform = (isOpenAndFood ? foodMatch[1].toLowerCase() : foodMatch[2].toLowerCase()) as 'zomato' | 'swiggy';
       try {
         console.log(`[Chat] Triggering food search: "${query}" on ${platform}`);
         const { playwrightService } = await import('@/services/PlaywrightService');
@@ -775,11 +1032,14 @@ export async function POST(request: Request) {
     if (shouldSearch) {
       try {
         let query = "";
-        const newsMatch = lastMessage.match(/(?:top\s+\d+\s+)?(.+?)\s*news/i);
+        const newsMatch = lastMessage.match(/(?:top\s+\d+\s+)?(.+?\s*news(?:\s+in\s+.+)?)/i) || 
+                          lastMessage.match(/(?:top\s+\d+\s+)?news(?:\s+in\s+)?(.+)/i);
         const searchMatch = lastMessage.match(/(?:search|look up|find|google)(?:\s+(?:for|about))?\s+(.+?)(?:\?|$)/i);
 
         if (newsMatch) {
-          query = `${newsMatch[1]} news`;
+          query = newsMatch[1] || newsMatch[0];
+          // If the user just said "top news in india", ensure it becomes a good search query
+          if (!query.toLowerCase().includes("news")) query += " news";
         } else if (searchMatch) {
           query = searchMatch[1].trim();
         } else {

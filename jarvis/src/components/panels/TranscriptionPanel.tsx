@@ -48,6 +48,7 @@ export default function TranscriptionPanel({
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
   const [isBotLive, setIsBotLive] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
   const [liveTranscription, setLiveTranscription] = useState("");
   const [botStatus, setBotStatus] = useState("Idle");
   const [summary, setSummary] = useState<{

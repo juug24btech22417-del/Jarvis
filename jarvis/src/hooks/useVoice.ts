@@ -145,7 +145,6 @@ export function useVoice() {
   const hasSpokenRef = useRef(false);
   const isStartingRef = useRef(false);
   const lastResultTimeRef = useRef<number>(Date.now());
-  const watchdogIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const manualActivationRef = useRef(false);
   const lastToggleTimeRef = useRef<number>(0);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -160,33 +159,22 @@ export function useVoice() {
     currentStateRef.current = state;
   }, [state]);
 
-  // REMOVED: Sync local listening state with store - was causing extra re-renders
-  // The store is now only updated when user explicitly toggles the mic
-
   // Check for wake word with fuzzy matching
   const checkWakeWord = useCallback((text: string) => {
     return checkWakeWordFuzzy(text);
   }, []);
 
-  // Initialize speech recognition
+  // Initialize speech recognition — runs ONCE on mount
   useEffect(() => {
-    console.log("[Voice] Effect running - checking environment...");
-
-    if (typeof window === "undefined") {
-      console.log("[Voice] Window is undefined - SSR");
-      return;
-    }
+    console.log("[Voice] Init effect running...");
+    if (typeof window === "undefined") return;
 
     const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
-
     if (!SpeechRecognitionAPI) {
-      console.error("[Voice] SpeechRecognition NOT supported in this browser");
       setIsSupported(false);
       setInitError("SpeechRecognition not supported");
       return;
     }
-
-    console.log("[Voice] SpeechRecognition API found, creating instance...");
 
     try {
       const recognition = new SpeechRecognitionAPI();
@@ -194,8 +182,6 @@ export function useVoice() {
       recognition.continuous = true;
       recognition.interimResults = true;
       recognition.maxAlternatives = 1;
-
-      console.log("[Voice] Recognition instance created, setting up handlers...");
 
       recognition.onstart = () => {
         console.log("[Voice] === RECOGNITION STARTED ===");
@@ -208,9 +194,11 @@ export function useVoice() {
         console.log("[Voice] === RECOGNITION ENDED ===");
         setIsListeningLocal(false);
         isStartingRef.current = false;
+        // Read fresh values from store to avoid stale closures
+        const store = useJarvisStore.getState();
+        const curState = currentStateRef.current;
 
-        // AUTO-RESTART for "Always Listening" luxury mode
-        if (alwaysListening && !isMuted && state !== "listening") {
+        if (store.alwaysListening && !store.isMuted && curState !== "listening" && curState !== "thinking") {
           console.log("[Voice] Auto-restarting background listener...");
           if (restartTimeoutRef.current) clearTimeout(restartTimeoutRef.current);
           restartTimeoutRef.current = setTimeout(() => {
@@ -223,9 +211,9 @@ export function useVoice() {
               console.error("[Voice] Auto-restart failed:", e);
               isStartingRef.current = false;
             }
-          }, 300); // Tiny delay to let the OS release the mic
+          }, 300);
         } else {
-          console.log("[Voice] Recognition stopped - auto-restart disabled or in listening mode");
+          console.log(`[Voice] Recognition stopped (State: ${curState}, Muted: ${store.isMuted})`);
         }
       };
 
@@ -236,75 +224,44 @@ export function useVoice() {
         const isFinal = lastResult.isFinal;
         const confidence = lastResult[0]?.confidence || 0;
 
-        // Barge-in on interim results too
         if (currentStateRef.current === "listening" && transcript.trim().length > 0) {
           window.dispatchEvent(new CustomEvent('jarvis-barge-in'));
         }
-
-        // Update last result time for watchdog
         lastResultTimeRef.current = Date.now();
-
-        // ALWAYS log transcripts for debugging
         console.log(`[Voice] Transcript: "${transcript}" (conf: ${confidence.toFixed(2)}), isFinal: ${isFinal}, state: ${currentStateRef.current}`);
 
-        // Check wake word when idle - use interim results too for faster response
-        if (currentStateRef.current === "idle") {
-          const isWakeWord = checkWakeWord(transcript);
-          if (isWakeWord) {
-            console.log("[Voice] 🎤 WAKE WORD DETECTED! Transitioning to listening mode...");
+        if ((currentStateRef.current === "idle" || currentStateRef.current === "speaking") && transcript.trim().length > 0) {
+          if (checkWakeWordFuzzy(transcript)) {
+            console.log("[Voice] 🎤 WAKE WORD DETECTED (State: " + currentStateRef.current + ")");
             hasSpokenRef.current = false;
-            setState("listening");
+            useJarvisStore.getState().setState("listening");
             setInterimTranscript("");
-
-            // If this is the final result, and it contains more than just the wake word,
-            // extract the command part (everything after the wake word)
             if (isFinal) {
               const lowerTranscript = transcript.toLowerCase().trim();
-              // Find where wake word ends
               let wakeWordEndIndex = 0;
               for (const word of WAKE_WORDS) {
-                if (lowerTranscript.includes(word)) {
-                  const idx = lowerTranscript.indexOf(word);
-                  if (idx !== -1) {
-                    wakeWordEndIndex = Math.max(wakeWordEndIndex, idx + word.length);
-                  }
+                const idx = lowerTranscript.indexOf(word);
+                if (idx !== -1) {
+                  wakeWordEndIndex = Math.max(wakeWordEndIndex, idx + word.length);
                 }
               }
-
-              // Extract command after wake word
               const command = transcript.slice(wakeWordEndIndex).trim();
               if (command.length > 0) {
-                console.log("[Voice] Command with wake word:", command);
                 setFinalTranscript(command);
-              } else {
-                // Just wake word, wait for more speech
-                console.log("[Voice] Wake word only, waiting for command...");
-                setInterimTranscript("");
               }
             }
-            return;
           }
-          // Not a wake word, ignore in idle state
           return;
         }
 
-        // Process command when listening
         if (currentStateRef.current === "listening") {
           if (!isFinal) {
-            // Show interim results for feedback
             setInterimTranscript(transcript);
           } else {
-            // Final result - this is the command
             console.log("[Voice] FINAL COMMAND:", transcript);
             setFinalTranscript(transcript);
             setInterimTranscript("");
-
-            // Stop to clear buffer - onend will auto-restart for wake word detection
-            try {
-              recognition.stop();
-            } catch {
-              // Ignore
-            }
+            try { recognition.stop(); } catch {}
           }
         }
       };
@@ -312,139 +269,111 @@ export function useVoice() {
       recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
         console.error("[Voice] Recognition ERROR:", event.error, event.message);
         isStartingRef.current = false;
-
-        // For most errors, we want to restart
-        // Only abort and not-allowed should stop us permanently
         if (event.error === "not-allowed") {
           setInitError("Microphone permission denied");
-          alert("Microphone permission denied. Please allow microphone access.");
-        } else if (event.error === "aborted") {
-          console.log("[Voice] Recognition aborted (normal)");
-        } else {
-          // For network, service-not-allowed, no-speech, etc - restart
+        } else if (event.error !== "aborted") {
           console.log("[Voice] Will restart after error...");
-          // onend will fire after error and trigger restart
         }
       };
 
       recognitionRef.current = recognition;
-      console.log("[Voice] Recognition instance stored in ref");
+      console.log("[Voice] Recognition ready. Auto-starting...");
+
+      // Start immediately
+      try {
+        isStartingRef.current = true;
+        recognition.start();
+      } catch (e) {
+        console.error("[Voice] Init start failed:", e);
+        isStartingRef.current = false;
+      }
     } catch (err) {
       console.error("[Voice] Error creating recognition:", err);
       setInitError(`Error creating: ${err}`);
     }
 
-    // Audio Level Analysis for "Luxury" Visuals
-    const startAudioAnalysis = async () => {
+    return () => {
+      if (restartTimeoutRef.current) clearTimeout(restartTimeoutRef.current);
+      try { recognitionRef.current?.abort(); } catch {}
+      recognitionRef.current = null;
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Runs ONCE
+
+  // Audio Level Analysis
+  useEffect(() => {
+    if (!alwaysListening || isMuted) return;
+    let cancelled = false;
+    const run = async () => {
       try {
-        if (!streamRef.current) {
-          streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
-        }
-        
-        if (!audioContextRef.current) {
-          audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-        }
-        
+        if (!streamRef.current) streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+        if (!audioContextRef.current) audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
         const ctx = audioContextRef.current;
         if (ctx.state === "suspended") await ctx.resume();
-        
         const source = ctx.createMediaStreamSource(streamRef.current);
         analyserRef.current = ctx.createAnalyser();
         analyserRef.current.fftSize = 256;
         source.connect(analyserRef.current);
-        
         const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
-        
-        const updateLevel = () => {
-          if (!analyserRef.current) return;
+        const tick = () => {
+          if (cancelled || !analyserRef.current) return;
           analyserRef.current.getByteFrequencyData(dataArray);
-          
-          // Calculate average volume
           let sum = 0;
           for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
-          const average = sum / dataArray.length;
-          
-          // Boost and normalize for visual effect
-          const level = Math.min(1, (average / 128) * 1.5);
-          setVoiceLevel(level);
-          
-          animationFrameRef.current = requestAnimationFrame(updateLevel);
+          setVoiceLevel(Math.min(1, (sum / dataArray.length / 128) * 1.5));
+          animationFrameRef.current = requestAnimationFrame(tick);
         };
-        
-        updateLevel();
-      } catch (e) {
-        console.error("[Voice] Audio analysis failed:", e);
-      }
+        tick();
+      } catch (e) { console.error("[Voice] Audio analysis failed:", e); }
     };
-
-    if (alwaysListening && !isMuted) {
-      startAudioAnalysis();
-      
-      console.log("[Voice] Starting Always-On background listener...");
-      try {
-        const rec = recognitionRef.current;
-        if (rec && !isStartingRef.current) {
-          isStartingRef.current = true;
-          rec.start();
-        }
-      } catch (e) {
-        console.error("[Voice] Failed to start background listener:", e);
-        isStartingRef.current = false;
-      }
-    }
-
-    return () => {
-      console.log("[Voice] Cleanup - stopping recognition and analysis");
-      if (restartTimeoutRef.current) clearTimeout(restartTimeoutRef.current);
-      if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-      
-      try {
-        recognitionRef.current?.abort();
-        streamRef.current?.getTracks().forEach(t => t.stop());
-        audioContextRef.current?.close();
-      } catch { /* Ignore */ }
-    };
-  }, [checkWakeWord, isMuted, alwaysListening, setState, setVoiceLevel]);
+    run();
+    return () => { cancelled = true; if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current); };
+  }, [alwaysListening, isMuted, setVoiceLevel]);
 
   // Reset when going idle
   useEffect(() => {
     if (state === "idle") {
       hasSpokenRef.current = false;
-      setInterimTranscript("");
-      setFinalTranscript("");
+      if (interimTranscript !== "") setInterimTranscript("");
+      if (finalTranscript !== "") setFinalTranscript("");
     }
-  }, [state]);
+  }, [state, interimTranscript, finalTranscript]);
+
+  // Watchdog
+  useEffect(() => {
+    if (!alwaysListening || isMuted) return;
+    const id = setInterval(() => {
+      if (Date.now() - lastResultTimeRef.current > 30000 && currentStateRef.current === "idle" && !isStartingRef.current) {
+        console.log("[Voice] Watchdog: force restarting...");
+        try { recognitionRef.current?.stop(); } catch {}
+      }
+    }, 10000);
+    return () => clearInterval(id);
+  }, [alwaysListening, isMuted]);
+
+  // State change manager — ensure mic is on when needed
+  useEffect(() => {
+    if (!recognitionRef.current || isMuted) return;
+    if (state === "listening" || alwaysListening) {
+      if (!isListening && !isStartingRef.current) {
+        console.log("[Voice] State manager: starting mic for state:", state);
+        try { isStartingRef.current = true; recognitionRef.current.start(); } catch { isStartingRef.current = false; }
+      }
+    } else if (!alwaysListening && isListening) {
+      try { recognitionRef.current.stop(); } catch {}
+    }
+  }, [state, alwaysListening, isMuted, isListening]);
 
   const stopListening = useCallback(() => {
-    console.log("[Voice] Manual stop called");
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch {
-        // Ignore
-      }
-    }
+    if (recognitionRef.current) { try { recognitionRef.current.stop(); } catch {} }
     setIsListeningLocal(false);
   }, []);
 
   const startListening = useCallback(() => {
-    const now = Date.now();
-    // Debounce: prevent rapid toggling (min 500ms between toggles)
-    if (now - lastToggleTimeRef.current < 500) {
-      console.log("[Voice] Toggle debounced - too soon");
-      return;
-    }
-    lastToggleTimeRef.current = now;
-
-    console.log("[Voice] Manual start called");
+    if (Date.now() - lastToggleTimeRef.current < 500) return;
+    lastToggleTimeRef.current = Date.now();
     manualActivationRef.current = true;
-
-    // Clear any pending auto-restart
-    if (restartTimeoutRef.current) {
-      clearTimeout(restartTimeoutRef.current);
-      restartTimeoutRef.current = null;
-    }
-
+    if (restartTimeoutRef.current) { clearTimeout(restartTimeoutRef.current); restartTimeoutRef.current = null; }
     if (recognitionRef.current && !isStartingRef.current) {
       try {
         isStartingRef.current = true;
@@ -455,58 +384,9 @@ export function useVoice() {
         manualActivationRef.current = false;
       }
     }
-
-    // Clear manual activation flag after 2 seconds
-    setTimeout(() => {
-      manualActivationRef.current = false;
-    }, 2000);
+    setTimeout(() => { manualActivationRef.current = false; }, 2000);
   }, []);
 
-  // Auto-start/stop based on state - UPDATED for Always-On
-  useEffect(() => {
-    if (!recognitionRef.current || isMuted) return;
-
-    const now = Date.now();
-    if (now - lastToggleTimeRef.current < 500) return;
-
-    if (state === "listening") {
-      // If we are in "listening" mode, we want to ensure the mic is active for the command
-      if (!isListening && !isStartingRef.current) {
-        console.log("[Voice] Ensuring mic is active for command listening");
-        try {
-          isStartingRef.current = true;
-          recognitionRef.current.start();
-        } catch (e) {
-          console.error("[Voice] Command start failed:", e);
-          isStartingRef.current = false;
-        }
-      }
-    } else if (alwaysListening) {
-      // If Always-On is enabled, we want the mic active in ALL OTHER states (idle, speaking, thinking)
-      // to allow for wake word detection and barge-in.
-      if (!isListening && !isStartingRef.current) {
-        console.log("[Voice] Ensuring mic is active for Always-On mode (state: " + state + ")");
-        try {
-          isStartingRef.current = true;
-          recognitionRef.current.start();
-        } catch (e) {
-          console.error("[Voice] Always-On auto-start failed:", e);
-          isStartingRef.current = false;
-        }
-      }
-    } else {
-      // Always-On is OFF, and we are not in listening mode -> Mic should be OFF
-      if (isListening && !isStartingRef.current) {
-        console.log("[Voice] Stopping mic as Always-On is disabled");
-        try {
-          isStartingRef.current = true;
-          recognitionRef.current.stop();
-        } catch {
-          // Ignore
-        }
-      }
-    }
-  }, [state, alwaysListening, isMuted]);
 
   const setFinalTranscriptWrapper = useCallback((text: string) => {
     setFinalTranscript(text);
@@ -527,8 +407,7 @@ export function useVoice() {
 
 // Text-to-Speech hook using Browser TTS with British English voice
 export function useTextToSpeech() {
-  const { isMuted } = useJarvisStore();
-  const [isSpeaking, setIsSpeaking] = useState(false);
+  const { isMuted, isSpeaking, setIsSpeaking } = useJarvisStore();
   const isSpeakingRef = useRef(false);
   
   // Streaming Refs
@@ -604,13 +483,11 @@ export function useTextToSpeech() {
       
       nextStartTimeRef.current = ctx.currentTime + 0.05;
       
-      console.log("[TTS] Attempting to connect to bridge at ws://127.0.0.1:8787...");
       const ws = new WebSocket("ws://127.0.0.1:8787");
       wsRef.current = ws;
       ws.binaryType = "arraybuffer";
 
       ws.onopen = () => {
-        console.log("[TTS] 🟢 Streaming bridge connected!");
         setIsSpeaking(true);
         isSpeakingRef.current = true;
         ws.send(JSON.stringify({ type: "speak", text }));
@@ -618,11 +495,16 @@ export function useTextToSpeech() {
 
       ws.onmessage = (ev) => {
         if (typeof ev.data === "string") {
-          console.log("[TTS] Received control message:", ev.data);
+          try {
+            const ctrl = JSON.parse(ev.data);
+            if (ctrl.type === "error") {
+              stopStreaming();
+              speakBrowser(text);
+            }
+          } catch (e) {}
           return;
         }
 
-        console.log("[TTS] Received audio binary, size:", ev.data.byteLength);
         const pcm = new Int16Array(ev.data);
         const floats = pcm16ToFloat32(pcm);
         const sampleRate = 24000;
@@ -649,19 +531,70 @@ export function useTextToSpeech() {
         nextStartTimeRef.current += audioBuffer.duration;
       };
 
-      ws.onerror = () => {
-        console.warn("[TTS] Stream bridge unreachable. Falling back to browser TTS.");
-        speakBrowser(text);
-      };
-
-      ws.onclose = () => {
-        wsRef.current = null;
-      };
+      ws.onerror = () => speakBrowser(text);
+      ws.onclose = () => { wsRef.current = null; };
     } catch (e) {
-      console.error("[TTS] Streaming setup failed:", e);
       speakBrowser(text);
     }
   }, [isMuted, stopStreaming, speakBrowser]);
+
+  // NEW: Real-time streaming methods
+  const startStreamingSpeak = useCallback(() => {
+    if (isMuted) return;
+    stopStreaming();
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+
+    try {
+      if (!audioCtxRef.current) {
+        audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+      const ctx = audioCtxRef.current;
+      if (ctx.state === "suspended") ctx.resume();
+      nextStartTimeRef.current = ctx.currentTime + 0.05;
+
+      const ws = new WebSocket("ws://127.0.0.1:8787");
+      wsRef.current = ws;
+      ws.binaryType = "arraybuffer";
+
+      ws.onopen = () => {
+        setIsSpeaking(true);
+        isSpeakingRef.current = true;
+        ws.send(JSON.stringify({ type: "start_stream" }));
+      };
+
+      ws.onmessage = (ev) => {
+        if (typeof ev.data === "string") return;
+        const pcm = new Int16Array(ev.data);
+        const floats = pcm16ToFloat32(pcm);
+        const audioBuffer = ctx.createBuffer(1, floats.length, 24000);
+        audioBuffer.copyToChannel(floats, 0);
+        const src = ctx.createBufferSource();
+        src.buffer = audioBuffer;
+        src.connect(ctx.destination);
+        activeSourcesRef.current.add(src);
+        src.onended = () => activeSourcesRef.current.delete(src);
+        const now = ctx.currentTime;
+        if (nextStartTimeRef.current < now) nextStartTimeRef.current = now + 0.01;
+        src.start(nextStartTimeRef.current);
+        nextStartTimeRef.current += audioBuffer.duration;
+      };
+      ws.onclose = () => { wsRef.current = null; };
+    } catch (e) {
+      console.error("[TTS] Stream start failed", e);
+    }
+  }, [isMuted, stopStreaming]);
+
+  const sendStreamingChunk = useCallback((text: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "chunk", text }));
+    }
+  }, []);
+
+  const endStreamingSpeak = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "end_stream" }));
+    }
+  }, []);
 
   const stop = useCallback(() => {
     stopStreaming();
@@ -682,14 +615,22 @@ export function useTextToSpeech() {
     return () => window.removeEventListener('jarvis-barge-in', handleBargeIn);
   }, [stop]);
 
-  return { speak, stop, stopSpeaking, isSpeaking };
+  return { speak, startStreamingSpeak, sendStreamingChunk, endStreamingSpeak, stop, stopSpeaking, isSpeaking };
+
 }
 
 // Combined voice hook for JARVIS
 export function useJarvisVoice() {
   const [lastCommand, setLastCommand] = useState("");
   const { state, setState } = useJarvisStore();
-  const { speak, stopSpeaking, isSpeaking } = useTextToSpeech();
+  const {
+    speak,
+    startStreamingSpeak,
+    sendStreamingChunk,
+    endStreamingSpeak,
+    stopSpeaking,
+    isSpeaking,
+  } = useTextToSpeech();
   const listeningTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const {
@@ -703,76 +644,47 @@ export function useJarvisVoice() {
     setFinalTranscript,
   } = useVoice();
 
+  // The speaking state is now globally managed in the store via useTextToSpeech
+
   // Speak "Yes, Boss?" only once when entering listening mode
   useEffect(() => {
-    console.log("[JarvisVoice] State check - state:", state, "isSpeaking:", isSpeaking, "hasSpoken:", hasSpokenRef.current);
     if (state === "listening" && !isSpeaking && !hasSpokenRef.current) {
-      console.log("[JarvisVoice] Speaking 'Yes, Boss?'");
       hasSpokenRef.current = true;
       speak("Yes, Boss?");
     }
+  }, [state, isSpeaking, speak, hasSpokenRef]);
 
-    return () => {
-      if (listeningTimeoutRef.current) {
-        clearTimeout(listeningTimeoutRef.current);
-        listeningTimeoutRef.current = null;
-      }
-    };
-  }, [state, isSpeaking, speak, hasSpokenRef, setState]);
-
-  // Reset timeout when user is speaking (interim transcript changes)
+  // Reset timeout when user is speaking
   useEffect(() => {
     if (state !== "listening") return;
-
-    // Clear existing timeout
-    if (listeningTimeoutRef.current) {
-      clearTimeout(listeningTimeoutRef.current);
-    }
-
-    // Set new 15-second timeout
+    if (listeningTimeoutRef.current) clearTimeout(listeningTimeoutRef.current);
     listeningTimeoutRef.current = setTimeout(() => {
-      if (state === "listening") {
-        console.log("[JarvisVoice] Listening timeout (15s) - returning to idle");
-        setState("idle");
-      }
+      if (state === "listening") setState("idle");
     }, 15000);
-
     return () => {
-      if (listeningTimeoutRef.current) {
-        clearTimeout(listeningTimeoutRef.current);
-        listeningTimeoutRef.current = null;
-      }
+      if (listeningTimeoutRef.current) clearTimeout(listeningTimeoutRef.current);
     };
   }, [interimTranscript, state, setState]);
 
   // Submit final transcript
   useEffect(() => {
     if (finalTranscript && state === "listening") {
-      console.log("[JarvisVoice] Got final command:", finalTranscript);
       setLastCommand(finalTranscript);
       setFinalTranscript("");
       setState("thinking");
-
-      // Clear the timeout since we got a command
-      if (listeningTimeoutRef.current) {
-        clearTimeout(listeningTimeoutRef.current);
-        listeningTimeoutRef.current = null;
-      }
+      if (listeningTimeoutRef.current) clearTimeout(listeningTimeoutRef.current);
     }
   }, [finalTranscript, state, setState, setFinalTranscript]);
 
-  // Toggle listening manually
   const toggleListening = useCallback(() => {
-    console.log("[JarvisVoice] Toggle listening, current state:", state);
     if (state === "listening") {
       stopListening();
       setState("idle");
     } else {
-      // Reset hasSpoken so we can say "Yes, Boss?" again
       hasSpokenRef.current = false;
       setState("listening");
     }
-  }, [state, setState, stopListening]);
+  }, [state, setState, stopListening, hasSpokenRef]);
 
   return {
     interimTranscript,
@@ -781,6 +693,9 @@ export function useJarvisVoice() {
     isSupported,
     lastCommand,
     speak,
+    startStreamingSpeak,
+    sendStreamingChunk,
+    endStreamingSpeak,
     stopSpeaking,
     toggleListening,
     stopListening,
@@ -788,3 +703,4 @@ export function useJarvisVoice() {
     hasSpokenRef,
   };
 }
+
