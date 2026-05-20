@@ -424,7 +424,8 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
 
     // Open website/app with desktop app support
     const isSpotifyPlay = lower.includes("spotify") && (lower.includes("play") || lower.includes("search"));
-    const openMatch = isSpotifyPlay ? null : lower.match(/open\s+(?:the\s+)?(whatsapp|telegram|instagram|spotify|discord|youtube|chrome|vs code|code|notepad|calculator|file explorer|settings|twitter|x\.com|github|gmail|maps)/);
+    const isYouTubeMediaReq = lower.includes("youtube") && (lower.includes("play") || lower.includes("search") || lower.includes("show"));
+    const openMatch = (isSpotifyPlay || isYouTubeMediaReq) ? null : lower.match(/open\s+(?:the\s+)?(whatsapp|telegram|instagram|spotify|discord|youtube|chrome|vs code|code|notepad|calculator|file explorer|settings|twitter|x\.com|github|gmail|maps)/);
     if (openMatch) {
       const app = openMatch[1].replace(/\s+/g, "");
 

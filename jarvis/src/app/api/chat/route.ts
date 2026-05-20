@@ -728,6 +728,81 @@ export async function POST(request: Request) {
       }
     }
 
+    // YOUTUBE AUTOMATION
+    const youtubeMediaPattern = /(?:play|search for|show me)\s+(.*?)\s+(?:on\s+youtube)/i;
+    const openAndYoutubeMediaPattern = /open\s+youtube\s+and\s+(?:play|search for|show me)\s+(.+)/i;
+    const youtubeMediaMatch = lastMessage.match(youtubeMediaPattern) || lastMessage.match(openAndYoutubeMediaPattern);
+
+    if (youtubeMediaMatch && !spotifyPlayMatch) {
+      const query = youtubeMediaMatch[1].trim();
+      
+      try {
+        console.log(`[Chat] Triggering YouTube playback script for: "${query}"`);
+        const escapedQuery = query.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+        
+        const pythonScript = [
+          "import pyautogui",
+          "import time",
+          "import subprocess",
+          "import urllib.parse",
+          "import urllib.request",
+          "import re",
+          "",
+          "try:",
+          `    query = "${escapedQuery}"`,
+          "    encoded_query = urllib.parse.quote(query)",
+          "    search_url = f'https://www.youtube.com/results?search_query={encoded_query}'",
+          "    ",
+          "    print(f'Fetching search results for: {query}')",
+          "    req = urllib.request.Request(search_url, headers={'User-Agent': 'Mozilla/5.0'})",
+          "    html = urllib.request.urlopen(req).read().decode('utf-8')",
+          "    video_ids = re.findall(r\"watch\\?v=(\\S{11})\", html)",
+          "    ",
+          "    if video_ids:",
+          "        video_url = f'https://www.youtube.com/watch?v={video_ids[0]}'",
+          "        print(f'Found first video: {video_url}')",
+          "        subprocess.Popen(f'start \"\" \"{video_url}\"', shell=True)",
+          "        ",
+          "        print('Waiting 5.0 seconds for video to load...')",
+          "        time.sleep(5.0)",
+          "        ",
+          "        print('Entering fullscreen (f)')",
+          "        pyautogui.press('f')",
+          "        print('SUCCESS')",
+          "    else:",
+          "        print('No video found in search results.')",
+          "        subprocess.Popen(f'start \"\" \"{search_url}\"', shell=True)",
+          "except Exception as e:",
+          "    print(f'Error: {e}')"
+        ].join("\n");
+
+        const scratchDir = path.join(process.cwd(), "scratch");
+        if (!fs.existsSync(scratchDir)) {
+          fs.mkdirSync(scratchDir, { recursive: true });
+        }
+        const scriptPath = path.join(scratchDir, "youtube_play.py");
+        fs.writeFileSync(scriptPath, pythonScript);
+
+        const pythonExe = fs.existsSync("C:\\Users\\dhruv\\AppData\\Local\\Programs\\Python\\Python311\\python.exe")
+          ? "C:\\Users\\dhruv\\AppData\\Local\\Programs\\Python\\Python311\\python.exe"
+          : "python";
+
+        execAsync(`"${pythonExe}" -u "${scriptPath}" > "${path.join(scratchDir, "youtube_debug.log")}" 2>&1`).then(() => {
+          try { fs.unlinkSync(scriptPath); } catch {}
+        }).catch(err => {
+          console.error("YouTube PyAutoGUI execution failed:", err);
+          fs.writeFileSync(path.join(scratchDir, "youtube_error.log"), err.stack || String(err));
+        });
+
+        return NextResponse.json({
+          content: `Right away, Boss! 🎬 Opening YouTube and searching for "${query}". Please give me a few seconds to load the page and click the first video.`,
+          playwrightAction: true
+        });
+      } catch (error) {
+        console.error("YouTube trigger error:", error);
+      }
+    }
+
     // AUTO CHECKOUT AUTOMATION
     const checkoutPattern = /(?:buy|checkout|purchase|order|shop\s*for)\s+(.+?)\s+(?:on|from)\s+(amazon|bestbuy|target|walmart)/i;
     const openAndOrderPattern = /open\s+(amazon|bestbuy|target|walmart)\s+and\s+(?:order|buy|checkout|purchase|search\s*for)\s+(.+)/i;
