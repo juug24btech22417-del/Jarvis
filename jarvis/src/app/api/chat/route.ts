@@ -878,19 +878,19 @@ export async function POST(request: Request) {
       }
     }
 
-    // WHATSAPP MESSAGING AUTOMATION
+    // WHATSAPP MESSAGING AUTOMATION (desktop via pyautogui)
     const whatsappPattern = /(?:send|message|text|whatsapp)\s+(?:on\s+)?whatsapp\s+(?:to\s+)?(.+?)\s+(?:saying|that|message)\s+(.+)/i;
     const whatsappMatch = lastMessage.match(whatsappPattern);
     if (whatsappMatch) {
       const contact = whatsappMatch[1].trim();
       const message = whatsappMatch[2].trim();
       try {
-        console.log(`[Chat] Triggering WhatsApp message to "${contact}"`);
-        const { playwrightService } = await import('@/services/PlaywrightService');
-        playwrightService.sendWhatsApp(contact, message).catch(console.error);
+        console.log(`[Chat] Triggering WhatsApp desktop automation to "${contact}"`);
+        const scriptPath = path.join(process.cwd(), 'scripts', 'whatsapp_desktop.py');
+        await execAsync(`python "${scriptPath}" "${contact}" "${message}"`);
         return NextResponse.json({
-          content: `📱 Opening WhatsApp Web to message ${contact}. You may need to scan the QR code if this is the first time, Boss.`,
-          playwrightAction: true
+          content: `📱 Sent WhatsApp message to ${contact} via desktop app.`,
+          playwrightAction: false
         });
       } catch (error) {
         console.error("WhatsApp trigger error:", error);

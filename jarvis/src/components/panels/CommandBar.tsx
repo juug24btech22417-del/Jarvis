@@ -80,6 +80,11 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
   } = useJarvisVoice();
 
   const { setVolume, mute, unmute } = useVolumeControl();
+
+  // Derive the "actively listening for commands" state from the Jarvis state machine.
+  // This is different from store.isListening which tracks the raw SpeechRecognition engine.
+  // The mic button should show "active" (red pulsing) only when state === "listening".
+  const isActivelyListening = state === "listening";
   const { readText, writeText } = useClipboard();
   const { getBattery } = useBatteryStatus();
   const { getNetworkInfo } = useNetworkStatus();
@@ -182,12 +187,12 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
     inputRef.current?.focus();
   }, []);
 
-  // Update input with voice transcript while listening
+  // Update input with voice transcript while in listening state
   useEffect(() => {
-    if (isListening && interimTranscript) {
+    if (isActivelyListening && interimTranscript) {
       setInput(interimTranscript);
     }
-  }, [interimTranscript, isListening]);
+  }, [interimTranscript, isActivelyListening]);
 
   // Process voice command when lastCommand changes
   useEffect(() => {
@@ -3330,7 +3335,8 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
           content: fullResponse,
         });
 
-        // No need for speak(fullResponse) here as it was streamed above
+        // Speak the full response using browser TTS (streaming WS bridge is offline)
+        speak(fullResponse);
         setTimeout(() => setState("idle"), 3000);
       } else {
         // Fallback if no response
@@ -3475,11 +3481,12 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
             <button
               ref={voiceBtnRef}
               onClick={(e) => {
+                e.stopPropagation(); // Prevent bubbling to ArcReactor overlay
                 createRipple(e, voiceBtnRef.current!, 'rgba(0, 212, 255, 0.4)');
                 handleVoiceToggle();
               }}
               className={`p-3 rounded-full transition-all duration-300 flex-shrink-0 relative overflow-hidden ${
-                isListening
+                isActivelyListening
                   ? input.trim()
                     ? "bg-accent-green shadow-[0_0_15px_rgba(0,255,100,0.5)]"
                     : "bg-accent-red animate-pulse"
@@ -3489,7 +3496,7 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
               }`}
               disabled={!voiceSupported}
               title={
-                isListening
+                isActivelyListening
                   ? input.trim()
                     ? "Send voice command"
                     : "Stop listening"
@@ -3498,7 +3505,7 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
                     : "Start voice input"
               }
             >
-              {isListening ? (
+              {isActivelyListening ? (
                 input.trim() ? (
                   <Send className="w-5 h-5 text-white" />
                 ) : (
@@ -3524,17 +3531,17 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
                 }
               }}
               placeholder={
-                isListening
+                isActivelyListening
                   ? "Listening..."
                   : "Say 'Hey JARVIS' or type a command..."
               }
               className="w-full bg-transparent border-none outline-none font-rajdhani text-text-primary placeholder:text-text-secondary/50"
-              disabled={isListening}
+              disabled={isActivelyListening}
             />
 
             {/* Listening indicator */}
             <AnimatePresence>
-              {isListening && (
+              {isActivelyListening && (
                 <motion.div
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
@@ -3570,7 +3577,7 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
               createRipple(e, sendBtnRef.current!, 'rgba(0, 212, 255, 0.4)');
               handleSubmit();
             }}
-            disabled={!input.trim() || isListening}
+            disabled={!input.trim() || isActivelyListening}
             className="p-3 rounded-full bg-panel-glass hover:bg-panel-border disabled:opacity-30 disabled:cursor-not-allowed transition-colors relative overflow-hidden"
           >
             <Send className="w-5 h-5 text-reactor-core" />

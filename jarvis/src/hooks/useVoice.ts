@@ -151,13 +151,43 @@ export function useVoice() {
   const analyserRef = useRef<AnalyserNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const animationFrameRef = useRef<number | null>(null);
+  const lastSpeakEndTimeRef = useRef<number>(0); // tracks when Jarvis TTS finishes, to ignore echo
+  const isListeningRef = useRef(false); // tracks actual recognition listening state to avoid race conditions
+  const listeningStartTimeRef = useRef<number>(0); // tracks when listening state was entered
 
   const { state, isMuted, alwaysListening, setState, setVoiceLevel, setIsListening: setStoreIsListening } = useJarvisStore();
+  const prevIsSpeakingRef = useRef(false);
 
-  // Keep ref in sync
+  // Keep ref in sync synchronously to avoid race conditions with onresult
   useEffect(() => {
-    currentStateRef.current = state;
-  }, [state]);
+    // Initial sync
+    currentStateRef.current = useJarvisStore.getState().state;
+    if (currentStateRef.current === "listening") {
+      listeningStartTimeRef.current = Date.now();
+    }
+    
+    // Subscribe for synchronous updates
+    const unsub = useJarvisStore.subscribe((s) => {
+      if (s.state === "listening" && currentStateRef.current !== "listening") {
+        listeningStartTimeRef.current = Date.now();
+      }
+      currentStateRef.current = s.state;
+    });
+    return unsub;
+  }, []);
+
+  // Track when Jarvis finishes speaking, to ignore mic echo for a cooldown period
+  useEffect(() => {
+    const unsub = useJarvisStore.subscribe((s) => {
+      if (prevIsSpeakingRef.current && !s.isSpeaking) {
+        // Jarvis just stopped speaking — record timestamp
+        lastSpeakEndTimeRef.current = Date.now();
+        console.log("[Voice] TTS ended, echo cooldown started");
+      }
+      prevIsSpeakingRef.current = s.isSpeaking;
+    });
+    return unsub;
+  }, []);
 
   // Check for wake word with fuzzy matching
   const checkWakeWord = useCallback((text: string) => {
@@ -186,24 +216,30 @@ export function useVoice() {
       recognition.onstart = () => {
         console.log("[Voice] === RECOGNITION STARTED ===");
         setIsListeningLocal(true);
+        isListeningRef.current = true;
         isStartingRef.current = false;
         lastResultTimeRef.current = Date.now();
+        // Sync store isListening so the UI (CommandBar) can reflect listening state
+        setStoreIsListening(true);
       };
 
       recognition.onend = () => {
         console.log("[Voice] === RECOGNITION ENDED ===");
         setIsListeningLocal(false);
+        isListeningRef.current = false;
         isStartingRef.current = false;
+        setStoreIsListening(false);
         // Read fresh values from store to avoid stale closures
         const store = useJarvisStore.getState();
         const curState = currentStateRef.current;
 
-        if (store.alwaysListening && !store.isMuted && curState !== "listening" && curState !== "thinking") {
-          console.log("[Voice] Auto-restarting background listener...");
+        // Auto-restart: keep mic alive when in listening mode or alwaysListening
+        if ((curState === "listening" || store.alwaysListening) && !store.isMuted) {
+          console.log("[Voice] Auto-restarting recognition (state:", curState, ")");
           if (restartTimeoutRef.current) clearTimeout(restartTimeoutRef.current);
           restartTimeoutRef.current = setTimeout(() => {
             try {
-              if (recognitionRef.current && !isStartingRef.current) {
+              if (recognitionRef.current && !isStartingRef.current && !isListeningRef.current) {
                 isStartingRef.current = true;
                 recognitionRef.current.start();
               }
@@ -224,8 +260,14 @@ export function useVoice() {
         const isFinal = lastResult.isFinal;
         const confidence = lastResult[0]?.confidence || 0;
 
+        // Only barge-in if the USER is speaking (not Jarvis's own TTS echoing into the mic)
+        // Also skip barge-in during the activation cooldown ("Yes, Boss?" is still playing)
         if (currentStateRef.current === "listening" && transcript.trim().length > 0) {
-          window.dispatchEvent(new CustomEvent('jarvis-barge-in'));
+          const storeNow = useJarvisStore.getState();
+          const timeSinceActivation = Date.now() - listeningStartTimeRef.current;
+          if (!storeNow.isSpeaking && timeSinceActivation > 2500) {
+            window.dispatchEvent(new CustomEvent('jarvis-barge-in'));
+          }
         }
         lastResultTimeRef.current = Date.now();
         console.log(`[Voice] Transcript: "${transcript}" (conf: ${confidence.toFixed(2)}), isFinal: ${isFinal}, state: ${currentStateRef.current}`);
@@ -259,9 +301,36 @@ export function useVoice() {
             setInterimTranscript(transcript);
           } else {
             console.log("[Voice] FINAL COMMAND:", transcript);
-            setFinalTranscript(transcript);
-            setInterimTranscript("");
-            try { recognition.stop(); } catch {}
+            const trimmed = transcript.trim();
+            if (trimmed.length > 0) {
+              // If we are currently speaking, ignore this transcript to prevent stopping on our own voice
+              const store = useJarvisStore.getState();
+              if (store.isSpeaking) {
+                console.log("[Voice] Ignoring final transcript while speaking");
+                setInterimTranscript("");
+                return;
+              }
+              // Cooldown: ignore transcripts arriving within 3s of Jarvis finishing speaking
+              // These are echoes of Jarvis's own TTS picked up by the mic
+              if (Date.now() - lastSpeakEndTimeRef.current < 3000) {
+                console.log("[Voice] Ignoring echo transcript (cooldown after TTS)");
+                setInterimTranscript("");
+                return;
+              }
+              // Cooldown: ignore transcripts arriving within 2.5s of entering listening state
+              // This covers the "Yes, Boss?" TTS + any buffered audio / click noise
+              if (Date.now() - listeningStartTimeRef.current < 2500) {
+                console.log("[Voice] Ignoring transcript received too quickly after listening activation (likely buffered/click noise or Yes Boss echo)");
+                setInterimTranscript("");
+                return;
+              }
+              setFinalTranscript(transcript);
+              setInterimTranscript("");
+              try { recognition.stop(); } catch {}
+            } else {
+              // ignore empty final transcript, keep listening
+              setInterimTranscript("");
+            }
           }
         }
       };
@@ -355,14 +424,14 @@ export function useVoice() {
   useEffect(() => {
     if (!recognitionRef.current || isMuted) return;
     if (state === "listening" || alwaysListening) {
-      if (!isListening && !isStartingRef.current) {
+      if (!isListeningRef.current && !isStartingRef.current) {
         console.log("[Voice] State manager: starting mic for state:", state);
         try { isStartingRef.current = true; recognitionRef.current.start(); } catch { isStartingRef.current = false; }
       }
-    } else if (!alwaysListening && isListening) {
+    } else if (!alwaysListening && isListeningRef.current) {
       try { recognitionRef.current.stop(); } catch {}
     }
-  }, [state, alwaysListening, isMuted, isListening]);
+  }, [state, alwaysListening, isMuted]);
 
   const stopListening = useCallback(() => {
     if (recognitionRef.current) { try { recognitionRef.current.stop(); } catch {} }
@@ -469,131 +538,33 @@ export function useTextToSpeech() {
   const speak = useCallback((text: string) => {
     if (isMuted) return;
 
-    // Barge-in: Stop any current speech
-    stopStreaming();
+    // Stop any currently playing speech first (barge-in)
+    if (wsRef.current) {
+      try { wsRef.current.close(); } catch {}
+      wsRef.current = null;
+    }
+    activeSourcesRef.current.forEach(src => { try { src.stop(0); } catch {} });
+    activeSourcesRef.current.clear();
     if (window.speechSynthesis) window.speechSynthesis.cancel();
 
-    // Attempt Streaming TTS via Local Bridge
-    try {
-      if (!audioCtxRef.current) {
-        audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-      }
-      const ctx = audioCtxRef.current;
-      if (ctx.state === "suspended") ctx.resume();
-      
-      nextStartTimeRef.current = ctx.currentTime + 0.05;
-      
-      const ws = new WebSocket("ws://127.0.0.1:8787");
-      wsRef.current = ws;
-      ws.binaryType = "arraybuffer";
+    // Use browser TTS directly — streaming bridge (port 8787) is not running
+    speakBrowser(text);
+  }, [isMuted, speakBrowser]);
 
-      ws.onopen = () => {
-        setIsSpeaking(true);
-        isSpeakingRef.current = true;
-        ws.send(JSON.stringify({ type: "speak", text }));
-      };
-
-      ws.onmessage = (ev) => {
-        if (typeof ev.data === "string") {
-          try {
-            const ctrl = JSON.parse(ev.data);
-            if (ctrl.type === "error") {
-              stopStreaming();
-              speakBrowser(text);
-            }
-          } catch (e) {}
-          return;
-        }
-
-        const pcm = new Int16Array(ev.data);
-        const floats = pcm16ToFloat32(pcm);
-        const sampleRate = 24000;
-        
-        const audioBuffer = ctx.createBuffer(1, floats.length, sampleRate);
-        audioBuffer.copyToChannel(floats, 0);
-
-        const src = ctx.createBufferSource();
-        src.buffer = audioBuffer;
-        src.connect(ctx.destination);
-
-        activeSourcesRef.current.add(src);
-        src.onended = () => {
-          activeSourcesRef.current.delete(src);
-          if (activeSourcesRef.current.size === 0 && (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN)) {
-            setIsSpeaking(false);
-            isSpeakingRef.current = false;
-          }
-        };
-
-        const now = ctx.currentTime;
-        if (nextStartTimeRef.current < now) nextStartTimeRef.current = now + 0.01;
-        src.start(nextStartTimeRef.current);
-        nextStartTimeRef.current += audioBuffer.duration;
-      };
-
-      ws.onerror = () => speakBrowser(text);
-      ws.onclose = () => { wsRef.current = null; };
-    } catch (e) {
-      speakBrowser(text);
-    }
-  }, [isMuted, stopStreaming, speakBrowser]);
-
-  // NEW: Real-time streaming methods
+  // Streaming speak methods — no-op while streaming bridge (port 8787) is offline.
+  // These are kept so call sites don't break. When the server is running,
+  // replace speakBrowser calls in speak() and restore the WS logic.
   const startStreamingSpeak = useCallback(() => {
-    if (isMuted) return;
-    stopStreaming();
-    if (window.speechSynthesis) window.speechSynthesis.cancel();
+    // No-op: streaming server not running
+    console.log("[TTS] startStreamingSpeak called (streaming server offline, skipping)");
+  }, []);
 
-    try {
-      if (!audioCtxRef.current) {
-        audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-      }
-      const ctx = audioCtxRef.current;
-      if (ctx.state === "suspended") ctx.resume();
-      nextStartTimeRef.current = ctx.currentTime + 0.05;
-
-      const ws = new WebSocket("ws://127.0.0.1:8787");
-      wsRef.current = ws;
-      ws.binaryType = "arraybuffer";
-
-      ws.onopen = () => {
-        setIsSpeaking(true);
-        isSpeakingRef.current = true;
-        ws.send(JSON.stringify({ type: "start_stream" }));
-      };
-
-      ws.onmessage = (ev) => {
-        if (typeof ev.data === "string") return;
-        const pcm = new Int16Array(ev.data);
-        const floats = pcm16ToFloat32(pcm);
-        const audioBuffer = ctx.createBuffer(1, floats.length, 24000);
-        audioBuffer.copyToChannel(floats, 0);
-        const src = ctx.createBufferSource();
-        src.buffer = audioBuffer;
-        src.connect(ctx.destination);
-        activeSourcesRef.current.add(src);
-        src.onended = () => activeSourcesRef.current.delete(src);
-        const now = ctx.currentTime;
-        if (nextStartTimeRef.current < now) nextStartTimeRef.current = now + 0.01;
-        src.start(nextStartTimeRef.current);
-        nextStartTimeRef.current += audioBuffer.duration;
-      };
-      ws.onclose = () => { wsRef.current = null; };
-    } catch (e) {
-      console.error("[TTS] Stream start failed", e);
-    }
-  }, [isMuted, stopStreaming]);
-
-  const sendStreamingChunk = useCallback((text: string) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "chunk", text }));
-    }
+  const sendStreamingChunk = useCallback((_text: string) => {
+    // No-op
   }, []);
 
   const endStreamingSpeak = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "end_stream" }));
-    }
+    // No-op
   }, []);
 
   const stop = useCallback(() => {
