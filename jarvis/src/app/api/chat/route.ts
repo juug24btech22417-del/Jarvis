@@ -12,10 +12,23 @@ import { extractAndStoreMemories } from "@/lib/memory/extractor";
 // Use environment variable or default to port 3000 for the API base URL
 const API_BASE = process.env.INTERNAL_API_URL || 'http://localhost:3000';
 
+// ─── Timeout-aware fetch wrapper ───────────────────────────────────
+// Prevents the app from hanging when external APIs are down/slow
+function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: number = 8000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
+}
+
 // Two-Stage Response Pipeline: Transform factual responses into Sassy Butler persona
+// Uses a SHORT 3-second timeout so offline responses are never delayed
 async function applyPersonalityWrapper(factualResponse: string, apiKey: string): Promise<string> {
+  // Skip wrapper entirely if no API key
+  if (!apiKey || apiKey.trim() === "" || apiKey === "your-api-key-here") {
+    return factualResponse;
+  }
   try {
-    const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+    const response = await fetchWithTimeout("https://integrate.api.nvidia.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -30,17 +43,79 @@ async function applyPersonalityWrapper(factualResponse: string, apiKey: string):
         temperature: 0.75,
         max_tokens: 512,
       }),
-    });
+    }, 1500); // 1.5-second timeout — wrapper is decorative polish, must never dominate latency
 
     if (response.ok) {
       const data = await response.json();
       const transformed = data.choices?.[0]?.message?.content?.trim();
       if (transformed) return transformed;
     }
-  } catch (error) {
-    console.error("Personality wrapper failed:", error);
+  } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      console.warn("[Chat] Personality wrapper timed out (3s) — returning raw response");
+    } else {
+      console.error("Personality wrapper failed:", error);
+    }
   }
   return factualResponse;
+}
+
+// Try OpenRouter as a fallback when NVIDIA is rate-limited / slow / broken.
+// OpenRouter free models are rate-limited per-account, not per-IP, so they
+// recover much faster than the shared NVIDIA NIM GPU pool. Returns null if
+// no key is configured or the call fails — caller should fall through to
+// the offline response in that case.
+async function tryOpenRouterFallback(
+  messages: any[],
+  systemPrompt: string,
+  apiKey: string | undefined
+): Promise<NextResponse | null> {
+  if (!apiKey || apiKey.trim() === "" || apiKey === "your-api-key-here") {
+    return null;
+  }
+  try {
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), 10000);
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "http://localhost:3000",
+        "X-Title": "JARVIS AI Assistant",
+      },
+      body: JSON.stringify({
+        model: "openai/gpt-oss-120b:free",
+        messages: [
+          { role: "system", content: systemPrompt },
+          ...messages,
+        ],
+        max_tokens: 768,
+        temperature: 0.75,
+      }),
+      signal: c.signal,
+    });
+    clearTimeout(t);
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => "");
+      console.error("[OpenRouter fallback] HTTP", response.status, errText.slice(0, 200));
+      return null;
+    }
+
+    const data = await response.json();
+    const content = data.choices?.[0]?.message?.content?.trim();
+    if (!content) {
+      console.warn("[OpenRouter fallback] Empty content in response");
+      return null;
+    }
+
+    console.log("[OpenRouter fallback] Served response via OpenRouter");
+    return NextResponse.json({ content, fallback: "openrouter" });
+  } catch (e: any) {
+    console.error("[OpenRouter fallback] Fetch failed:", e?.name || e?.message);
+    return null;
+  }
 }
 
 // Generate offline response based on user input
@@ -356,12 +431,19 @@ export async function POST(request: Request) {
 
     let memoryContext = "";
     try {
-      const memoryData = await retrieveRelevantMemories(lastUserMessage, {
+      // Cap memory retrieval at 3 seconds to prevent slow DB from blocking chat
+      const memoryPromise = retrieveRelevantMemories(lastUserMessage, {
         maxEntities: 5,
         maxHops: 2,
         includePreferences: true,
       });
-      memoryContext = formatMemoryContextAsPrompt(memoryData);
+      const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000));
+      const memoryData = await Promise.race([memoryPromise, timeoutPromise]);
+      if (memoryData) {
+        memoryContext = formatMemoryContextAsPrompt(memoryData);
+      } else {
+        console.warn("[Chat] Memory retrieval timed out (3s) — skipping context");
+      }
     } catch (err) {
       console.error("[Chat] Memory retrieval failed:", err);
     }
@@ -1164,7 +1246,6 @@ export async function POST(request: Request) {
       /brightness|screen/,
       /add task|remind me to|remember that/,
       /calculate|compute/,
-      /^(hello|hi|hey)$/,
       /status|how are you/,
       /^help$/,
       /who are you|what are you/,
@@ -1194,7 +1275,7 @@ export async function POST(request: Request) {
 
     if (useNvidia) {
       try {
-        const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+        const response = await fetchWithTimeout("https://integrate.api.nvidia.com/v1/chat/completions", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -1213,11 +1294,18 @@ export async function POST(request: Request) {
             temperature: 0.75,
             stream: true,
           }),
-        });
+        }, 8000); // 8-second timeout for main LLM call
 
         if (!response.ok) {
           const errorText = await response.text();
-          console.error("NVIDIA API error:", response.status, errorText, "- Falling back to offline mode");
+          console.error("NVIDIA API error:", response.status, errorText, "- Trying OpenRouter fallback");
+          const openrouterApiKey = process.env.OPENROUTER_API_KEY;
+          const orResp = await tryOpenRouterFallback(
+            messages.map((m: { role: string; content: string }) => ({ role: m.role, content: m.content })),
+            enhancedSystemPrompt,
+            openrouterApiKey
+          );
+          if (orResp) return orResp;
           const offlineResponse = generateOfflineResponse(lastMessage);
           return NextResponse.json({
             content: offlineResponse,
@@ -1232,8 +1320,19 @@ export async function POST(request: Request) {
             Connection: "keep-alive",
           },
         });
-      } catch (fetchError) {
-        console.error("Network error calling NVIDIA API:", fetchError, "- Falling back to offline mode");
+      } catch (fetchError: any) {
+        if (fetchError?.name === 'AbortError') {
+          console.error("NVIDIA API timed out (8s) — Trying OpenRouter fallback");
+        } else {
+          console.error("Network error calling NVIDIA API:", fetchError, "- Trying OpenRouter fallback");
+        }
+        const openrouterApiKey = process.env.OPENROUTER_API_KEY;
+        const orResp = await tryOpenRouterFallback(
+          messages.map((m: { role: string; content: string }) => ({ role: m.role, content: m.content })),
+          enhancedSystemPrompt,
+          openrouterApiKey
+        );
+        if (orResp) return orResp;
         const offlineResponse = generateOfflineResponse(lastMessage);
         return NextResponse.json({
           content: offlineResponse,
@@ -1251,7 +1350,7 @@ export async function POST(request: Request) {
     }
 
     try {
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
+      const response = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -1268,11 +1367,18 @@ export async function POST(request: Request) {
           })),
           stream: true,
         }),
-      });
+      }, 8000); // 8-second timeout
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error("Claude API error:", response.status, errorText, "- Falling back to offline mode");
+        console.error("Claude API error:", response.status, errorText, "- Trying OpenRouter fallback");
+        const openrouterApiKey = process.env.OPENROUTER_API_KEY;
+        const orResp = await tryOpenRouterFallback(
+          messages.map((m: { role: string; content: string }) => ({ role: m.role, content: m.content })),
+          enhancedSystemPrompt,
+          openrouterApiKey
+        );
+        if (orResp) return orResp;
         const offlineResponse = generateOfflineResponse(lastMessage);
         return NextResponse.json({
           content: offlineResponse,
@@ -1287,8 +1393,12 @@ export async function POST(request: Request) {
           Connection: "keep-alive",
         },
       });
-    } catch (fetchError) {
-      console.error("Network error calling Claude API:", fetchError, "- Falling back to offline mode");
+    } catch (fetchError: any) {
+      if (fetchError?.name === 'AbortError') {
+        console.error("Claude API timed out (8s) — falling back to offline mode");
+      } else {
+        console.error("Network error calling Claude API:", fetchError, "- Falling back to offline mode");
+      }
       const offlineResponse = generateOfflineResponse(lastMessage);
       return NextResponse.json({
         content: offlineResponse,

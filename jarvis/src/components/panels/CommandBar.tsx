@@ -3385,36 +3385,28 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
     // Process offline commands (tasks, memories)
     await processOfflineCommand(text);
 
-    // Parallelize Intent Parsing and Chat Generation
-    // We start the chat stream immediately, but also check for specialized intents (like opening apps)
+    // Run intent parse in the background, but don't gate the chat on it.
+    // The intent exists only to *replace* the chat for specialized commands
+    // (e.g. "play X on Spotify") — for generic chat like "what's up" the user
+    // is waiting on the LLM, not on intent classification.
+    //
+    // The previous Promise.race([intent, chat]) pattern didn't actually cancel
+    // the slower one, so a slow /api/intent call would keep NVIDIA busy and
+    // the chat would still race against it for the shared rate limit.
     let intentProcessed = false;
-    
-    // We'll use a controller to abort the chat if an intent is found
-    const abortController = new AbortController();
-
-    const intentPromise = processFlexibleCommand(text).then(async (flexibleResponse) => {
+    processFlexibleCommand(text).then((flexibleResponse) => {
       if (flexibleResponse && !intentProcessed) {
         intentProcessed = true;
-        abortController.abort(); // Stop the chat stream
-        
         addMessage({
           role: "assistant",
           content: flexibleResponse,
         });
         speak(flexibleResponse);
-        return true;
-      }
-      return false;
-    });
-
-    const chatPromise = sendToClaude(text, abortController.signal).then(() => {
-      if (!intentProcessed) {
-        // Chat finished normally
       }
     });
 
-    // Wait for either to finish or both
-    await Promise.race([intentPromise, chatPromise]);
+    // Fire the chat immediately — no abort signal, no race.
+    await sendToClaude(text);
   };
 
   // (handleVoiceToggle is defined above)

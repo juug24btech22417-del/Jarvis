@@ -73,16 +73,31 @@ export async function extractMemoriesFromMessage(
 
     // Use NVIDIA API for extraction (or fallback to local)
     const apiBase = process.env.INTERNAL_API_URL || 'http://localhost:3000';
-    const response = await fetch(`${apiBase}/api/openai`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.3, // Low temperature for consistent extraction
-        max_tokens: 1500,
-        response_format: { type: "json_object" },
-      }),
-    });
+    // 5s timeout — extraction runs in the background, must never block the chat
+    // or hang the process if the upstream is rate-limited / unreachable.
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), 5000);
+    let response: Response;
+    try {
+      response = await fetch(`${apiBase}/api/openai`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: prompt }],
+          temperature: 0.3, // Low temperature for consistent extraction
+          max_tokens: 1500,
+          response_format: { type: "json_object" },
+        }),
+        signal: c.signal,
+      });
+    } catch (e: any) {
+      // Upstream unreachable / timed out / TLS reset. Memory extraction is
+      // best-effort background work — never throw out of here.
+      console.warn("[MemoryExtractor] /api/openai unreachable — skipping extraction:", e?.name || e?.message);
+      return { entities: [], relationships: [] };
+    } finally {
+      clearTimeout(t);
+    }
 
     if (!response.ok) {
       console.error("[MemoryExtractor] API error:", response.status);
@@ -272,16 +287,28 @@ Statement: ${statement}`;
 
   try {
     const apiBase = process.env.INTERNAL_API_URL || 'http://localhost:3000';
-    const response = await fetch(`${apiBase}/api/openai`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.2,
-        max_tokens: 200,
-        response_format: { type: "json_object" },
-      }),
-    });
+    // 5s timeout — preference extraction is best-effort and must never hang.
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), 5000);
+    let response: Response;
+    try {
+      response = await fetch(`${apiBase}/api/openai`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: prompt }],
+          temperature: 0.2,
+          max_tokens: 200,
+          response_format: { type: "json_object" },
+        }),
+        signal: c.signal,
+      });
+    } catch (e: any) {
+      console.warn("[MemoryExtractor] /api/openai unreachable — skipping preference extraction:", e?.name || e?.message);
+      return { success: false, message: "extraction_unavailable" };
+    } finally {
+      clearTimeout(t);
+    }
 
     if (!response.ok) {
       return { success: false, message: "Failed to extract preference" };

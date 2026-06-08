@@ -23,21 +23,36 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const response = await fetch(OPENROUTER_API_URL, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "http://localhost:3000",
-        "X-Title": "JARVIS AI Assistant",
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        temperature,
-        max_tokens,
-      }),
-    });
+    // 10s timeout — anything past this is just wasted compute and noise.
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), 10000);
+    let response: Response;
+    try {
+      response = await fetch(OPENROUTER_API_URL, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": "http://localhost:3000",
+          "X-Title": "JARVIS AI Assistant",
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          temperature,
+          max_tokens,
+        }),
+        signal: c.signal,
+      });
+    } catch (e: any) {
+      console.error("[OpenRouter] Fetch failed:", e?.name || e?.message);
+      return NextResponse.json(
+        { error: "OpenRouter unreachable", details: e?.message },
+        { status: 504 }
+      );
+    } finally {
+      clearTimeout(t);
+    }
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
