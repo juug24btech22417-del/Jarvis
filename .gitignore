@@ -46,3 +46,6 @@ jarvis/tsconfig.tsbuildinfo
 *.jpeg
 *.webp
 !jarvis/public/
+
+# Certificates
+jarvis/.certificates/

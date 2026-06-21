@@ -89,7 +89,7 @@ interface JarvisStore {
   addMemory: (memory: Omit<Memory, "id">) => void;
 
   // UI
-  activePanel: "chat" | "tasks" | "memory" | "notes" | "code" | "skill-trainer" | "image-generator" | "summarizer" | "web-scraper" | "firecrawl" | "playwright" | "whatsapp" | "instagram" | "telegram" | "security" | "vault" | "dungeon" | "habits" | "time-capsule" | "voice-notes" | "nasa" | "huggingface" | "ifttt" | "browser" | "local-llm" | "vision" | "automation" | "price-tracker" | "transcription" | null;
+  activePanel: "chat" | "tasks" | "memory" | "notes" | "code" | "skill-trainer" | "image-generator" | "summarizer" | "web-scraper" | "firecrawl" | "playwright" | "whatsapp" | "instagram" | "telegram" | "security" | "vault" | "dungeon" | "habits" | "time-capsule" | "voice-notes" | "nasa" | "huggingface" | "ifttt" | "browser" | "local-llm" | "vision" | "automation" | "price-tracker" | "transcription" | "proxy" | null;
   setActivePanel: (panel: JarvisStore["activePanel"]) => void;
   showBriefing: boolean;
   setShowBriefing: (show: boolean) => void;

@@ -1,0 +1,13 @@
+/* JARVIS Web Injector Stylesheet */
+@keyframes jarvis-glow-pulse {
+  0%, 100% {
+    box-shadow: 0 0 15px rgba(6, 182, 212, 0.4), 0 0 30px rgba(6, 182, 212, 0.2);
+  }
+  50% {
+    box-shadow: 0 0 25px rgba(6, 182, 212, 0.7), 0 0 45px rgba(6, 182, 212, 0.4);
+  }
+}
+
+.jarvis-injected-glow {
+  animation: jarvis-glow-pulse 2s infinite;
+}

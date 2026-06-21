@@ -1603,6 +1603,12 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
       }
     }
 
+    // AUTONOMOUS WEB PROXY / ARC REACTOR OVERLAY
+    if (lower.match(/\b(proxy|web proxy|arc reactor|reactor overlay|autonomous proxy|mitm proxy)\b/)) {
+      setActivePanel("proxy");
+      return "Opening Autonomous Web Proxy panel. System-wide AI interception protocols active, Boss.";
+    }
+
     // QUICK NOTES
     // Take note - matches: note that, remember this, take a note, write down
     const noteMatch = lower.match(/(?:note\s+(?:that\s+)?|take\s+a\s+note|remember\s+this|write\s+down)[:\s]*(.+)/i);

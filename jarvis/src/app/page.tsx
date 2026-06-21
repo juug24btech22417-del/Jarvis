@@ -42,6 +42,7 @@ import AutomationPanel from "@/components/panels/AutomationPanel";
 import PriceTrackerPanel from "@/components/panels/PriceTrackerPanel";
 import PlaywrightPanel from "@/components/panels/PlaywrightPanel";
 import TranscriptionPanel from "@/components/panels/TranscriptionPanel";
+import ProxyPanel from "@/components/panels/ProxyPanel";
 import { useJarvisStore } from "@/store/jarvis.store";
 import { useTextToSpeech } from "@/hooks/useVoice";
 
@@ -404,6 +405,7 @@ export default function Home() {
   // Transcription
   const [transcriptionOpen, setTranscriptionOpen] = useState(false);
   const [playwrightOpen, setPlaywrightOpen] = useState(false);
+  const [proxyOpen, setProxyOpen] = useState(false);
 
   // Handle timer completion - speak notification
   const handleTimerComplete = useCallback((label: string) => {
@@ -431,6 +433,8 @@ export default function Home() {
     setAutomationOpen(false);
     setPriceTrackerOpen(false);
     setFirecrawlOpen(false);
+    setPlaywrightOpen(false);
+    setProxyOpen(false);
 
     // Open the requested panel
     switch (activePanel) {
@@ -478,6 +482,9 @@ export default function Home() {
         break;
       case "playwright":
         setPlaywrightOpen(true);
+        break;
+      case "proxy":
+        setProxyOpen(true);
         break;
       case "chat":
       case "tasks":
@@ -1018,6 +1025,12 @@ export default function Home() {
               </motion.div>
             )}
           </AnimatePresence>
+
+          {/* Autonomous Web Interceptor Proxy */}
+          <ProxyPanel
+            isOpen={proxyOpen}
+            onClose={() => setProxyOpen(false)}
+          />
         </>
       )}
 
