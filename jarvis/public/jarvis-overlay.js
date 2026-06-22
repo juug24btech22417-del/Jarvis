@@ -363,9 +363,53 @@
     addChatBubble("You", queryText, "role-user");
 
     const typingBubble = addChatBubble("J.A.R.V.I.S.", "Synthesizing answer...", "role-jarvis");
+    const lowerQuery = queryText.toLowerCase().trim();
+
+    // ── Phase 4: Speech-to-OS Intent Detection ──────────────────────────────
+    // Match OS commands BEFORE hitting the LLM, so they're instant and offline.
+    const osPayload = detectOSIntent(lowerQuery);
+    if (osPayload) {
+      typingBubble.querySelector(".chat-text").innerText = `⚙️ Executing: ${osPayload.description}…`;
+      try {
+        // Route through /__jarvis_os (intercepted by the MITM proxy server-side).
+        // This avoids the browser mixed-content block that fires when the overlay
+        // is injected into an HTTPS page (e.g. YouTube) and tries to fetch HTTP.
+        const osRes = await fetch("/__jarvis_os", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(osPayload),
+        });
+        const osData = await osRes.json();
+        if (osData.success) {
+          const msg = `✅ Done, Boss. ${osData.description}.`;
+          typingBubble.querySelector(".chat-text").innerText = msg;
+          speakText(msg);
+        } else {
+          typingBubble.querySelector(".chat-text").innerText = `⚠️ OS command failed: ${osData.error}`;
+        }
+      } catch (e) {
+        typingBubble.querySelector(".chat-text").innerText = `⚠️ Could not reach OS bridge: ${e.message}`;
+      }
+      display.scrollTop = display.scrollHeight;
+      return; // Skip LLM entirely
+    }
+    // ── End Speech-to-OS ─────────────────────────────────────────────────────
 
     // Extract DOM content (visible text nodes)
     const domText = getPageTextContent();
+
+    // Detect vision keywords — triggers a live screenshot capture
+    const visionKeywords = [
+      "what's on screen", "whats on screen", "what do you see", "look at this",
+      "analyze this page", "describe this page", "read this chart", "read this graph",
+      "what is on my screen", "screenshot", "see this", "analyze the screen",
+      "what does this page look like", "what's visible", "check this page visually"
+    ];
+    const captureScreenshot = visionKeywords.some((kw) => lowerQuery.includes(kw));
+
+    if (captureScreenshot) {
+      typingBubble.querySelector(".chat-text").innerText = "Scanning your screen, Boss. One moment...";
+    }
 
     try {
       const res = await fetch("/__jarvis_chat", {
@@ -377,6 +421,7 @@
           query: queryText,
           url: window.location.href,
           domContent: domText,
+          captureScreenshot,
         }),
       });
 
@@ -388,6 +433,14 @@
       if (data.success) {
         typingBubble.querySelector(".chat-text").innerText = data.response;
         speakText(data.response);
+
+        // Execute browser action if LLM returned one
+        if (data.action) {
+          const actionResult = executeAction(data.action);
+          if (actionResult) {
+            addChatBubble("J.A.R.V.I.S.", `⚙️ Action executed: ${actionResult}`, "role-jarvis");
+          }
+        }
       } else {
         typingBubble.querySelector(".chat-text").innerText = `Apologies, Boss. Error: ${data.error}`;
       }
@@ -399,6 +452,53 @@
     display.scrollTop = display.scrollHeight;
   }
 
+  // ── OS Intent Detector ─────────────────────────────────────────────────────
+  // Returns a payload for /api/os/command, or null if no OS intent matched.
+  function detectOSIntent(q) {
+    // Open app patterns
+    const openApp = q.match(/^(?:open|launch|start|run|load)\s+(.+)/);
+    if (openApp) {
+      const target = openApp[1].trim();
+      // If it looks like a URL, open it in browser
+      if (/^https?:\/\//.test(target) || target.includes(".com") || target.includes(".io")) {
+        const url = target.startsWith("http") ? target : `https://${target}`;
+        return { command: "open_url", url, description: `Opening ${url}` };
+      }
+      return { command: "open_app", app: target, description: `Launching ${target}` };
+    }
+
+    // Web search
+    const search = q.match(/^(?:search|google|look up|find)\s+(?:for\s+)?(.+)/);
+    if (search) {
+      return { command: "web_search", query: search[1].trim(), description: `Searching for "${search[1].trim()}"` };
+    }
+
+    // Volume controls
+    if (/\b(?:volume up|louder|increase volume)\b/.test(q)) return { command: "volume_up", description: "Increasing volume" };
+    if (/\b(?:volume down|quieter|decrease volume|lower volume)\b/.test(q)) return { command: "volume_down", description: "Decreasing volume" };
+    if (/\b(?:mute|unmute|silence)\b/.test(q)) return { command: "mute", description: "Toggling mute" };
+
+    // System actions
+    if (/\b(?:lock|lock (?:the )?(?:screen|computer|pc|workstation))\b/.test(q)) return { command: "lock", description: "Locking workstation" };
+    if (/\b(?:sleep|hibernate|put (?:the )?computer to sleep)\b/.test(q)) return { command: "sleep", description: "Sleeping system" };
+    if (/\b(?:take a screenshot|screenshot|capture screen)\b/.test(q)) return { command: "screenshot", description: "Taking screenshot" };
+
+    // Shutdown / cancel
+    if (/\b(?:shutdown|shut down|power off|turn off)\b/.test(q)) return { command: "shutdown", description: "Shutdown in 30 seconds" };
+    if (/\b(?:cancel shutdown|abort shutdown)\b/.test(q)) return { command: "cancel_shutdown", description: "Cancelling shutdown" };
+
+    // Kill a process: "kill chrome", "close spotify"
+    const kill = q.match(/^(?:kill|close|quit|exit|force quit)\s+(.+)/);
+    if (kill) {
+      const app = kill[1].trim().replace(/\s+/g, "");
+      return { command: "kill_app", app, description: `Closing ${kill[1].trim()}` };
+    }
+
+    return null; // No OS intent — fall through to LLM
+  }
+
+
+
   function addChatBubble(role, text, roleClass) {
     const chatBubble = document.createElement("div");
     chatBubble.className = "chat-bubble";
@@ -409,6 +509,44 @@
     display.appendChild(chatBubble);
     display.scrollTop = display.scrollHeight;
     return chatBubble;
+  }
+
+  // 8b. Action Executor — runs DOM actions returned by the LLM
+  function executeAction(action) {
+    try {
+      switch (action.action) {
+        case "click": {
+          const el = document.querySelector(action.selector);
+          if (!el) return `Could not find element: ${action.selector}`;
+          el.click();
+          return `Clicked "${action.selector}"`;
+        }
+        case "scroll": {
+          const amount = action.amount || 300;
+          const dir = action.direction === "up" ? -amount : amount;
+          window.scrollBy({ top: dir, behavior: "smooth" });
+          return `Scrolled ${action.direction || "down"} by ${amount}px`;
+        }
+        case "fill": {
+          const input = document.querySelector(action.selector);
+          if (!input) return `Could not find input: ${action.selector}`;
+          const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+          nativeInputValueSetter.call(input, action.value || "");
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          return `Filled "${action.selector}" with "${action.value}"`;
+        }
+        case "navigate": {
+          if (!action.url) return "Navigate action missing URL";
+          window.location.href = action.url;
+          return `Navigating to ${action.url}`;
+        }
+        default:
+          return `Unknown action type: ${action.action}`;
+      }
+    } catch (e) {
+      console.error("[JARVIS] Action execution error:", e);
+      return `Action failed: ${e.message}`;
+    }
   }
 
   // 8. Helper to Scrape Webpage Text Content
@@ -454,4 +592,64 @@
     utterance.pitch = 0.95; // Slightly lower pitch for mature voice
     window.speechSynthesis.speak(utterance);
   }
+
+  // 10. Inline Co-Pilot Event Listener (Ctrl + Space)
+  document.addEventListener("keydown", async (e) => {
+    const target = e.target;
+    const isInput = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA");
+    
+    // Check for Ctrl + Space on an input/textarea element
+    if (isInput && e.ctrlKey && e.code === "Space") {
+      e.preventDefault();
+      e.stopPropagation();
+
+      const originalVal = target.value;
+      if (!originalVal.trim()) return;
+
+      const originalPlaceholder = target.placeholder;
+      target.disabled = true;
+      target.placeholder = "J.A.R.V.I.S. is polishing text...";
+      target.value = "Scanning & rewriting...";
+
+      try {
+        const res = await fetch("/__jarvis_chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            query: originalVal,
+            url: window.location.href,
+            domContent: "",
+            copilot: true,
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success && data.response) {
+            // Safely set the input value using descriptor to trigger framework updates
+            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+              target.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype,
+              "value"
+            ).set;
+            nativeInputValueSetter.call(target, data.response.trim());
+            target.dispatchEvent(new Event("input", { bubbles: true }));
+          } else {
+            target.value = originalVal;
+          }
+        } else {
+          target.value = originalVal;
+        }
+      } catch (err) {
+        console.error("[JARVIS Co-Pilot Error]:", err);
+        target.value = originalVal;
+      } finally {
+        target.disabled = false;
+        target.placeholder = originalPlaceholder;
+        target.focus();
+      }
+    }
+  }, true); // Use capture phase to intercept before page listeners
 })();
+

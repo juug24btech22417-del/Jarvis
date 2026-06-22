@@ -961,6 +961,46 @@ class PlaywrightService {
       return { content: '', error: e.message };
     }
   }
+  /**
+   * Capture a screenshot of the currently active tab in the JARVIS Chrome instance.
+   * Requires Chrome to be launched with --remote-debugging-port=9222.
+   */
+  async captureActiveTabScreenshot(): Promise<{ base64: string; error?: string }> {
+    let browser: any = null;
+    try {
+      console.log("[Playwright] Connecting to running Chrome via CDP on port 9222...");
+      // Connect to the already-running Chrome instance via its debugging port
+      browser = await originalChromium.connectOverCDP("http://127.0.0.1:9222");
+
+      // Get all browser contexts and find the active page
+      const contexts = browser.contexts();
+      if (!contexts.length) {
+        return { base64: "", error: "No active browser context found on port 9222." };
+      }
+
+      const pages = contexts[0].pages();
+      if (!pages.length) {
+        return { base64: "", error: "No open pages found in the JARVIS Chrome instance." };
+      }
+
+      // Use the first visible page (the active tab)
+      const activePage = pages[pages.length - 1];
+      console.log(`[Playwright] Taking screenshot of: ${activePage.url()}`);
+
+      const buf = await activePage.screenshot({ type: "jpeg", quality: 75 });
+
+      // Disconnect gracefully WITHOUT closing the actual browser
+      await browser.close();
+
+      return { base64: buf.toString("base64") };
+    } catch (e: any) {
+      console.error("[Playwright] CDP screenshot failed:", e.message);
+      if (browser) {
+        try { await browser.close(); } catch {}
+      }
+      return { base64: "", error: e.message };
+    }
+  }
 }
 
 export const playwrightService = new PlaywrightService();

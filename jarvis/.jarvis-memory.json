@@ -1,0 +1,34 @@
+{
+  "facts": [
+    {
+      "text": "called IronGrid and I work at Stark Industries",
+      "ts": 1782103020594,
+      "source": "proxy"
+    },
+    {
+      "text": "my project is called IronGrid and I work at Stark Industries",
+      "ts": 1782103020594,
+      "source": "proxy"
+    },
+    {
+      "text": "my name is dhruv and i live in bangalore",
+      "ts": 1782104574286,
+      "source": "proxy"
+    },
+    {
+      "text": "my name is dhruv",
+      "ts": 1782104608686,
+      "source": "proxy"
+    },
+    {
+      "text": "im an intern in codealpha",
+      "ts": 1782106299625,
+      "source": "proxy"
+    }
+  ],
+  "preferences": {
+    "employer": "Stark Industries",
+    "name": "dhruv"
+  },
+  "recentTopics": []
+}
