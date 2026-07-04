@@ -90,16 +90,29 @@ export function CalculatorDisplay({
   calculations,
   onClear,
   onDelete,
+  onClose,
 }: {
   lastCalculation: Calculation | null;
   calculations: Calculation[];
   onClear: () => void;
   onDelete?: (id: string) => void;
+  /** Dismiss the popup without clearing history. */
+  onClose?: () => void;
 }) {
   const [showHistory, setShowHistory] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
   const resultRef = useRef<HTMLDivElement>(null);
+
+  // Esc closes the panel
+  useEffect(() => {
+    if (!onClose) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
   // Animate result on change
   useEffect(() => {
@@ -132,7 +145,7 @@ export function CalculatorDisplay({
         initial={{ opacity: 0, x: 20 }}
         animate={{ opacity: 1, x: 0 }}
         exit={{ opacity: 0, x: 20 }}
-        className="fixed top-24 right-6 z-40 w-72"
+        className="fixed top-24 right-6 z-[100] w-72"
       >
         <div className="holographic-panel p-4">
           <div className="flex items-center justify-between mb-3">
@@ -158,9 +171,12 @@ export function CalculatorDisplay({
                 <History className="w-4 h-4 text-text-secondary" />
               </button>
               <button
-                onClick={onClear}
+                onClick={() => {
+                  onClose?.();
+                  onClear();
+                }}
                 className="p-1.5 hover:bg-accent-red/20 rounded transition-colors"
-                title="Clear history"
+                title="Close (Esc)"
               >
                 <X className="w-4 h-4 text-accent-red" />
               </button>
