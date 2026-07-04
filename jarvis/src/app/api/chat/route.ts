@@ -8,6 +8,8 @@ import { parseCommand, JARVISContext, buildSystemPrompt, parseIntentWithLLM, PER
 const execAsync = promisify(exec);
 import { retrieveRelevantMemories, formatMemoryContextAsPrompt } from "@/lib/memory/retriever";
 import { extractAndStoreMemories } from "@/lib/memory/extractor";
+import { bumpUsage } from "@/lib/memory/graph";
+import { recordEvent } from "@/lib/memory/patterns";
 
 // Use environment variable or default to port 3000 for the API base URL
 const API_BASE = process.env.INTERNAL_API_URL || 'http://localhost:3000';
@@ -61,10 +63,17 @@ async function applyPersonalityWrapper(factualResponse: string, apiKey: string):
 }
 
 // Try OpenRouter as a fallback when NVIDIA is rate-limited / slow / broken.
-// OpenRouter free models are rate-limited per-account, not per-IP, so they
-// recover much faster than the shared NVIDIA NIM GPU pool. Returns null if
-// no key is configured or the call fails — caller should fall through to
-// the offline response in that case.
+// Tries several free models in sequence — each has its own rate-limit pool
+// so a 429 on one doesn't necessarily mean the others are blocked.
+// Returns null if every model is rate-limited or the API key is missing.
+const OPENROUTER_FALLBACK_MODELS = [
+  "meta/llama-3.1-8b-instruct",
+  "nvidia/nemotron-3-ultra-550b-a55b:free",
+  "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+  "google/gemma-3-27b-it:free",
+  "mistralai/mistral-small-3.1-24b-instruct:free",
+];
+
 async function tryOpenRouterFallback(
   messages: any[],
   systemPrompt: string,
@@ -73,58 +82,140 @@ async function tryOpenRouterFallback(
   if (!apiKey || apiKey.trim() === "" || apiKey === "your-api-key-here") {
     return null;
   }
-  try {
-    const c = new AbortController();
-    const t = setTimeout(() => c.abort(), 10000);
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "http://localhost:3000",
-        "X-Title": "JARVIS AI Assistant",
-      },
-      body: JSON.stringify({
-        model: "openai/gpt-oss-120b:free",
-        messages: [
-          { role: "system", content: systemPrompt },
-          ...messages,
-        ],
-        max_tokens: 768,
-        temperature: 0.75,
-      }),
-      signal: c.signal,
-    });
-    clearTimeout(t);
+  for (const model of OPENROUTER_FALLBACK_MODELS) {
+    try {
+      const c = new AbortController();
+      const t = setTimeout(() => c.abort(), 10000);
+      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": "http://localhost:3000",
+          "X-Title": "JARVIS AI Assistant",
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: systemPrompt },
+            ...messages,
+          ],
+          max_tokens: 768,
+          temperature: 0.75,
+        }),
+        signal: c.signal,
+      });
+      clearTimeout(t);
 
-    if (!response.ok) {
-      const errText = await response.text().catch(() => "");
-      console.error("[OpenRouter fallback] HTTP", response.status, errText.slice(0, 200));
-      return null;
+      if (!response.ok) {
+        const errText = await response.text().catch(() => "");
+        console.warn(`[OpenRouter fallback] ${model} → HTTP ${response.status}: ${errText.slice(0, 120)}`);
+        if (response.status === 429 || response.status === 404) {
+          // Rate-limited or model unavailable — try the next one.
+          continue;
+        }
+        // Other errors (5xx, 401) — bail out, the chain is broken.
+        return null;
+      }
+
+      const data = await response.json();
+      const content = data.choices?.[0]?.message?.content?.trim();
+      if (!content) {
+        console.warn(`[OpenRouter fallback] ${model} returned empty content`);
+        continue;
+      }
+
+      console.log(`[OpenRouter fallback] Served response via ${model}`);
+      return NextResponse.json({ content, fallback: "openrouter", model });
+    } catch (e: any) {
+      console.warn(`[OpenRouter fallback] ${model} fetch failed:`, e?.name || e?.message);
+      continue;
     }
+  }
+  return null;
+}
 
-    const data = await response.json();
-    const content = data.choices?.[0]?.message?.content?.trim();
-    if (!content) {
-      console.warn("[OpenRouter fallback] Empty content in response");
-      return null;
-    }
+// Try Groq as a third fallback after NVIDIA and OpenRouter.
+// Groq is fast, has a generous free tier, and uses an OpenAI-compatible API.
+// Models rotate — keep a small chain so a single rate-limit doesn't kill us.
+// https://console.groq.com — free API key, no credit card.
+const GROQ_FALLBACK_MODELS = [
+  "llama-3.3-70b-versatile",
+  "llama-3.1-8b-instant",
+  "gemma2-9b-it",
+  "mixtral-8x7b-32768",
+];
 
-    console.log("[OpenRouter fallback] Served response via OpenRouter");
-    return NextResponse.json({ content, fallback: "openrouter" });
-  } catch (e: any) {
-    console.error("[OpenRouter fallback] Fetch failed:", e?.name || e?.message);
+async function tryGroqFallback(
+  messages: any[],
+  systemPrompt: string,
+  apiKey: string | undefined
+): Promise<NextResponse | null> {
+  if (!apiKey || apiKey.trim() === "" || apiKey === "your-api-key-here") {
     return null;
   }
+  for (const model of GROQ_FALLBACK_MODELS) {
+    try {
+      const c = new AbortController();
+      const t = setTimeout(() => c.abort(), 10000);
+      const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: systemPrompt },
+            ...messages,
+          ],
+          max_tokens: 768,
+          temperature: 0.75,
+        }),
+        signal: c.signal,
+      });
+      clearTimeout(t);
+
+      if (!response.ok) {
+        const errText = await response.text().catch(() => "");
+        console.warn(`[Groq fallback] ${model} → HTTP ${response.status}: ${errText.slice(0, 120)}`);
+        if (response.status === 429) {
+          // Rate-limited — try the next model in our chain.
+          continue;
+        }
+        // Bad model, auth error, or server issue — bail out, the chain is broken.
+        return null;
+      }
+
+      const data = await response.json();
+      const content = data.choices?.[0]?.message?.content?.trim();
+      if (!content) {
+        console.warn(`[Groq fallback] ${model} returned empty content`);
+        continue;
+      }
+
+      console.log(`[Groq fallback] Served response via ${model}`);
+      return NextResponse.json({ content, fallback: "groq", model });
+    } catch (e: any) {
+      console.warn(`[Groq fallback] ${model} fetch failed:`, e?.name || e?.message);
+      continue;
+    }
+  }
+  return null;
 }
 
 // Generate offline response based on user input
-function generateOfflineResponse(lastMessage: string): string {
+function generateOfflineResponse(lastMessage: string, reason: "no_llm" | "rate_limited" = "no_llm"): string {
+  const rateLimitedNote =
+    reason === "rate_limited"
+      ? " Every free OpenRouter model I tried is rate-limited right now — give it a minute and try again."
+      : "";
   // Greetings
   if (lastMessage.includes("hello") || lastMessage.includes("hi") || lastMessage.includes("hey")) {
     const hour = new Date().getHours();
     const greeting = hour <<  12 ? "morning" : hour <<  18 ? "afternoon" : "evening";
-    return `Good ${greeting}, Boss. JARVIS is online and ready to assist. I'm currently running in offline mode, but I can still help you with tasks, reminders, calculations, and basic queries. What would you like me to do?`;
+    return `Good ${greeting}, Boss. JARVIS is online but my language models are temporarily unavailable.${rateLimitedNote} In the meantime I can still help with tasks, reminders, calculations, and time queries.`;
   }
 
   // Tasks
@@ -417,7 +508,7 @@ function generateOfflineResponse(lastMessage: string): string {
   }
 
   // Default response
-  return "I understand, Boss. I'm currently operating in offline mode with limited capabilities. I can help with tasks, reminders, calculations, time, jokes, and basic queries. For more advanced AI responses, please add your NVIDIA API key to the .env.local file.";
+  return `Understood, Boss.${rateLimitedNote} Right now I can only handle tasks, reminders, calculations, time queries, and a few other local commands. For full AI responses, wait a minute and try again, or check your API keys in .env.local.`;
 }
 
 export async function POST(request: Request) {
@@ -429,7 +520,14 @@ export async function POST(request: Request) {
       console.error("[Chat] Memory extraction failed:", err);
     });
 
+    // Tier 1C: observe that the user is searching/asking — feeds pattern detection.
+    recordEvent("chat", {
+      query: lastUserMessage.slice(0, 200),
+      at: new Date().toISOString(),
+    }).catch(() => {});
+
     let memoryContext = "";
+    let retrievedEntityIds: string[] = [];
     try {
       // Cap memory retrieval at 3 seconds to prevent slow DB from blocking chat
       const memoryPromise = retrieveRelevantMemories(lastUserMessage, {
@@ -441,11 +539,20 @@ export async function POST(request: Request) {
       const memoryData = await Promise.race([memoryPromise, timeoutPromise]);
       if (memoryData) {
         memoryContext = formatMemoryContextAsPrompt(memoryData);
+        retrievedEntityIds = memoryData.entityIds;
       } else {
         console.warn("[Chat] Memory retrieval timed out (3s) — skipping context");
       }
     } catch (err) {
       console.error("[Chat] Memory retrieval failed:", err);
+    }
+
+    // Tier 1A: reinforce the memories that actually fed this answer.
+    // Fire-and-forget — don't block the chat response on a write.
+    if (retrievedEntityIds.length > 0) {
+      bumpUsage(retrievedEntityIds, 0.1).catch((err) => {
+        console.error("[Chat] Memory reinforcement failed:", err);
+      });
     }
 
     const enhancedSystemPrompt = memoryContext ? `${systemPrompt}\n\n${memoryContext}` : systemPrompt;
@@ -1282,7 +1389,7 @@ export async function POST(request: Request) {
             "Authorization": `Bearer ${nvidiaApiKey}`,
           },
           body: JSON.stringify({
-            model: process.env.NVIDIA_MODEL || "deepseek-ai/deepseek-v4-flash",
+            model: process.env.NVIDIA_MODEL || "meta/llama-3.1-8b-instruct",
             messages: [
               { role: "system", content: enhancedSystemPrompt },
               ...messages.map((msg: { role: string; content: string }) => ({
@@ -1294,11 +1401,11 @@ export async function POST(request: Request) {
             temperature: 0.75,
             stream: true,
           }),
-        }, 8000); // 8-second timeout for main LLM call
+        }, 3000); // 3-second timeout — NVIDIA NIM is currently unreliable; don't burn latency on it.
 
         if (!response.ok) {
           const errorText = await response.text();
-          console.error("NVIDIA API error:", response.status, errorText, "- Trying OpenRouter fallback");
+          console.error("NVIDIA API error:", response.status, errorText, "- Trying OpenRouter → Groq fallback");
           const openrouterApiKey = process.env.OPENROUTER_API_KEY;
           const orResp = await tryOpenRouterFallback(
             messages.map((m: { role: string; content: string }) => ({ role: m.role, content: m.content })),
@@ -1306,7 +1413,14 @@ export async function POST(request: Request) {
             openrouterApiKey
           );
           if (orResp) return orResp;
-          const offlineResponse = generateOfflineResponse(lastMessage);
+          const groqApiKey = process.env.GROQ_API_KEY;
+          const groqResp = await tryGroqFallback(
+            messages.map((m: { role: string; content: string }) => ({ role: m.role, content: m.content })),
+            enhancedSystemPrompt,
+            groqApiKey
+          );
+          if (groqResp) return groqResp;
+          const offlineResponse = generateOfflineResponse(lastMessage, "rate_limited");
           return NextResponse.json({
             content: offlineResponse,
             offline: true,
@@ -1322,9 +1436,9 @@ export async function POST(request: Request) {
         });
       } catch (fetchError: any) {
         if (fetchError?.name === 'AbortError') {
-          console.error("NVIDIA API timed out (8s) — Trying OpenRouter fallback");
+          console.error("NVIDIA API timed out (3s) — Trying OpenRouter → Groq fallback");
         } else {
-          console.error("Network error calling NVIDIA API:", fetchError, "- Trying OpenRouter fallback");
+          console.error("Network error calling NVIDIA API:", fetchError, "- Trying OpenRouter → Groq fallback");
         }
         const openrouterApiKey = process.env.OPENROUTER_API_KEY;
         const orResp = await tryOpenRouterFallback(
@@ -1333,7 +1447,14 @@ export async function POST(request: Request) {
           openrouterApiKey
         );
         if (orResp) return orResp;
-        const offlineResponse = generateOfflineResponse(lastMessage);
+        const groqApiKey = process.env.GROQ_API_KEY;
+        const groqResp = await tryGroqFallback(
+          messages.map((m: { role: string; content: string }) => ({ role: m.role, content: m.content })),
+          enhancedSystemPrompt,
+          groqApiKey
+        );
+        if (groqResp) return groqResp;
+        const offlineResponse = generateOfflineResponse(lastMessage, "rate_limited");
         return NextResponse.json({
           content: offlineResponse,
           offline: true,
@@ -1371,7 +1492,7 @@ export async function POST(request: Request) {
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error("Claude API error:", response.status, errorText, "- Trying OpenRouter fallback");
+        console.error("Claude API error:", response.status, errorText, "- Trying OpenRouter → Groq fallback");
         const openrouterApiKey = process.env.OPENROUTER_API_KEY;
         const orResp = await tryOpenRouterFallback(
           messages.map((m: { role: string; content: string }) => ({ role: m.role, content: m.content })),
@@ -1379,7 +1500,14 @@ export async function POST(request: Request) {
           openrouterApiKey
         );
         if (orResp) return orResp;
-        const offlineResponse = generateOfflineResponse(lastMessage);
+        const groqApiKey = process.env.GROQ_API_KEY;
+        const groqResp = await tryGroqFallback(
+          messages.map((m: { role: string; content: string }) => ({ role: m.role, content: m.content })),
+          enhancedSystemPrompt,
+          groqApiKey
+        );
+        if (groqResp) return groqResp;
+        const offlineResponse = generateOfflineResponse(lastMessage, "rate_limited");
         return NextResponse.json({
           content: offlineResponse,
           offline: true,
