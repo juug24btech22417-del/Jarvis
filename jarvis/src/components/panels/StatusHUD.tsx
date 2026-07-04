@@ -14,7 +14,8 @@ import {
   X,
   Eye,
   Scan,
-  ShieldCheck
+  ShieldCheck,
+  TrendingUp,
 } from "lucide-react";
 import { useJarvisStore } from "@/store/jarvis.store";
 import gsap from "gsap";
@@ -49,6 +50,14 @@ interface PCStats {
   }>;
 }
 
+interface Pattern {
+  id: string;
+  category: "search" | "panel" | "contact" | "time" | "frequency";
+  text: string;
+  confidence: number;
+  sampleCount: number;
+}
+
 export default function StatusHUD() {
   const [currentTime, setCurrentTime] = useState(new Date());
   const [battery, setBattery] = useState<number | null>(null);
@@ -56,6 +65,7 @@ export default function StatusHUD() {
   const [pcStats, setPcStats] = useState<PCStats | null>(null);
   const [showDetails, setShowDetails] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [patterns, setPatterns] = useState<Pattern[]>([]);
   const { isMuted, setIsMuted, state, sentinelActive, biometricActive } = useJarvisStore();
 
   // Fetch PC stats from API
@@ -72,6 +82,25 @@ export default function StatusHUD() {
       console.error("Failed to fetch PC stats:", error);
     }
   }, []);
+
+  // Tier 1C: fetch patterns when the details panel opens.
+  const fetchPatterns = useCallback(async () => {
+    try {
+      const res = await fetch("/api/memory/patterns");
+      if (res.ok) {
+        const data = await res.json();
+        setPatterns(data.patterns || []);
+      }
+    } catch {
+      // Patterns are best-effort. Never surface errors here.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (showDetails) {
+      fetchPatterns();
+    }
+  }, [showDetails, fetchPatterns]);
 
   useEffect(() => {
     // Update time every second
@@ -587,6 +616,50 @@ export default function StatusHUD() {
                 <span className="text-xs text-text-secondary/40">
                   Updates every 5 seconds
                 </span>
+              </div>
+
+              {/* Tier 1C: Pattern-of-life observations */}
+              <div className="mt-4 pt-4 border-t border-panel-border">
+                <div className="flex items-center gap-2 mb-3">
+                  <TrendingUp className="w-4 h-4 text-reactor-core" />
+                  <span className="font-orbitron text-reactor-core text-xs tracking-widest uppercase">
+                    Patterns
+                  </span>
+                  <span className="text-[10px] text-text-secondary/40 ml-auto">
+                    last 14 days
+                  </span>
+                </div>
+                {patterns.length === 0 ? (
+                  <p className="text-xs text-text-secondary/40 font-rajdhani italic">
+                    I&apos;ve been watching. Nothing notable yet — use JARVIS a bit more and I&apos;ll start surfacing patterns here.
+                  </p>
+                ) : (
+                  <ul className="space-y-1.5">
+                    {patterns.map((p) => (
+                      <li
+                        key={p.id}
+                        className="flex items-start gap-2 text-xs text-text-secondary/80 font-rajdhani"
+                        title={`Confidence ${Math.round(p.confidence * 100)}% · ${p.sampleCount} samples`}
+                      >
+                        <span
+                          className="mt-1 inline-block w-1.5 h-1.5 rounded-full flex-shrink-0"
+                          style={{
+                            backgroundColor:
+                              p.confidence >= 0.7
+                                ? "rgb(0, 243, 255)"
+                                : p.confidence >= 0.4
+                                  ? "rgba(0, 243, 255, 0.6)"
+                                  : "rgba(0, 243, 255, 0.3)",
+                          }}
+                        />
+                        <span className="flex-1">{p.text}</span>
+                        <span className="text-[9px] text-text-secondary/40 uppercase tracking-wider whitespace-nowrap">
+                          {p.category}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
             </div>
           </motion.div>

@@ -56,7 +56,12 @@ function ThemeFog({ themeConfig }: { themeConfig: ThemeConfig }) {
 // Inner reactor scene
 function ReactorScene() {
   const groupRef = useRef<THREE.Group>(null);
-  const { state, bootProgress, theme } = useJarvisStore();
+  const state = useJarvisStore((s) => s.state);
+  const theme = useJarvisStore((s) => s.theme);
+  const bootProgress = useJarvisStore((s) => s.bootProgress);
+  const reactorLoad = useJarvisStore((s) => s.reactorLoad);
+  const reactorPulse = useJarvisStore((s) => s.reactorPulse);
+  const reactorHue = useJarvisStore((s) => s.reactorHue);
   const [themeConfig, setThemeConfig] = useState<ThemeConfig>(getThemeConfig(theme));
 
   useEffect(() => {
@@ -67,14 +72,20 @@ function ReactorScene() {
     if (!groupRef.current) return;
 
     // Subtle rotation of the entire reactor - varies by theme
+    // Tier 3A: rotation scales with reactorLoad.
     const time = Date.now() * 0.0005 * themeConfig.effects.pulseSpeed;
-    const speed = state === "sleep" ? 0.1 : 0.5;
+    const speed = state === "sleep" ? 0.1 : 0.5 + (typeof reactorLoad === "number" ? reactorLoad : 0.4) * 0.6;
     groupRef.current.rotation.y = time * speed;
     groupRef.current.rotation.x = Math.sin(time * 0.5) * 0.1;
 
-    // Scale based on boot progress
+    // Tier 3A: pulse on alert (3s decay).
+    const since = typeof reactorPulse === "number" ? (Date.now() - reactorPulse) / 1000 : 999;
+    const pulseBoost = since < 3 ? (1 - since / 3) * 0.4 : 0;
+
+    // Scale based on boot progress + pulse
     const bootScale = Math.min(1, bootProgress / 100);
-    groupRef.current.scale.setScalar(bootScale);
+    const scale = bootScale * (1 + pulseBoost);
+    groupRef.current.scale.setScalar(scale);
   });
 
   return (
@@ -84,7 +95,7 @@ function ReactorScene() {
       <directionalLight
         position={[10, 10, 5]}
         intensity={0.4 * themeConfig.typography.intensity}
-        color={themeConfig.reactor.core}
+        color={reactorHue === "red" ? "#ff3344" : reactorHue === "gold" ? "#ffaa33" : reactorHue === "dim" ? "#6688aa" : themeConfig.reactor.core}
       />
       <directionalLight
         position={[-10, -10, -5]}
@@ -106,7 +117,7 @@ function ReactorScene() {
         angle={Math.PI / 6}
         penumbra={1}
         intensity={0.4 * themeConfig.typography.intensity}
-        color={themeConfig.reactor.core}
+        color={reactorHue === "red" ? "#ff3344" : reactorHue === "gold" ? "#ffaa33" : reactorHue === "dim" ? "#6688aa" : themeConfig.reactor.core}
         distance={30}
         decay={2}
         castShadow

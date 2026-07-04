@@ -161,7 +161,7 @@ class FirecrawlService {
           onlyMainContent: true,
           excludeTags: ['nav', 'footer', 'header', 'script', 'style', 'noscript', 'aside'],
         },
-      }) as any;
+      } as any) as any;
 
       console.log(`[Firecrawl] Crawl response keys:`, Object.keys(response || {}));
       console.log(`[Firecrawl] Crawl response.success:`, response?.success);

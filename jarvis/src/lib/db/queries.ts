@@ -21,13 +21,15 @@ export async function getMemories(category?: string, limit: number = 10) {
 export async function addMemory(
   content: string,
   category: string = "user_fact",
-  source: string = "explicit"
+  source: string = "explicit",
+  options?: { linkedEntityId?: string }
 ) {
   return prisma.memory.create({
     data: {
       content,
       category,
       source,
+      linkedEntityId: options?.linkedEntityId,
     },
   });
 }

@@ -9,6 +9,7 @@ import { useJarvisStore } from "@/store/jarvis.store";
 import { buildSystemPrompt, buildMorningBriefing, JARVISContext } from "@/lib/jarvis/personality";
 import { useVolumeControl, useClipboard, useBatteryStatus, useNetworkStatus } from "@/lib/system";
 import { addHoverScale, createRipple, animateTyping } from "@/lib/animations/gsap";
+import PersonaSwitcher from "@/components/ui/PersonaSwitcher";
 
 interface CommandBarProps {
   onCalculate?: (expression: string, result: string) => void;
@@ -1609,9 +1610,47 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
       return "Opening Autonomous Web Proxy panel. System-wide AI interception protocols active, Boss.";
     }
 
+    // TIER 2A: GOAL AGENT
+    if (lower.match(/\b(open\s+(?:the\s+)?agent|agent\s+panel|goal\s+agent|autonomous\s+agent|run\s+a\s+goal)\b/)) {
+      setActivePanel("agent");
+      return "Opening Agent panel. Tell me a goal and I'll break it down for your approval, Boss.";
+    }
+
+    // TIER 2D: SECOND ME — drop a brief
+    if (lower.match(/\b(drop\s+a\s+brief|second\s+me|process\s+(?:this\s+)?brief|extract\s+(?:from|artifacts))\b/)) {
+      setActivePanel("agent");
+      return "Opening the Second Me tab. Drop your brief in the textbox and I'll split it into tasks, notes, memory cues, and timers, Boss.";
+    }
+
+    // LONG-TERM MEMORY
+    // "Remember <X>" goes to the memory graph (not the notes panel).
+    const rememberMatch = lower.match(/(?:^|\s)remember\s+(.+)/i);
+    if (rememberMatch) {
+      try {
+        const content = rememberMatch[1].trim();
+        const response = await fetch("/api/memories", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            content,
+            category: "user_fact",
+            source: "voice_command",
+          }),
+        });
+        const data = await response.json();
+        if (data?.id) {
+          return `Remembered, Boss. Saved to long-term memory.`;
+        }
+      } catch (e) {
+        console.error("Memory save failed:", e);
+      }
+      return "I couldn't save that to memory, Boss.";
+    }
+
     // QUICK NOTES
-    // Take note - matches: note that, remember this, take a note, write down
-    const noteMatch = lower.match(/(?:note\s+(?:that\s+)?|take\s+a\s+note|remember\s+this|write\s+down)[:\s]*(.+)/i);
+    // Take note - matches: note that, take a note, write down
+    // (Note: "remember" goes to memory above; this is for explicit note-taking.)
+    const noteMatch = lower.match(/(?:note\s+(?:that\s+)?|take\s+a\s+note|write\s+down)[:\s]*(.+)/i);
     if (noteMatch) {
       try {
         const content = noteMatch[1];
@@ -2829,6 +2868,30 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
           return null;
         }
 
+        case "memory_save": {
+          const content = parsed.params.content as string;
+          if (content) {
+            try {
+              const response = await fetch("/api/memories", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  content,
+                  category: "user_fact",
+                  source: "voice_command",
+                }),
+              });
+              const data = await response.json();
+              if (data?.id) {
+                return "Remembered, Boss. Saved to long-term memory.";
+              }
+            } catch {
+              return "I couldn't save that to memory, Boss.";
+            }
+          }
+          return null;
+        }
+
         case "open_app": {
           const app = parsed.params.app as string;
           if (app) {
@@ -3597,6 +3660,9 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
               <Camera className="w-5 h-5 text-reactor-core" />
             )}
           </button>
+
+          {/* Persona switcher — Tier 3B */}
+          <PersonaSwitcher />
         </div>
 
         {/* Status indicator */}

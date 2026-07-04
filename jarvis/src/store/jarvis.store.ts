@@ -88,8 +88,33 @@ interface JarvisStore {
   memories: Memory[];
   addMemory: (memory: Omit<Memory, "id">) => void;
 
+  // Tier 3B: Persona system
+  persona: "stark" | "tactical" | "whisper" | "dev";
+  setPersona: (p: JarvisStore["persona"]) => void;
+  /** Manual override — when set, auto-switch is bypassed for 30 min. */
+  personaOverride: JarvisStore["persona"] | null;
+  personaOverrideExpiresAt: number | null;
+  setPersonaOverride: (p: JarvisStore["persona"] | null, durationMs?: number) => void;
+  /** Active alerts (incoming messages, security events, agent errors). */
+  activeAlerts: number;
+  bumpActiveAlerts: (delta: number) => void;
+
+  // Tier 3A: Reactor as system truth
+  /** Logical reactor mode — drives color, density, and ring behavior. */
+  reactorMode: "idle" | "listening" | "thinking" | "speaking" | "focused" | "alert" | "whisper";
+  setReactorMode: (m: JarvisStore["reactorMode"]) => void;
+  /** Reactor hue override — color driver for ArcReactor / panels. */
+  reactorHue: "cyan" | "gold" | "red" | "dim";
+  setReactorHue: (h: JarvisStore["reactorHue"]) => void;
+  /** Reactor load — 0..1; drives ring speed + particle density. */
+  reactorLoad: number;
+  setReactorLoad: (n: number) => void;
+  /** Last pulse time — increments on incoming alert / step complete. */
+  reactorPulse: number;
+  pulseReactor: () => void;
+
   // UI
-  activePanel: "chat" | "tasks" | "memory" | "notes" | "code" | "skill-trainer" | "image-generator" | "summarizer" | "web-scraper" | "firecrawl" | "playwright" | "whatsapp" | "instagram" | "telegram" | "security" | "vault" | "dungeon" | "habits" | "time-capsule" | "voice-notes" | "nasa" | "huggingface" | "ifttt" | "browser" | "local-llm" | "vision" | "automation" | "price-tracker" | "transcription" | "proxy" | null;
+  activePanel: "chat" | "tasks" | "memory" | "notes" | "code" | "skill-trainer" | "image-generator" | "summarizer" | "web-scraper" | "firecrawl" | "playwright" | "whatsapp" | "instagram" | "telegram" | "security" | "vault" | "dungeon" | "habits" | "time-capsule" | "voice-notes" | "nasa" | "huggingface" | "ifttt" | "browser" | "local-llm" | "vision" | "automation" | "price-tracker" | "transcription" | "proxy" | "agent" | null;
   setActivePanel: (panel: JarvisStore["activePanel"]) => void;
   showBriefing: boolean;
   setShowBriefing: (show: boolean) => void;
@@ -205,6 +230,39 @@ export const useJarvisStore = create<JarvisStore>((set) => ({
         { ...memory, id: Math.random().toString(36).substring(7) },
       ],
     })),
+
+  // Tier 3B: Persona system
+  persona: "stark",
+  setPersona: (persona) => set({ persona }),
+  personaOverride: null,
+  personaOverrideExpiresAt: null,
+  setPersonaOverride: (p, durationMs) =>
+    set({
+      personaOverride: p,
+      personaOverrideExpiresAt:
+        p && durationMs ? Date.now() + durationMs : null,
+      persona: p ?? "stark",
+    }),
+  activeAlerts: 0,
+  bumpActiveAlerts: (delta) =>
+    set((state) => {
+      const next = Math.max(0, state.activeAlerts + delta);
+      // Tier 3A: any change in alert count triggers a reactor pulse.
+      return {
+        activeAlerts: next,
+        ...(delta !== 0 ? { reactorPulse: Date.now() } : {}),
+      };
+    }),
+
+  // Tier 3A: Reactor as system truth
+  reactorMode: "idle",
+  setReactorMode: (reactorMode) => set({ reactorMode }),
+  reactorHue: "cyan",
+  setReactorHue: (reactorHue) => set({ reactorHue }),
+  reactorLoad: 0.4,
+  setReactorLoad: (reactorLoad) => set({ reactorLoad: Math.max(0, Math.min(1, reactorLoad)) }),
+  reactorPulse: 0,
+  pulseReactor: () => set({ reactorPulse: Date.now() }),
 
   // UI
   activePanel: null,

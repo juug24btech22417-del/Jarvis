@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback, useState } from "react";
 import { useJarvisStore } from "@/store/jarvis.store";
 import { VoiceEngine } from "@/lib/VoiceEngine";
+import { VOICE_PROFILES, pickVoice, type PersonaId } from "@/lib/persona/voiceProfiles";
 
 // Simplified Voice Hook
 export function useVoice() {
@@ -105,39 +106,42 @@ export function useVoice() {
 
 // Text-to-Speech hook
 export function useTextToSpeech() {
-  const { isMuted, isSpeaking, setIsSpeaking } = useJarvisStore();
+  const { isMuted, isSpeaking, setIsSpeaking, persona } = useJarvisStore();
   const wsRef = useRef<WebSocket | null>(null);
 
   const speakBrowser = useCallback((text: string) => {
     if (typeof window === "undefined" || !window.speechSynthesis || isMuted) return;
     window.speechSynthesis.cancel();
-    
+
     // Explicitly pause the mic BEFORE we start talking
     VoiceEngine.getInstance().pauseForTTS();
-    
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = "en-GB";
-    utterance.pitch = 0.9;
-    utterance.rate = 0.9;
+
+    const profile = VOICE_PROFILES[persona as PersonaId] ?? VOICE_PROFILES.stark;
+
+    const utterance = new SpeechSynthesisUtterance(profile.prefix + text);
+    utterance.lang = profile.lang;
+    utterance.pitch = profile.pitch;
+    utterance.rate = profile.rate;
+
     const voices = window.speechSynthesis.getVoices();
-    const voice = voices.find(v => v.lang.includes("GB")) || voices.find(v => v.lang.startsWith("en"));
+    const voice = pickVoice(profile, voices);
     if (voice) utterance.voice = voice;
-    
+
     setIsSpeaking(true);
-    
+
     utterance.onend = () => {
       setIsSpeaking(false);
       // Resume mic AFTER we finish talking
       VoiceEngine.getInstance().resumeAfterTTS();
     };
-    
+
     utterance.onerror = () => {
       setIsSpeaking(false);
       VoiceEngine.getInstance().resumeAfterTTS();
     };
-    
+
     window.speechSynthesis.speak(utterance);
-  }, [isMuted, setIsSpeaking]);
+  }, [isMuted, setIsSpeaking, persona]);
 
   const speak = useCallback((text: string) => {
     if (isMuted) return;

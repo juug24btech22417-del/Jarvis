@@ -12,11 +12,16 @@ import {
 } from "./graph";
 
 export interface MemoryContext {
+  /** IDs of every entity that contributed to this context — for reinforcement. */
+  entityIds: string[];
   entities: Array<{
+    id: string;
     name: string;
     type: string;
     description: string | null;
     relationships: string[];
+    strength: number;
+    pinned: boolean;
   }>;
   preferences: string[];
   relevantFacts: string[];
@@ -58,6 +63,7 @@ export async function retrieveRelevantMemories(
   const includePreferences = options?.includePreferences ?? true;
 
   const context: MemoryContext = {
+    entityIds: [],
     entities: [],
     preferences: [],
     relevantFacts: [],
@@ -81,10 +87,13 @@ export async function retrieveRelevantMemories(
       });
 
       foundEntities.set(result.name, {
+        id: result.id,
         name: result.name,
         type: result.type,
         description: result.description,
         relationships: relationshipStrings,
+        strength: result.strength,
+        pinned: result.pinned,
       });
     }
   }
@@ -118,15 +127,19 @@ export async function retrieveRelevantMemories(
       });
 
       foundEntities.set(entity.name, {
+        id: entity.id,
         name: entity.name,
         type: entity.type,
         description: entity.description,
         relationships: relationshipStrings,
+        strength: entity.strength,
+        pinned: entity.pinned,
       });
     }
   }
 
   context.entities = Array.from(foundEntities.values());
+  context.entityIds = context.entities.map((e) => e.id);
   context.relevantFacts = generateRelevantFacts(context);
 
   return context;
@@ -136,7 +149,7 @@ function extractKeywords(query: string): string[] {
   const words = query.toLowerCase().split(/\s+/);
   const keywords = words.filter((w) => !STOP_WORDS.has(w) && w.length > 2);
   const properNouns = query.match(/\b[A-Z][a-z]+\b/g) || [];
-  return [...new Set([...keywords, ...properNouns])];
+  return Array.from(new Set([...keywords, ...properNouns]));
 }
 
 function reverseRelationship(type: string): string {
@@ -222,9 +235,7 @@ export async function quickEntityLookup(name: string): Promise<{
   const entity = await findEntityByName(name);
   if (!entity) return null;
 
-  const { PrismaClient } = await import("@prisma/client");
-  const prisma = new PrismaClient();
-
+  const { prisma } = await import("@/lib/db/queries");
   const fullEntity = await prisma.entity.findUnique({
     where: { id: entity.id },
   });
@@ -234,7 +245,8 @@ export async function quickEntityLookup(name: string): Promise<{
   let metadata: Record<string, string> | undefined;
   if (fullEntity.metadata) {
     try {
-      metadata = await getDecryptedMetadata(entity.id);
+      const decrypted = await getDecryptedMetadata(entity.id);
+      metadata = decrypted || undefined;
     } catch {
       metadata = JSON.parse(fullEntity.metadata);
     }

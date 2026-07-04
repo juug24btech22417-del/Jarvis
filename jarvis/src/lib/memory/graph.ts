@@ -1,10 +1,9 @@
 // Knowledge Graph Library with AES-256 Encryption
 // Manages entities and relationships for JARVIS long-term memory
 
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "@/lib/db/queries";
 import { encryptWithKey, decryptWithKey, generateMasterKey } from "@/lib/security/encryption";
-
-const prisma = new PrismaClient();
+import { applyReinforcement, shouldArchive, ARCHIVE_THRESHOLD } from "./decay";
 
 // Master key for encrypting graph metadata (in production, store this securely)
 let MASTER_KEY: string | null = null;
@@ -201,6 +200,9 @@ export async function queryEntitiesByType(
 /**
  * Find entities connected to a given entity through relationships
  * Example: Find all companies where a person works
+ *
+ * Tier 1A: order results by relationship strength (strongest edges first),
+ * and prune edges weaker than 0.2 (effectively forgotten).
  */
 export async function findConnectedEntities(
   entityId: string,
@@ -211,9 +213,11 @@ export async function findConnectedEntities(
   name: string;
   type: string;
   relationship: string;
+  relationshipStrength: number;
 }>> {
   const where: Record<string, unknown> = {
     OR: [{ sourceId: entityId }, { targetId: entityId }],
+    strength: { gte: 0.2 },
   };
 
   if (relationshipType) {
@@ -226,6 +230,7 @@ export async function findConnectedEntities(
       source: true,
       target: true,
     },
+    orderBy: { strength: "desc" },
     take: options?.limit,
   });
 
@@ -238,6 +243,7 @@ export async function findConnectedEntities(
         name: connected.name,
         type: connected.type,
         relationship: r.type,
+        relationshipStrength: r.strength,
       };
     })
     .filter((e) => {
@@ -250,6 +256,8 @@ export async function findConnectedEntities(
 /**
  * Traverse the graph from a starting entity (BFS)
  * Returns all entities within N hops
+ *
+ * Tier 1A: skip archived entities and edges with strength < 0.2.
  */
 export async function traverseGraph(
   startEntityId: string,
@@ -258,45 +266,55 @@ export async function traverseGraph(
   id: string;
   name: string;
   type: string;
+  description: string | null;
   hops: number;
   path: string[]; // Relationship types traversed
+  strength: number;
+  pinned: boolean;
 }>> {
   const visited = new Set<string>([startEntityId]);
   const queue: Array<{ entityId: string; hops: number; path: string[] }> = [
     { entityId: startEntityId, hops: 0, path: [] },
   ];
-  const results: Array<{ id: string; name: string; type: string; hops: number; path: string[] }> = [];
+  const results: Array<{ id: string; name: string; type: string; description: string | null; hops: number; path: string[]; strength: number; pinned: boolean }> = [];
 
   while (queue.length > 0) {
     const { entityId, hops, path } = queue.shift()!;
 
     if (hops > 0) {
-      // Get entity details
+      // Get entity details (skip archived)
       const entity = await prisma.entity.findUnique({
         where: { id: entityId },
       });
-      if (entity) {
+      if (entity && !entity.archived) {
         results.push({
           id: entity.id,
           name: entity.name,
           type: entity.type,
+          description: entity.description,
           hops,
           path,
+          strength: entity.strength,
+          pinned: entity.pinned,
         });
+      } else if (!entity) {
+        continue; // deleted entity, don't expand from it
       }
     }
 
     if (hops >= maxHops) continue;
 
-    // Get all relationships for this entity
+    // Get all relationships for this entity, ordered by strength, pruned at threshold
     const relationships = await prisma.relationship.findMany({
       where: {
         OR: [{ sourceId: entityId }, { targetId: entityId }],
+        strength: { gte: 0.2 },
       },
       include: {
         source: true,
         target: true,
       },
+      orderBy: { strength: "desc" },
     });
 
     for (const rel of relationships) {
@@ -347,20 +365,35 @@ export async function getDecryptedMetadata(entityId: string): Promise<Record<str
 
 /**
  * Search entities by name (fuzzy match)
+ *
+ * Tier 1A: pin first, then by strength desc, then most recently accessed.
+ * Archived entities are excluded.
  */
 export async function searchEntities(query: string, limit: number = 10): Promise<Array<{
   id: string;
   name: string;
   type: string;
   description: string | null;
+  strength: number;
+  pinned: boolean;
 }>> {
   const entities = await prisma.entity.findMany({
     where: {
-      OR: [
-        { name: { contains: query } },
-        { description: { contains: query } },
+      AND: [
+        { archived: false },
+        {
+          OR: [
+            { name: { contains: query } },
+            { description: { contains: query } },
+          ],
+        },
       ],
     },
+    orderBy: [
+      { pinned: "desc" },
+      { strength: "desc" },
+      { lastAccessed: "desc" },
+    ],
     take: limit,
   });
 
@@ -369,6 +402,8 @@ export async function searchEntities(query: string, limit: number = 10): Promise
     name: e.name,
     type: e.type,
     description: e.description,
+    strength: e.strength,
+    pinned: e.pinned,
   }));
 }
 
@@ -415,5 +450,204 @@ export async function getGraphStats(): Promise<{
     entityCount,
     relationshipCount,
     entitiesByType,
+  };
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Tier 1A — Forgetting curve helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Reinforcement signal: bump a memory's base strength and lastAccessed.
+ * Used by chat (after a successful retrieval), explicit thumbs-up, and Discuss.
+ */
+export async function bumpUsage(
+  ids: string[],
+  delta: number = 0.15
+): Promise<{ updated: number }> {
+  if (ids.length === 0) return { updated: 0 };
+
+  // Fetch current so we can clamp per-row (SQLite can't clamp on UPDATE).
+  const entities = await prisma.entity.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, baseStrength: true },
+  });
+
+  const now = new Date();
+  let updated = 0;
+
+  // Sequential writes; small batch — keeps it simple. Switch to a transaction
+  // if this becomes a hotspot.
+  for (const e of entities) {
+    const newBase = applyReinforcement(e.baseStrength, delta);
+    await prisma.entity.update({
+      where: { id: e.id },
+      data: {
+        baseStrength: newBase,
+        strength: newBase, // bumped memories jump back to vivid immediately
+        lastAccessed: now,
+        accessCount: { increment: 1 },
+      },
+    });
+    updated++;
+  }
+
+  return { updated };
+}
+
+/**
+ * Pin / unpin a memory so it never decays and floats to the top of search.
+ */
+export async function pinEntity(id: string, pinned: boolean): Promise<void> {
+  await prisma.entity.update({
+    where: { id },
+    data: { pinned },
+  });
+}
+
+/**
+ * Set the cue — a user-phrased question that should trigger this memory.
+ * Helps future retrieval match user wording even when the entity name differs.
+ */
+export async function setCue(id: string, cue: string | null): Promise<void> {
+  await prisma.entity.update({
+    where: { id },
+    data: { cue },
+  });
+}
+
+/**
+ * Walk every non-pinned entity and archive those whose strength has fallen
+ * below ARCHIVE_THRESHOLD. Intended to be called on a cron / low-frequency
+ * interval — not on every read.
+ *
+ * Returns counts so the caller can log/notify.
+ */
+export async function archiveStale(): Promise<{
+  scanned: number;
+  archived: number;
+}> {
+  const candidates = await prisma.entity.findMany({
+    where: { pinned: false, archived: false },
+    select: {
+      id: true,
+      baseStrength: true,
+      lastAccessed: true,
+      createdAt: true,
+      pinned: true,
+    },
+  });
+
+  const toArchive = candidates
+    .filter((e) =>
+      shouldArchive({
+        baseStrength: e.baseStrength,
+        lastAccessed: e.lastAccessed,
+        createdAt: e.createdAt,
+        pinned: e.pinned,
+      })
+    )
+    .map((e) => e.id);
+
+  if (toArchive.length > 0) {
+    await prisma.entity.updateMany({
+      where: { id: { in: toArchive } },
+      data: { archived: true },
+    });
+  }
+
+  return { scanned: candidates.length, archived: toArchive.length };
+}
+
+/**
+ * One-shot recompute of every entity's cached `strength` field from
+ * `baseStrength`, age, lastAccessed, and pinned. Call after batch operations
+ * (imports, restores) or from a low-frequency cron.
+ */
+export async function recomputeAllStrengths(): Promise<{
+  updated: number;
+  archived: number;
+}> {
+  const entities = await prisma.entity.findMany({
+    select: {
+      id: true,
+      baseStrength: true,
+      lastAccessed: true,
+      createdAt: true,
+      pinned: true,
+    },
+  });
+
+  let updated = 0;
+  let archived = 0;
+  const now = new Date();
+
+  // Lazy import to break any cycle (decay is already imported above).
+  const { computeStrength } = await import("./decay");
+
+  for (const e of entities) {
+    const s = computeStrength({
+      baseStrength: e.baseStrength,
+      lastAccessed: e.lastAccessed,
+      createdAt: e.createdAt,
+      pinned: e.pinned,
+      now,
+    });
+    const shouldArchiveNow =
+      !e.pinned && s < ARCHIVE_THRESHOLD;
+
+    await prisma.entity.update({
+      where: { id: e.id },
+      data: {
+        strength: s,
+        archived: shouldArchiveNow,
+      },
+    });
+    updated++;
+    if (shouldArchiveNow) archived++;
+  }
+
+  return { updated, archived };
+}
+
+/**
+ * Aggregate decay stats for the StatusHUD / Patterns surface.
+ */
+export async function getDecayStats(): Promise<{
+  total: number;
+  pinned: number;
+  archived: number;
+  byTier: { vivid: number; fresh: number; fading: number; dim: number };
+  avgStrength: number;
+}> {
+  const all = await prisma.entity.findMany({
+    select: { strength: true, pinned: true, archived: true },
+  });
+
+  const byTier = { vivid: 0, fresh: 0, fading: 0, dim: 0 };
+  let pinned = 0;
+  let archived = 0;
+  let totalStrength = 0;
+
+  for (const e of all) {
+    if (e.pinned) pinned++;
+    if (e.archived) {
+      archived++;
+      continue;
+    }
+    totalStrength += e.strength;
+    if (e.strength >= 0.9) byTier.vivid++;
+    else if (e.strength >= 0.6) byTier.fresh++;
+    else if (e.strength >= 0.3) byTier.fading++;
+    else byTier.dim++;
+  }
+
+  const active = all.length - archived;
+  return {
+    total: all.length,
+    pinned,
+    archived,
+    byTier,
+    avgStrength: active > 0 ? totalStrength / active : 0,
   };
 }

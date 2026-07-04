@@ -15,6 +15,8 @@ interface RingProps {
   index: number;
   state: string;
   themeConfig: ThemeConfig;
+  reactorLoad: number;
+  reactorHue: "cyan" | "gold" | "red" | "dim";
 }
 
 function EnergyRing({
@@ -25,6 +27,8 @@ function EnergyRing({
   index,
   state,
   themeConfig,
+  reactorLoad,
+  reactorHue,
 }: RingProps) {
   const ringRef = useRef<THREE.Mesh>(null);
 
@@ -32,7 +36,9 @@ function EnergyRing({
     if (!ringRef.current) return;
     const speedMultiplier = themeConfig.effects.scanSpeed;
     const baseSpeed = state === "sleep" ? rotationSpeed * 0.1 : rotationSpeed;
-    const speed = state === "thinking" ? baseSpeed * 3 : state === "listening" ? baseSpeed * 1.5 : baseSpeed;
+    // Tier 3A: ring speed scales with reactorLoad (0.5..1.5x) and existing state multipliers.
+    const loadMul = 0.5 + (typeof reactorLoad === "number" ? reactorLoad : 0.4) * 1.0;
+    const speed = state === "thinking" ? baseSpeed * 3 * loadMul : state === "listening" ? baseSpeed * 1.5 * loadMul : baseSpeed * loadMul;
     ringRef.current.rotation.x += rotationAxis[0] * speed * speedMultiplier * delta;
     ringRef.current.rotation.y += rotationAxis[1] * speed * speedMultiplier * delta;
     ringRef.current.rotation.z += rotationAxis[2] * speed * speedMultiplier * delta;
@@ -41,16 +47,29 @@ function EnergyRing({
   const material = useMemo(() => {
     const colors = [themeConfig.reactor.innerRing, themeConfig.reactor.middleRing, themeConfig.reactor.outerRing];
     const emissive = [themeConfig.colors.secondary, themeConfig.colors.dim, themeConfig.colors.dim];
+    // Tier 3A: hue override for alert (red) / focused (gold) / whisper (dim).
+    const hueColors: Record<string, string> = {
+      red: "#ff3344",
+      gold: "#ffaa33",
+      dim: "#6688aa",
+      cyan: colors[index] || themeConfig.colors.primary,
+    };
+    const hueEmissive: Record<string, string> = {
+      red: "#ff5566",
+      gold: "#ffbb55",
+      dim: "#445566",
+      cyan: emissive[index] || themeConfig.colors.secondary,
+    };
     return new THREE.MeshStandardMaterial({
-      color: colors[index] || themeConfig.colors.primary,
-      emissive: emissive[index] || themeConfig.colors.secondary,
+      color: hueColors[reactorHue] ?? colors[index] ?? themeConfig.colors.primary,
+      emissive: hueEmissive[reactorHue] ?? emissive[index] ?? themeConfig.colors.secondary,
       emissiveIntensity: state === "sleep" ? 0.15 : 0.6 * themeConfig.typography.intensity,
       roughness: 0.2,
       metalness: 0.8,
       transparent: true,
       opacity: 0.9,
     });
-  }, [index, themeConfig, state]);
+  }, [index, themeConfig, state, reactorHue]);
 
   return (
     <Torus ref={ringRef} args={[radius, tube, 16, 100]} rotation={[Math.PI / 2, 0, 0]} material={material} />
@@ -58,7 +77,10 @@ function EnergyRing({
 }
 
 export default function EnergyRings() {
-  const { state, theme } = useJarvisStore();
+  const state = useJarvisStore((s) => s.state);
+  const theme = useJarvisStore((s) => s.theme);
+  const reactorLoad = useJarvisStore((s) => s.reactorLoad);
+  const reactorHue = useJarvisStore((s) => s.reactorHue);
   const [themeConfig, setThemeConfig] = useState<ThemeConfig>(getThemeConfig(theme));
 
   useEffect(() => {
@@ -121,7 +143,7 @@ export default function EnergyRings() {
     return (
       <group>
         {rings.map((ring, index) => (
-          <EnergyRing key={index} {...ring} state={state} themeConfig={themeConfig} />
+          <EnergyRing key={index} {...ring} state={state} themeConfig={themeConfig} reactorLoad={reactorLoad} reactorHue={reactorHue} />
         ))}
         {/* Dark accent ring */}
         <Torus args={[1.6, 0.01, 16, 64]} rotation={[Math.PI / 2, 0, 0]} material={outerRingMaterial} />
@@ -132,7 +154,7 @@ export default function EnergyRings() {
   return (
     <group>
       {rings.map((ring, index) => (
-        <EnergyRing key={index} {...ring} state={state} themeConfig={themeConfig} />
+        <EnergyRing key={index} {...ring} state={state} themeConfig={themeConfig} reactorLoad={reactorLoad} reactorHue={reactorHue} />
       ))}
 
       {/* Outer decorative ring */}

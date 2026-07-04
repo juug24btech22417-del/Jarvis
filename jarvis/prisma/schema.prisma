@@ -9,14 +9,20 @@ datasource db {
 
 // User memories - facts about the user
 model Memory {
-  id        String   @id @default(cuid())
-  content   String
-  category  String   // user_fact, preference, context
-  source    String   // conversation_id or "explicit"
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id             String    @id @default(cuid())
+  content        String
+  category       String    // user_fact, preference, context, conversation
+  source         String    // conversation_id or "explicit"
+  strength       Float     @default(1.0)
+  lastAccessed   DateTime?
+  pinned         Boolean   @default(false)
+  linkedEntityId String?   // back-reference to graph entity when this Memory was spawned from one
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
   @@index([category])
+  @@index([pinned])
+  @@index([linkedEntityId])
 }
 
 // Conversations with JARVIS
@@ -91,19 +97,38 @@ model QuizResult {
 
 // Knowledge Graph - Entities (people, companies, projects, concepts)
 model Entity {
-  id          String       @id @default(cuid())
-  name        String
-  type        String       // PERSON, COMPANY, PROJECT, CONCEPT, LOCATION, SKILL, PREFERENCE, EVENT
-  description String?
-  metadata    String?      // JSON string for encrypted data
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
+  id           String    @id @default(cuid())
+  name         String
+  type         String    // PERSON, COMPANY, PROJECT, CONCEPT, LOCATION, SKILL, PREFERENCE, EVENT
+  description  String?
+  metadata     String?   // JSON string for encrypted data
+  strength     Float     @default(1.0)  // current decay-adjusted score (cached)
+  baseStrength Float     @default(1.0)  // untouched score for re-computation
+  lastAccessed DateTime?
+  accessCount  Int       @default(0)
+  cue          String?   // retrieval-trigger question phrased by user
+  pinned       Boolean   @default(false)
+  archived     Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
 
-  relations   Relationship[] @relation("sourceEntity")
-  relatedTo   Relationship[] @relation("targetEntity")
+  relations  Relationship[] @relation("sourceEntity")
+  relatedTo  Relationship[] @relation("targetEntity")
 
   @@index([type])
   @@index([name])
+  @@index([archived])
+  @@index([pinned])
+}
+
+// Memory events - raw signal stream for pattern-of-life observability
+model MemoryEvent {
+  id        String   @id @default(cuid())
+  kind      String   // search | panel | contact | chat | goal | briefing
+  payload   String   // JSON
+  createdAt DateTime @default(now())
+
+  @@index([kind, createdAt])
 }
 
 // Knowledge Graph - Relationships between entities
@@ -121,4 +146,19 @@ model Relationship {
   @@index([sourceId])
   @@index([targetId])
   @@index([type])
+}
+
+// Tier 2B: Scheduled goals — recurring agent jobs.
+model ScheduledJob {
+  id        String    @id @default(cuid())
+  name      String
+  cron      String    // 5-field cron expression
+  goal      String    // raw goal string fed to AgentService.planGoal
+  enabled   Boolean   @default(true)
+  lastRun   DateTime?
+  lastJobId String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([enabled])
 }

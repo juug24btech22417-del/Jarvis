@@ -301,8 +301,13 @@ AVAILABLE INTENTS AND EXAMPLES:
 }
 {
   "intent": "note_create",
-  "examples": ["note that", "remember this", "take a note", "write down"],
+  "examples": ["note that", "take a note", "write down", "jot this down"],
   "params": { "content": "note content" }
+}
+{
+  "intent": "memory_save",
+  "examples": ["remember that", "remember this", "don't forget that", "keep in mind"],
+  "params": { "content": "thing to remember" }
 }
 {
   "intent": "note_list",

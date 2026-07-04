@@ -7,6 +7,19 @@ import { RESEARCH_PROMPTS } from './ResearchPrompts';
 // Use environment variable or default to port 3004 for the API base URL
 const API_BASE = process.env.INTERNAL_API_URL || 'http://localhost:3000';
 
+export interface ResearchStatus {
+  id: string;
+  query: string;
+  status: "planning" | "searching" | "scraping" | "synthesizing" | "completed" | "failed";
+  progress: number; // 0 to 100
+  logs: string[];
+  subQueries: { query: string; goal: string }[];
+  visitedUrls: string[];
+  extractedFactsCount: number;
+  reportMarkdown?: string;
+  notionUrl?: string;
+}
+
 interface ResearchState {
   query: string;
   subQueries: { query: string; goal: string }[];
@@ -15,13 +28,49 @@ interface ResearchState {
   iteration: number;
 }
 
-class ResearchService {
-  private maxIterations = 5;
-  private maxPagesPerIteration = 3;
+const DEPTH_SETTINGS = {
+  quick:    { iterations: 1, pagesPerQuery: 2 },
+  standard: { iterations: 3, pagesPerQuery: 3 },
+  deep:     { iterations: 5, pagesPerQuery: 5 },
+};
 
-  async startResearch(query: string) {
-    console.log(`[Research Service] startResearch CALLED for: ${query}`);
-    console.log(`JARVIS: Starting deep research on: ${query}`);
+class ResearchService {
+  private activeTasks = new Map<string, ResearchStatus>();
+
+  getStatus(id: string): ResearchStatus | undefined {
+    return this.activeTasks.get(id);
+  }
+
+  getAllTasks(): ResearchStatus[] {
+    return Array.from(this.activeTasks.values());
+  }
+
+  private addLog(id: string, message: string, progress?: number, status?: ResearchStatus["status"]) {
+    const task = this.activeTasks.get(id);
+    if (task) {
+      const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      task.logs.push(`[${timestamp}] ${message}`);
+      if (progress !== undefined) task.progress = progress;
+      if (status !== undefined) task.status = status;
+      console.log(`[Research ${id}] ${message} (${task.progress}%)`);
+    }
+  }
+
+  async startResearch(id: string, query: string, depth: 'quick' | 'standard' | 'deep' = 'standard') {
+    const { iterations: maxIterations, pagesPerQuery: maxPagesPerIteration } = DEPTH_SETTINGS[depth];
+    console.log(`[Research Service] startResearch CALLED for task ${id}: ${query}`);
+    
+    const task: ResearchStatus = {
+      id,
+      query,
+      status: "planning",
+      progress: 5,
+      logs: [`[${new Date().toLocaleTimeString()}] Initializing Oracle Deep Research Engine...`],
+      subQueries: [],
+      visitedUrls: [],
+      extractedFactsCount: 0
+    };
+    this.activeTasks.set(id, task);
 
     const state: ResearchState = {
       query,
@@ -33,44 +82,79 @@ class ResearchService {
 
     try {
       // 1. Planning Phase
+      this.addLog(id, `Analyzing topic and generating search vectors...`, 10, "planning");
       state.subQueries = await this.generateSubQueries(query);
-      console.log("JARVIS: Research plan generated.");
+      task.subQueries = state.subQueries;
+      
+      if (state.subQueries.length === 0) {
+        throw new Error("Failed to generate research planning queries.");
+      }
+      
+      this.addLog(id, `Generated ${state.subQueries.length} sub-queries for deep investigation.`, 20, "searching");
 
       // 2. Iterative Research Loop
-      while (state.iteration < this.maxIterations) {
+      while (state.iteration < maxIterations) {
         state.iteration++;
-        console.log(`JARVIS: Research iteration ${state.iteration}/${this.maxIterations}...`);
+        const iterBaseProgress = 20 + Math.floor((state.iteration - 1) * (50 / maxIterations));
+        this.addLog(id, `Starting research cycle ${state.iteration}/${maxIterations}...`, iterBaseProgress, "searching");
 
-        for (const subQuery of state.subQueries) {
+        for (let qIndex = 0; qIndex < state.subQueries.length; qIndex++) {
+          const subQuery = state.subQueries[qIndex];
+          this.addLog(id, `Searching web for: "${subQuery.query}"`, iterBaseProgress + 2);
           const urls = await this.discoverUrls(subQuery.query);
 
-          for (const url of urls.slice(0, this.maxPagesPerIteration)) {
+          const targetUrls = urls.slice(0, maxPagesPerIteration);
+          this.addLog(id, `Found ${urls.length} resources, analyzing top ${targetUrls.length} links...`, iterBaseProgress + 4);
+
+          for (let uIndex = 0; uIndex < targetUrls.length; uIndex++) {
+            const url = targetUrls[uIndex];
             if (state.visitedUrls.has(url)) continue;
 
-            console.log(`JARVIS: Extracting data from ${url}...`);
+            const domain = new URL(url).hostname.replace('www.', '');
+            this.addLog(id, `Analyzing content from ${domain}...`, iterBaseProgress + 5, "scraping");
+            
             const content = await this.scrapePage(url);
+            if (!content) {
+              this.addLog(id, `⚠️ Failed to extract text content from ${domain}`, iterBaseProgress + 6);
+              continue;
+            }
+
+            this.addLog(id, `Extracting facts from ${domain}...`, iterBaseProgress + 7);
             const facts = await this.extractFacts(content, query);
 
             if (facts && facts.length > 0) {
               const existing = state.collectedFacts.get(url) || [];
               state.collectedFacts.set(url, [...existing, ...facts]);
+              
+              task.extractedFactsCount += facts.length;
+              this.addLog(id, `✅ Extracted ${facts.length} atomic facts from ${domain}.`, iterBaseProgress + 9);
+            } else {
+              this.addLog(id, `No relevant facts found on ${domain}.`, iterBaseProgress + 9);
             }
+            
             state.visitedUrls.add(url);
+            task.visitedUrls = Array.from(state.visitedUrls);
           }
         }
       }
 
       // 3. Synthesis Phase
+      this.addLog(id, `Synthesizing report from all gathered evidence...`, 75, "synthesizing");
       const finalReport = await this.synthesizeReport(query, state.collectedFacts);
+      task.reportMarkdown = finalReport;
 
       // 4. Delivery to Notion
-      await this.deliverToNotion(query, finalReport);
+      this.addLog(id, `Delivering report to Notion database...`, 90, "synthesizing");
+      const notionUrl = await this.deliverToNotion(query, finalReport);
+      task.notionUrl = notionUrl || "Notion integration successful";
 
       // 5. Final Notification
+      this.addLog(id, `Deep Research Completed! Synced to Notion.`, 100, "completed");
       await this.sendCompletionNotification(query);
 
-    } catch (e) {
+    } catch (e: any) {
       console.error("JARVIS: Research pipeline failed:", e);
+      this.addLog(id, `🚨 Error: ${e.message || String(e)}`, 100, "failed");
       await this.sendCompletionNotification(query, true);
     }
   }
@@ -133,7 +217,7 @@ class ResearchService {
   private async scrapePage(url: string): Promise<string> {
     // Try Firecrawl first (much better quality for JS-heavy sites)
     try {
-      const firecrawlKey = process.env.FIRECRAWL_API_KEY;
+      const firecrawlKey = process.env.FIRAWL_API_KEY || process.env.FIRECRAWL_API_KEY;
       if (firecrawlKey) {
         const { firecrawlService } = await import('./FirecrawlService');
         const result = await firecrawlService.scrapeUrl(url);
@@ -195,6 +279,7 @@ class ResearchService {
       });
       console.log("[Research] Notion response:", response.data);
       console.log("[Research] Successfully created Notion page:", response.data.url || response.data.pageId);
+      return response.data.url || response.data.pageId;
     } catch (e: any) {
       console.error("[Research] Notion delivery failed:", e.message);
       if (e.response?.data) {

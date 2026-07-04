@@ -22,6 +22,7 @@ import DungeonPanel from "@/components/panels/DungeonPanel";
 import HabitsPanel from "@/components/panels/HabitsPanel";
 import TimeCapsulePanel from "@/components/panels/TimeCapsulePanel";
 import VoiceNotesPanel from "@/components/panels/VoiceNotesPanel";
+import MemoryDiscussPanel from "@/components/panels/MemoryDiscussPanel";
 import WeatherPanel from "@/components/panels/WeatherPanel";
 import SpotifyPanel from "@/components/panels/SpotifyPanel";
 import NewsPanel from "@/components/panels/NewsPanel";
@@ -43,6 +44,7 @@ import PriceTrackerPanel from "@/components/panels/PriceTrackerPanel";
 import PlaywrightPanel from "@/components/panels/PlaywrightPanel";
 import TranscriptionPanel from "@/components/panels/TranscriptionPanel";
 import ProxyPanel from "@/components/panels/ProxyPanel";
+import AgentPanel from "@/components/panels/AgentPanel";
 import { useJarvisStore } from "@/store/jarvis.store";
 import { useTextToSpeech } from "@/hooks/useVoice";
 
@@ -272,11 +274,28 @@ function resolveGreeting(context?: any, tasks?: any[]) {
 import { useJarvisVoice } from "@/hooks/useVoice";
 import { useJarvisSentinel } from "@/hooks/useSentinel";
 import { useJarvisBiometrics } from "@/hooks/useBiometrics";
+import { useAutoPersona } from "@/hooks/useAutoPersona";
+import { useReactorDrive } from "@/hooks/useReactorDrive";
+import { useAmbientContext } from "@/hooks/useAmbientContext";
+import { composeLocalBriefing, polishBriefing } from "@/services/BriefingService";
 
 export default function Home() {
-  const { bootComplete, activePanel, setActivePanel, userName, tasks, userInteracted } = useJarvisStore();
+  const bootComplete = useJarvisStore((s) => s.bootComplete);
+  const activePanel = useJarvisStore((s) => s.activePanel);
+  const setActivePanel = useJarvisStore((s) => s.setActivePanel);
+  const userName = useJarvisStore((s) => s.userName);
+  const tasks = useJarvisStore((s) => s.tasks);
+  const userInteracted = useJarvisStore((s) => s.userInteracted);
+  const memories = useJarvisStore((s) => s.memories);
   const { speak } = useJarvisVoice();
   const hasGreetedRef = useRef(false);
+
+  // Tier 3B: auto-switch persona on time/alerts/panel/chat context.
+  useAutoPersona();
+  // Tier 3A: drive reactor color/speed/density from persona + state + alerts.
+  useReactorDrive();
+  // Tier 3C: aggregate ambient signals for downstream consumers.
+  const ambient = useAmbientContext();
 
   // Play "Iron Man" style startup sound when boot completes
   // Track user interaction for audio policy
@@ -347,11 +366,44 @@ export default function Home() {
         const greeting = resolveGreeting(healthData, tasks);
         // Short delay to allow boot sequence fade out
         setTimeout(() => speak(greeting), 1000);
+
+        // Tier 3D: Morning briefing once per session, if it's morning.
+        // Other kinds (evening/weekly) are available via voice command.
+        const today = new Date().toDateString();
+        const lastBriefingDate =
+          typeof window !== "undefined"
+            ? window.localStorage.getItem("jarvis:last-briefing-date")
+            : null;
+        if (
+          ambient.hour >= 6 &&
+          ambient.hour < 11 &&
+          lastBriefingDate !== today
+        ) {
+          const draft = composeLocalBriefing("morning", {
+            ambient,
+            pendingTasks: tasks
+              .filter((t) => !t.completed)
+              .map((t) => t.title),
+            memoryHighlights: memories
+              .map((m) => m.content)
+              .slice(0, 5),
+            upcomingEvents: [],
+            newsHeadlines: [],
+            userName: userName || "Boss",
+          });
+          const polished = await polishBriefing(draft);
+          setTimeout(() => speak(`${polished.greeting} ${polished.body}`), 6000);
+          try {
+            window.localStorage.setItem("jarvis:last-briefing-date", today);
+          } catch {
+            // ignore
+          }
+        }
       };
 
       triggerGreeting();
     }
-  }, [bootComplete, speak, userName, tasks, userInteracted]);
+  }, [bootComplete, speak, userName, tasks, userInteracted, memories, ambient, setActivePanel]);
   useJarvisSentinel();
   useJarvisBiometrics();
 
@@ -366,6 +418,7 @@ export default function Home() {
     }
   }, [isSpeaking, state, setState]);
   const { calculations, lastCalculation, addCalculation, clearHistory, deleteCalculation } = useCalculatorHistory();
+  const [calculatorOpen, setCalculatorOpen] = useState(true);
   const [whatsappOpen, setWhatsappOpen] = useState(false);
   const [instagramOpen, setInstagramOpen] = useState(false);
   const [telegramOpen, setTelegramOpen] = useState(false);
@@ -376,6 +429,29 @@ export default function Home() {
   const [habitsOpen, setHabitsOpen] = useState(false);
   const [timeCapsuleOpen, setTimeCapsuleOpen] = useState(false);
   const [voiceNotesOpen, setVoiceNotesOpen] = useState(false);
+
+  // Tier 1B: Memory Discuss drawer
+  const [discussEntity, setDiscussEntity] = useState<{
+    id: string;
+    name: string;
+    type: string;
+    description: string | null;
+    strength: number;
+    pinned: boolean;
+  } | null>(null);
+
+  // Tier 1C: lightweight pattern observation. Fire-and-forget POST.
+  const recordPanelOpen = useCallback((panelName: string) => {
+    if (typeof window === "undefined") return;
+    fetch("/api/memory/patterns", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        kind: "panel",
+        payload: { panel: panelName, openedAt: new Date().toISOString() },
+      }),
+    }).catch(() => {});
+  }, []);
 
   // Tier 2: API-based features
   const [weatherOpen, setWeatherOpen] = useState(false);
@@ -406,6 +482,7 @@ export default function Home() {
   const [transcriptionOpen, setTranscriptionOpen] = useState(false);
   const [playwrightOpen, setPlaywrightOpen] = useState(false);
   const [proxyOpen, setProxyOpen] = useState(false);
+  const [agentOpen, setAgentOpen] = useState(false);
 
   // Handle timer completion - speak notification
   const handleTimerComplete = useCallback((label: string) => {
@@ -440,51 +517,71 @@ export default function Home() {
     switch (activePanel) {
       case "skill-trainer":
         setSkillTrainerOpen(true);
+        recordPanelOpen("skill-trainer");
         break;
       case "image-generator":
         setImageGeneratorOpen(true);
+        recordPanelOpen("image-generator");
         break;
       case "summarizer":
         setSummarizerOpen(true);
+        recordPanelOpen("summarizer");
         break;
       case "web-scraper":
         setWebScraperOpen(true);
+        recordPanelOpen("web-scraper");
         break;
       case "nasa":
         setNasaOpen(true);
+        recordPanelOpen("nasa");
         break;
       case "huggingface":
         setHuggingFaceOpen(true);
+        recordPanelOpen("huggingface");
         break;
       case "ifttt":
         setIftttOpen(true);
+        recordPanelOpen("ifttt");
         break;
       case "browser":
         setBrowserOpen(true);
+        recordPanelOpen("browser");
         break;
       case "local-llm":
         setLocalLLMOpen(true);
+        recordPanelOpen("local-llm");
         break;
       case "vision":
         setVisionOpen(true);
+        recordPanelOpen("vision");
         break;
       case "automation":
         setAutomationOpen(true);
+        recordPanelOpen("automation");
         break;
       case "price-tracker":
         setPriceTrackerOpen(true);
+        recordPanelOpen("price-tracker");
         break;
       case "firecrawl":
         setFirecrawlOpen(true);
+        recordPanelOpen("firecrawl");
         break;
       case "transcription":
         setTranscriptionOpen(true);
+        recordPanelOpen("transcription");
         break;
       case "playwright":
         setPlaywrightOpen(true);
+        recordPanelOpen("playwright");
         break;
       case "proxy":
         setProxyOpen(true);
+        recordPanelOpen("proxy");
+        break;
+      case "agent":
+        setAgentOpen(true);
+        recordPanelOpen("agent");
         break;
       case "chat":
       case "tasks":
@@ -551,47 +648,59 @@ export default function Home() {
       {bootComplete && (
         <>
           <StatusHUD />
-          <MemoryPanel />
+          <MemoryPanel
+            onDiscuss={(entity) => setDiscussEntity(entity)}
+          />
+          <MemoryDiscussPanel
+            isOpen={discussEntity !== null}
+            onClose={() => setDiscussEntity(null)}
+            entity={discussEntity}
+          />
           <TaskPanel />
           <TimerPanel onTimerComplete={handleTimerComplete} />
           <AnimatePresence>
-            {lastCalculation && (
+            {calculatorOpen && lastCalculation && (
               <CalculatorDisplay
+                key={lastCalculation.id}
                 lastCalculation={lastCalculation}
                 calculations={calculations}
                 onClear={clearHistory}
                 onDelete={deleteCalculation}
+                onClose={() => setCalculatorOpen(false)}
               />
             )}
           </AnimatePresence>
           <CommandBar
-            onCalculate={addCalculation}
-            onOpenWhatsapp={() => setWhatsappOpen(true)}
-            onOpenInstagram={() => setInstagramOpen(true)}
-            onOpenTelegram={() => setTelegramOpen(true)}
-            onOpenCommHub={() => setCommHubOpen(true)}
-            onOpenSecurity={() => setSecurityOpen(true)}
-            onOpenVault={() => setVaultOpen(true)}
-            onOpenDungeon={() => setDungeonOpen(true)}
-            onOpenHabits={() => setHabitsOpen(true)}
-            onOpenTimeCapsule={() => setTimeCapsuleOpen(true)}
-            onOpenVoiceNotes={() => setVoiceNotesOpen(true)}
-            onOpenWeather={() => setWeatherOpen(true)}
-            onOpenSpotify={() => setSpotifyOpen(true)}
-            onOpenNews={() => setNewsOpen(true)}
-            onOpenCalendar={() => setCalendarOpen(true)}
-            onOpenSkillTrainer={() => setSkillTrainerOpen(true)}
-            onOpenImageGenerator={() => setImageGeneratorOpen(true)}
-            onOpenSummarizer={() => setSummarizerOpen(true)}
-            onOpenWebScraper={() => setWebScraperOpen(true)}
-            onOpenNASA={() => setNasaOpen(true)}
-            onOpenHuggingFace={() => setHuggingFaceOpen(true)}
-            onOpenIFTTT={() => setIftttOpen(true)}
-            onOpenBrowser={() => setBrowserOpen(true)}
-            onOpenLocalLLM={() => setLocalLLMOpen(true)}
-            onOpenVision={() => setVisionOpen(true)}
-            onOpenAutomation={() => setAutomationOpen(true)}
-            onOpenFirecrawl={() => setFirecrawlOpen(true)}
+            onCalculate={(expr: string, result: string) => {
+              addCalculation(expr, result);
+              setCalculatorOpen(true);
+            }}
+            onOpenWhatsapp={() => { recordPanelOpen("whatsapp"); setWhatsappOpen(true); }}
+            onOpenInstagram={() => { recordPanelOpen("instagram"); setInstagramOpen(true); }}
+            onOpenTelegram={() => { recordPanelOpen("telegram"); setTelegramOpen(true); }}
+            onOpenCommHub={() => { recordPanelOpen("comm-hub"); setCommHubOpen(true); }}
+            onOpenSecurity={() => { recordPanelOpen("security"); setSecurityOpen(true); }}
+            onOpenVault={() => { recordPanelOpen("vault"); setVaultOpen(true); }}
+            onOpenDungeon={() => { recordPanelOpen("dungeon"); setDungeonOpen(true); }}
+            onOpenHabits={() => { recordPanelOpen("habits"); setHabitsOpen(true); }}
+            onOpenTimeCapsule={() => { recordPanelOpen("time-capsule"); setTimeCapsuleOpen(true); }}
+            onOpenVoiceNotes={() => { recordPanelOpen("voice-notes"); setVoiceNotesOpen(true); }}
+            onOpenWeather={() => { recordPanelOpen("weather"); setWeatherOpen(true); }}
+            onOpenSpotify={() => { recordPanelOpen("spotify"); setSpotifyOpen(true); }}
+            onOpenNews={() => { recordPanelOpen("news"); setNewsOpen(true); }}
+            onOpenCalendar={() => { recordPanelOpen("calendar"); setCalendarOpen(true); }}
+            onOpenSkillTrainer={() => { recordPanelOpen("skill-trainer"); setSkillTrainerOpen(true); }}
+            onOpenImageGenerator={() => { recordPanelOpen("image-generator"); setImageGeneratorOpen(true); }}
+            onOpenSummarizer={() => { recordPanelOpen("summarizer"); setSummarizerOpen(true); }}
+            onOpenWebScraper={() => { recordPanelOpen("web-scraper"); setWebScraperOpen(true); }}
+            onOpenNASA={() => { recordPanelOpen("nasa"); setNasaOpen(true); }}
+            onOpenHuggingFace={() => { recordPanelOpen("huggingface"); setHuggingFaceOpen(true); }}
+            onOpenIFTTT={() => { recordPanelOpen("ifttt"); setIftttOpen(true); }}
+            onOpenBrowser={() => { recordPanelOpen("browser"); setBrowserOpen(true); }}
+            onOpenLocalLLM={() => { recordPanelOpen("local-llm"); setLocalLLMOpen(true); }}
+            onOpenVision={() => { recordPanelOpen("vision"); setVisionOpen(true); }}
+            onOpenAutomation={() => { recordPanelOpen("automation"); setAutomationOpen(true); }}
+            onOpenFirecrawl={() => { recordPanelOpen("firecrawl"); setFirecrawlOpen(true); }}
           />
           <GestureDetector />
           <VideoPlayer />
@@ -1030,6 +1139,12 @@ export default function Home() {
           <ProxyPanel
             isOpen={proxyOpen}
             onClose={() => setProxyOpen(false)}
+          />
+
+          {/* Tier 2A: Goal agent */}
+          <AgentPanel
+            isOpen={agentOpen}
+            onClose={() => setAgentOpen(false)}
           />
         </>
       )}

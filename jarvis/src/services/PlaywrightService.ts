@@ -150,12 +150,12 @@ class PlaywrightService {
         // Last fallback: evaluate in the browser to grab ANY product link
         console.log(`[Playwright] All selectors failed. Trying JS evaluation...`);
         productHref = await page.evaluate(() => {
-          const links = document.querySelectorAll('a[href*="/dp/"]');
-          for (const link of links) {
+          const links = Array.from(document.querySelectorAll('a[href*="/dp/"]'));
+          const found = links.find(link => {
             const href = link.getAttribute('href');
-            if (href && href.includes('/dp/')) return href;
-          }
-          return null;
+            return href && href.includes('/dp/');
+          });
+          return found ? found.getAttribute('href') : null;
         });
         if (productHref) {
           console.log(`[Playwright] Found product via JS eval: ${productHref.substring(0, 80)}...`);
@@ -311,7 +311,7 @@ class PlaywrightService {
         const results: string[] = [];
         const bodyText = document.body.innerText;
         const priceMatches = bodyText.match(/₹[\d,]+/g);
-        if (priceMatches) results.push('Prices found: ' + [...new Set(priceMatches)].slice(0, 6).join(', '));
+        if (priceMatches) results.push('Prices found: ' + Array.from(new Set(priceMatches)).slice(0, 6).join(', '));
         return results;
       });
 
@@ -488,7 +488,7 @@ class PlaywrightService {
           const bodyText = document.body.innerText;
           const prices = bodyText.match(/₹[\d,]+(?:\.\d{2})?/g);
           if (prices) {
-            const unique = [...new Set(prices)].filter(p => parseInt(p.replace(/[₹,]/g, '')) > 100);
+            const unique = Array.from(new Set(prices)).filter(p => parseInt(p.replace(/[₹,]/g, '')) > 100);
             return unique.slice(0, 3);
           }
           return [];
@@ -523,7 +523,7 @@ class PlaywrightService {
             if (text && text.length > 15 && text.length < 200) results.push(`• ${text}`);
           }
         });
-        return [...new Set(results)].slice(0, 8);
+        return Array.from(new Set(results)).slice(0, 8);
       });
       await browser.close();
       return { content: headlines.length > 0 ? `📰 Latest ${topic} news:\n${headlines.join('\n')}` : `📰 Could not extract headlines. Try a different topic, Boss.` };
@@ -573,12 +573,12 @@ class PlaywrightService {
 
       // Click the first video result
       const videoLink = await page.evaluate(() => {
-        const links = document.querySelectorAll('a#video-title');
-        for (const link of links) {
+        const links = Array.from(document.querySelectorAll('a#video-title'));
+        const found = links.find(link => {
           const href = link.getAttribute('href');
-          if (href && href.startsWith('/watch')) return href;
-        }
-        return null;
+          return href && href.startsWith('/watch');
+        });
+        return found ? found.getAttribute('href') : null;
       });
 
       if (videoLink) {
@@ -950,7 +950,7 @@ class PlaywrightService {
             if (text && text.length > 10 && text.length < 200) results.push(text);
           }
         });
-        return [...new Set(results)].slice(0, 6);
+        return Array.from(new Set(results)).slice(0, 6);
       });
 
       await browser.close();

@@ -209,6 +209,7 @@ class MeetingBotService {
    */
 
   private previousSnapshot: string = '';
+  private captionSeenSet: Set<string> = new Set();
   private _captionBusy = false;
   private currentSpeaker: string = 'Speaker';
 
@@ -390,7 +391,7 @@ class MeetingBotService {
         ...debugInfo,
         captionsCollected: this.state.captionLog.length,
         isRecording: this.state.isRecording,
-        lastCaptionTexts: this.previousBottomTexts,
+        lastCaptionTexts: this.previousSnapshot,
       };
     } catch (e: any) {
       return { error: e.message };

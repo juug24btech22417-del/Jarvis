@@ -1,5 +1,6 @@
 // Knowledge Graph API - CRUD operations for entities and relationships
 import { NextResponse } from "next/server";
+import { prisma } from "@/lib/db/queries";
 import {
   addEntity,
   addRelationship,
@@ -12,6 +13,12 @@ import {
   deleteEntity,
   deleteRelationship,
   getGraphStats,
+  bumpUsage,
+  pinEntity,
+  setCue,
+  archiveStale,
+  recomputeAllStrengths,
+  getDecayStats,
   EntityType,
 } from "@/lib/memory/graph";
 
@@ -91,6 +98,12 @@ export async function GET(request: Request) {
       return NextResponse.json({ results });
     }
 
+    // Tier 1A: decay stats (vivid / fresh / fading / dim / archived)
+    if (action === "decay-stats") {
+      const stats = await getDecayStats();
+      return NextResponse.json(stats);
+    }
+
     return NextResponse.json({ error: "Unknown action" }, { status: 400 });
   } catch (error) {
     console.error("[Graph API] GET error:", error);
@@ -142,6 +155,61 @@ export async function POST(request: Request) {
       }
       await deleteRelationship(relationshipId);
       return NextResponse.json({ success: true, message: "Relationship deleted" });
+    }
+
+    // Tier 1A: bulk reinforcement (used by chat after a successful retrieval)
+    if (action === "bump-usage") {
+      const { ids, delta } = body;
+      if (!Array.isArray(ids) || ids.length === 0) {
+        return NextResponse.json({ error: "ids array required" }, { status: 400 });
+      }
+      const result = await bumpUsage(ids, typeof delta === "number" ? delta : 0.15);
+      return NextResponse.json({ success: true, ...result });
+    }
+
+    // Tier 1A: pin / unpin
+    if (action === "pin") {
+      const { id, pinned } = body;
+      if (!id || typeof pinned !== "boolean") {
+        return NextResponse.json({ error: "id and pinned required" }, { status: 400 });
+      }
+      await pinEntity(id, pinned);
+      return NextResponse.json({ success: true });
+    }
+
+    // Tier 1A: set retrieval cue
+    if (action === "set-cue") {
+      const { id, cue } = body;
+      if (!id) {
+        return NextResponse.json({ error: "id required" }, { status: 400 });
+      }
+      await setCue(id, typeof cue === "string" ? cue : null);
+      return NextResponse.json({ success: true });
+    }
+
+    // Tier 1A: archive a single entity
+    if (action === "archive") {
+      const { id } = body;
+      if (!id) {
+        return NextResponse.json({ error: "id required" }, { status: 400 });
+      }
+      await prisma.entity.update({
+        where: { id },
+        data: { archived: true },
+      });
+      return NextResponse.json({ success: true });
+    }
+
+    // Tier 1A: sweep all stale entities (intended for cron)
+    if (action === "archive-stale") {
+      const result = await archiveStale();
+      return NextResponse.json({ success: true, ...result });
+    }
+
+    // Tier 1A: recompute every entity's cached strength (after imports/restores)
+    if (action === "recompute-strengths") {
+      const result = await recomputeAllStrengths();
+      return NextResponse.json({ success: true, ...result });
     }
 
     return NextResponse.json({ error: "Unknown action" }, { status: 400 });
