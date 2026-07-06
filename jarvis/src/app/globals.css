@@ -152,21 +152,26 @@ h1, h2, h3, h4, h5, h6, p, span, div {
 
 /* === SCROLLBARS === */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 10px;
+  height: 10px;
 }
 
 ::-webkit-scrollbar-track {
-  background: rgba(0, 0, 0, 0.3);
+  background: rgba(0, 0, 0, 0.4);
+  border-radius: 5px;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--panel-bracket)55;
-  border-radius: 3px;
+  background: rgba(0, 212, 255, 0.45);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--panel-bracket)88;
+  background: rgba(0, 212, 255, 0.75);
+  background-clip: padding-box;
+  border: 2px solid transparent;
 }
 
 ::-webkit-scrollbar-thumb,

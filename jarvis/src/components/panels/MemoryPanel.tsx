@@ -28,6 +28,7 @@ export default function MemoryPanel({ onDiscuss }: MemoryPanelProps) {
   const { messages } = useJarvisStore();
   const panelRef = useRef<HTMLDivElement>(null);
   const contextRef = useRef<HTMLDivElement>(null);
+  const [userScrolledUp, setUserScrolledUp] = useState(false);
 
   // Load graph entities (flat Memory rows are hidden in the panel — they live
   // in the database for the LLM retriever but aren't surfaced here).
@@ -67,11 +68,22 @@ export default function MemoryPanel({ onDiscuss }: MemoryPanelProps) {
     });
   }, [entities]);
 
-  // Auto-scroll to latest message
+  // Manual scroll: respect the user's position. Only auto-scroll to the
+  // bottom when a new message arrives AND the user is already near the
+  // bottom. If they've scrolled up to read older messages, leave them
+  // there and surface a "jump to latest" button instead.
   useEffect(() => {
     const chatArea = document.getElementById("chat-scroll-area");
-    if (chatArea) {
+    if (!chatArea || messages.length === 0) return;
+
+    const isNearBottom =
+      chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight < 80;
+
+    if (isNearBottom) {
       chatArea.scrollTop = chatArea.scrollHeight;
+      setUserScrolledUp(false);
+    } else {
+      setUserScrolledUp(true);
     }
   }, [messages]);
 
@@ -86,39 +98,55 @@ export default function MemoryPanel({ onDiscuss }: MemoryPanelProps) {
   );
 
   return (
-    <div ref={panelRef} className="fixed left-6 top-24 bottom-32 w-80 z-40">
+    <div
+      ref={panelRef}
+      className="fixed left-6 top-24 bottom-32 w-80 z-40 flex flex-col"
+    >
       <HolographicPanel
         title="MEMORY BANK"
         direction="left"
         delay={0.3}
-        className="h-full flex flex-col"
+        className="h-full flex flex-col overflow-hidden"
       >
-        <div className="flex-1 overflow-hidden flex flex-col space-y-3 min-h-0">
-          {/* Recent conversation context */}
-          <div ref={contextRef} className="flex-1 flex flex-col min-h-0">
-            <div className="flex items-center gap-2 mb-2 text-text-secondary text-xs font-orbitron tracking-wider flex-shrink-0">
-              <MessageSquare className="w-3 h-3" />
-              CURRENT CONVERSATION
-            </div>
+        <div className="flex-1 overflow-hidden flex flex-col min-h-0">
+          {/* Recent conversation context — explicit pixel height on the
+              scroll container itself so scrolling works regardless of
+              the flex chain above. */}
+          <div className="flex items-center gap-2 mb-2 text-text-secondary text-xs font-orbitron tracking-wider flex-shrink-0">
+            <MessageSquare className="w-3 h-3" />
+            CURRENT CONVERSATION
+          </div>
+          <div
+            ref={contextRef}
+            className="relative flex-shrink-0"
+            style={{ height: "320px" }}
+          >
             <div
-              className="space-y-2 overflow-y-auto scroll-smooth flex-1 min-h-0"
+              className="space-y-2 overflow-y-auto overscroll-contain pr-1 w-full h-full min-w-0"
               id="chat-scroll-area"
+              style={{ scrollbarGutter: "stable" }}
+              onScroll={(e) => {
+                const el = e.currentTarget;
+                const nearBottom =
+                  el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+                setUserScrolledUp(!nearBottom);
+              }}
             >
               {messages.length === 0 ? (
-                <div className="bg-panel-glass/30 rounded-lg p-3 text-xs text-text-secondary/50 font-rajdhani border-l-2 border-reactor-core/30">
+                <div className="bg-panel-glass/30 rounded-lg p-3 text-xs text-text-secondary/50 font-rajdhani border-l-2 border-reactor-core/30 break-words">
                   No messages yet. Say &quot;Hey JARVIS&quot; to start.
                 </div>
               ) : (
-                messages.slice(-20).map((msg) => (
+                messages.map((msg) => (
                   <div
                     key={msg.id}
-                    className={`rounded-lg p-2 text-xs font-rajdhani border-l-2 ${
+                    className={`min-w-0 max-w-full overflow-hidden rounded-lg p-2 text-xs font-rajdhani border-l-2 break-words ${
                       msg.role === "user"
                         ? "bg-reactor-core/10 border-reactor-core text-text-primary"
                         : "bg-panel-glass/30 border-accent-green text-text-secondary"
                     }`}
                   >
-                    <div className="flex items-center gap-1 mb-1">
+                    <div className="flex items-center gap-1 mb-1 flex-wrap">
                       <span
                         className={`text-[10px] font-bold ${
                           msg.role === "user"
@@ -136,7 +164,7 @@ export default function MemoryPanel({ onDiscuss }: MemoryPanelProps) {
                       </span>
                     </div>
                     <p
-                      className={`text-text-primary/90 break-words whitespace-pre-wrap ${
+                      className={`text-text-primary/90 break-words [overflow-wrap:anywhere] whitespace-pre-wrap ${
                         msg.role === "user" ? "line-clamp-3" : ""
                       }`}
                     >
@@ -146,10 +174,25 @@ export default function MemoryPanel({ onDiscuss }: MemoryPanelProps) {
                 ))
               )}
             </div>
+            {userScrolledUp && messages.length > 0 && (
+              <button
+                onClick={() => {
+                  const chatArea = document.getElementById("chat-scroll-area");
+                  if (chatArea) {
+                    chatArea.scrollTop = chatArea.scrollHeight;
+                    setUserScrolledUp(false);
+                  }
+                }}
+                className="absolute bottom-2 right-3 z-10 px-2 py-1 text-[10px] font-orbitron tracking-wider text-reactor-core bg-panel-glass/80 hover:bg-reactor-core/20 border border-reactor-core/40 rounded shadow-glow transition-colors"
+                title="Jump to latest message"
+              >
+                ↓ LATEST
+              </button>
+            )}
           </div>
 
           {/* Tier 1A: Graph entities — strength-aware, discussable */}
-          <div className="flex-shrink-0 max-h-[40%] overflow-y-auto space-y-2 mt-3 pt-3 border-t border-panel-border/30">
+          <div className="flex-1 min-h-0 overflow-y-auto space-y-2 mt-3 pt-3 border-t border-panel-border/30 min-w-0">
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2 text-text-secondary text-xs font-orbitron tracking-wider">
                 <Brain className="w-3 h-3" />
