@@ -21,6 +21,7 @@ import type {
   InlineKeyboardButton,
   ReplyOpts,
 } from "./index";
+import { buildSystemPrompt, type JARVISContext } from "@/lib/jarvis/personality";
 
 // Use a relative fetch base so this works in both dev and prod.
 const API_BASE = process.env.INTERNAL_API_URL || "http://localhost:3000";
@@ -35,6 +36,71 @@ const NO_LEAK_SUFFIX =
   "Do not include step-by-step analysis, planning, reasoning, numbered " +
   "thinking lists, or meta-commentary about how you arrived at the " +
   "answer. Keep replies concise and suitable for a chat bubble.";
+
+// Tell the model it's on Telegram and what the constraints are.
+// Without this, free-tier models sometimes forget they're replying
+// in a chat-bubble UI and emit markdown tables, code fences, or
+// essays that get truncated mid-thought.
+const TELEGRAM_CHANNEL_SUFFIX =
+  "\n\n── RESPONSE CHANNEL ────────────────────────────\n" +
+  "You are replying on Telegram (a chat-bubble messenger). The user " +
+  "is reachable on their phone; your reply is rendered as a Telegram " +
+  "message. Hard constraints:\n" +
+  "  • No code fences, no markdown tables, no headings. Telegram's " +
+  "    Markdown renderer can't handle them reliably and they'll look " +
+  "    broken.\n" +
+  "  • Inline emphasis with *bold* or _italic_ is fine, sparingly.\n" +
+  "  • Aim for 2-5 sentences. Long essays get cut off mid-thought.\n" +
+  "  • If you need to ask a question, keep it to one.\n" +
+  "───────────────────────────────────────────────────";
+
+/**
+ * Build the system prompt the dispatcher sends to /api/chat.
+ *
+ * Three layers, in order:
+ *   1. The canonical JARVIS persona from `lib/jarvis/personality.ts` —
+ *      the same prompt the laptop's CommandBar uses, so the bot on
+ *      Telegram and the bot on the laptop speak with one voice.
+ *   2. A "you're on Telegram" channel suffix — markdown / length
+ *      constraints specific to a chat-bubble UI.
+ *   3. The "no reasoning leak" suffix — keeps free-tier models from
+ *      emitting their chain-of-thought as visible content.
+ *
+ * The caller may override the persona prompt via the
+ * `JARVIS_TELEGRAM_SYSTEM_PROMPT` env var; if so, only layers 2 and 3
+ * are appended to the override.
+ */
+function buildTelegramSystemPrompt(): string {
+  // Default user name matches the laptop's `Boss`. Override via env
+  // if you want the bot to address you by a different name.
+  const userName = process.env.JARVIS_TELEGRAM_USER_NAME?.trim() || "Boss";
+
+  const jarvisContext: JARVISContext = {
+    userName,
+    currentTime: new Date().toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
+      weekday: "long",
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    }),
+    memories: [],
+    tasks: [],
+    recentMessages: [],
+  };
+
+  const persona = buildSystemPrompt(jarvisContext);
+
+  const base =
+    process.env.JARVIS_TELEGRAM_SYSTEM_PROMPT?.trim() ||
+    persona + TELEGRAM_CHANNEL_SUFFIX;
+
+  // Always append the no-leak instruction — it's idempotent and
+  // critical for stopping free-tier models from leaking reasoning.
+  return `${base}${NO_LEAK_SUFFIX}`;
+}
 
 export interface InboundContext {
   chatId: number;
@@ -346,13 +412,10 @@ export async function handleInboundMessage(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         messages,
-        // Append the no-leak suffix to whatever prompt the chat
-        // route already uses. Stripping reasoning traces from the
-        // output is brittle; instructing the model directly is
-        // more reliable across providers.
-        systemPrompt: process.env.JARVIS_TELEGRAM_SYSTEM_PROMPT
-          ? `${process.env.JARVIS_TELEGRAM_SYSTEM_PROMPT}${NO_LEAK_SUFFIX}`
-          : NO_LEAK_SUFFIX.trim(),
+        // Use the canonical JARVIS persona + Telegram channel
+        // constraints, so the bot speaks in the same voice as the
+        // laptop version and respects Telegram's UI limits.
+        systemPrompt: buildTelegramSystemPrompt(),
       }),
     });
 
