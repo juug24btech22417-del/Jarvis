@@ -22,6 +22,20 @@ import type {
   ReplyOpts,
 } from "./index";
 import { buildSystemPrompt, type JARVISContext } from "@/lib/jarvis/personality";
+import {
+  routeCommand,
+  formatRemindersList,
+  formatWhereami,
+  type ReplyPlan,
+} from "./commands";
+import {
+  executeOsCommand,
+  createDestructivePending,
+  destructiveConfirmButtons,
+} from "./osBridge";
+import { getLastClipboard } from "./clipboard";
+import { composeLocalBriefing, type BriefingKind } from "@/services/BriefingService";
+import type { DayPhase } from "@/hooks/useAmbientContext";
 
 // Use a relative fetch base so this works in both dev and prod.
 const API_BASE = process.env.INTERNAL_API_URL || "http://localhost:3000";
@@ -157,6 +171,10 @@ async function buildChatHistory(
     } else if (row.direction === "outbound" && row.text) {
       messages.push({ role: "assistant", content: row.text });
     }
+    // "system" direction rows are proactive pushes from other parts
+    // of the codebase (scheduler, briefing, etc.). They're not part
+    // of the user's chat history and would confuse the LLM if
+    // injected as assistant turns.
   }
   messages.push({ role: "user", content: prompt });
   return messages;
@@ -376,6 +394,217 @@ function detectButtons(text: string): {
 }
 
 /**
+ * Resolve a ReplyPlan into a side-effecting response. Used at the top
+ * of `handleInboundMessage` to short-circuit slash-commands and
+ * natural-language OS commands before the LLM is consulted.
+ */
+async function applyReplyPlan(
+  plan: ReplyPlan,
+  ctx: InboundContext
+): Promise<DispatchResult> {
+  if (plan.kind === "chat") {
+    // Fall through — caller must use the LLM path.
+    return { ok: false, error: "fallthrough" };
+  }
+
+  let replyText = plan.text ?? "";
+  let opts: ReplyOpts = plan.opts ?? {};
+
+  switch (plan.kind) {
+    case "reply":
+      // Already have replyText + opts.
+      break;
+
+    case "execute_os": {
+      const command = plan.payload?.command as string;
+      const params = (plan.payload?.params as Record<string, unknown>) ?? {};
+      const result = await executeOsCommand(command, params);
+      replyText = result.ok
+        ? `✅ ${result.description ?? "Done."}`
+        : `❌ ${result.error ?? "Action failed."}`;
+      break;
+    }
+
+    case "confirm_destructive": {
+      const action = plan.payload?.action as string;
+      const params = (plan.payload?.params as Record<string, unknown>) ?? {};
+      const pending = await createDestructivePending(
+        ctx.chatId,
+        action,
+        params
+      );
+      replyText = `⚠️ Confirm ${action}? This affects the laptop immediately.`;
+      opts = { ...opts, buttons: destructiveConfirmButtons(pending.shortId) };
+      break;
+    }
+
+    case "create_reminder":
+      // /remind was already resolved by commands.ts; replyText is set.
+      break;
+
+    case "cancel_reminder":
+      // ditto.
+      break;
+
+    case "list_reminders":
+      replyText = await formatRemindersList(ctx.chatId);
+      break;
+
+    case "location_whereami":
+      replyText = await formatWhereami(ctx.chatId);
+      break;
+
+    case "brief":
+      // Best-effort local brief. The full briefing path needs
+      // weather/email/calendar which the dispatcher doesn't fetch.
+      replyText = await composeBriefText();
+      break;
+
+    case "clip": {
+      const text = getLastClipboard();
+      replyText = text
+        ? `📋 Latest clipboard:\n\n${text.slice(0, 3000)}`
+        : "Clipboard is empty, Boss.";
+      break;
+    }
+
+    case "tasks_list": {
+      // Lazy import to avoid the Prisma deps on the cold path.
+      const { prisma } = await import("@/lib/db/queries");
+      const tasks = await prisma.task.findMany({
+        where: { completed: false },
+        orderBy: [{ dueDate: "asc" }, { createdAt: "desc" }],
+        take: 20,
+      });
+      replyText = tasks.length === 0
+        ? "Task list is empty, Boss."
+        : tasks
+            .map((t) => `• ${t.id.slice(0, 8)} — ${t.title}`)
+            .join("\n");
+      break;
+    }
+
+    case "tasks_add": {
+      const title = (plan.payload?.title as string | undefined)?.trim();
+      if (!title) {
+        replyText = "Usage: /task <title>";
+        break;
+      }
+      const { prisma } = await import("@/lib/db/queries");
+      const t = await prisma.task.create({
+        data: { title, priority: "normal" },
+      });
+      replyText = `📝 Task added: ${t.title}\n(id: ${t.id.slice(0, 8)})`;
+      break;
+    }
+
+    case "tasks_done": {
+      const id = (plan.payload?.id as string | undefined)?.trim();
+      if (!id) {
+        replyText = "Usage: /done <id>";
+        break;
+      }
+      const { prisma } = await import("@/lib/db/queries");
+      // Allow short IDs — find by prefix.
+      const t = await prisma.task.findFirst({
+        where: { id: { startsWith: id } },
+      });
+      if (!t) {
+        replyText = `Couldn't find task ${id}.`;
+        break;
+      }
+      await prisma.task.update({
+        where: { id: t.id },
+        data: { completed: true },
+      });
+      replyText = `✅ Marked done: ${t.title}`;
+      break;
+    }
+
+    case "whoami":
+      replyText = `Your chat_id is ${ctx.chatId}, Boss.`;
+      break;
+
+    case "help":
+    case "start":
+      // commands.ts already produced the reply text.
+      break;
+
+    default:
+      return { ok: false, error: `unhandled plan: ${plan.kind}` };
+  }
+
+  if (!replyText) {
+    replyText = "_(Jarvis had nothing to say — try rephrasing)_";
+  }
+
+  // Send the reply (single message — replaces the "thinking…" placeholder).
+  await ctx.editLastProgress(replyText).catch(() => {});
+
+  await enqueueTelegramMessage({
+    chatId: ctx.chatId,
+    direction: "outbound",
+    text: replyText,
+    status: "sent",
+    replyToId: ctx.inboundRowId,
+    metadata: {
+      parseMode: "Markdown",
+      commandPlan: plan.kind,
+      ...(opts.buttons ? { buttons: opts.buttons } : {}),
+    },
+  });
+  await markSent(ctx.inboundRowId);
+
+  return { ok: true, replyText };
+}
+
+async function composeBriefText(): Promise<string> {
+  // Best-effort: defer to composeLocalBriefing with synthetic ambient
+  // context if the panel's ambient context isn't readily available here.
+  // The full /api/briefing/generate path would require the panel's
+  // ambient state — for v1 we emit a minimal greeting + task summary.
+  try {
+    const hour = new Date().getHours();
+    const kind: BriefingKind =
+      hour < 12 ? "morning" : hour < 18 ? "evening" : "weekly";
+    const { prisma } = await import("@/lib/db/queries");
+    const tasks = await prisma.task.findMany({
+      where: { completed: false },
+      take: 5,
+      orderBy: [{ dueDate: "asc" }, { createdAt: "desc" }],
+    });
+    const ambient = {
+      hour,
+      dayPhase: (
+        hour < 5 ? "night"
+        : hour < 7 ? "dawn"
+        : hour < 11 ? "morning"
+        : hour < 14 ? "midday"
+        : hour < 17 ? "afternoon"
+        : hour < 19 ? "evening"
+        : hour < 22 ? "dusk"
+        : "night"
+      ) as DayPhase,
+      isWeekend: [0, 6].includes(new Date().getDay()),
+      biometricsActive: false,
+      activeAlerts: 0,
+      isHeadphonesIn: false,
+    };
+    const brief = composeLocalBriefing(kind, {
+      ambient,
+      pendingTasks: tasks.map((t) => t.title),
+      memoryHighlights: [],
+      upcomingEvents: [],
+      newsHeadlines: [],
+      userName: process.env.JARVIS_TELEGRAM_USER_NAME?.trim() || "Boss",
+    });
+    return `${brief.greeting}\n\n${brief.body}`;
+  } catch (err: any) {
+    return `Brief unavailable right now, Boss: ${err?.message || err}`;
+  }
+}
+
+/**
  * Main entry point. Called by the poll route and the boot-time replay.
  * Side-effects only: the inbound row is updated to "processing" before
  * this is called; we update it to "sent" or "failed" when done.
@@ -387,6 +616,19 @@ export async function handleInboundMessage(
   const text = rawText.trim();
   if (!text) {
     return { ok: false, error: "empty message" };
+  }
+
+  // 0. Command routing — short-circuit before LLM.
+  //    Detects /commands, /remind, /clip, natural-language OS commands
+  //    ("lock my laptop"), and pre-resolves them to a reply or action.
+  const fromCallback =
+    typeof ctx.inboundTelegramMsgId === "number" && ctx.inboundTelegramMsgId < 0;
+  const plan = await routeCommand(ctx.chatId, text, { fromCallback });
+  if (plan.kind !== "chat") {
+    const result = await applyReplyPlan(plan, ctx);
+    if (result.ok) return result;
+    // If the plan was unhandled / fallthrough (shouldn't happen for
+    // anything but `chat`), continue to the LLM path.
   }
 
   // 1. Continuous typing indicator (Telegram expires it after 5s).

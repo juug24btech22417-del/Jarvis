@@ -337,6 +337,34 @@ export default function TelegramPanel({
         </div>
       )}
 
+      {/* Quick actions: test push, pending reminders, last-known location.
+          All three are fire-and-forget; they read from the new
+          /api/telegram/* routes and never block the panel. */}
+      {selectedChat && (
+        <div className="px-4 py-2 border-b border-panel-border flex items-center gap-2 font-rajdhani text-xs">
+          <button
+            onClick={async () => {
+              try {
+                await fetch("/api/telegram/notify", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    chatId: selectedChat.id,
+                    text: "🧪 Test push from panel.",
+                  }),
+                });
+              } catch {}
+              refreshFromQueue();
+            }}
+            className="px-2 py-1 rounded bg-panel-border hover:bg-cyan-500/30 transition-colors"
+          >
+            Test push
+          </button>
+          <RemindersWidget chatId={selectedChat.id} />
+          <LocationWidget chatId={selectedChat.id} />
+        </div>
+      )}
+
       {/* Auth helper: when the bot is connected but no chat IDs are
           allow-listed, surface the seen chat IDs so the user can copy
           them into .env.local. */}
@@ -461,6 +489,13 @@ export default function TelegramPanel({
                     isMine && msg.status === "processing" ? " • Jarvis is replying…" :
                     isMine && msg.status === "failed" ? ` • Failed${msg.error ? `: ${msg.error.slice(0, 60)}` : ""}` :
                     !isMine && msg.status === "rejected" ? " • Rejected" : "";
+                  const kind = (msg.metadata as any)?.kind as string | undefined;
+                  const kindBadge =
+                    kind === "voice" ? " 🎤 voice" :
+                    kind === "photo" ? " 📷 photo" :
+                    kind === "document" ? " 📄 document" :
+                    kind === "location" ? " 📍 location" :
+                    !isMine && msg.metadata?.system ? " 🔔 system" : "";
                   return (
                     <div
                       key={msg.id}
@@ -480,6 +515,7 @@ export default function TelegramPanel({
                         </p>
                         <p className="text-[10px] text-text-secondary mt-1">
                           {formatTime(Math.floor(new Date(msg.createdAt).getTime() / 1000))}
+                          {kindBadge}
                           {statusBadge}
                         </p>
                       </div>
@@ -535,5 +571,103 @@ export default function TelegramPanel({
         </div>
       </div>
     </div>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Quick-action widgets. Pull pending reminders and last-known location
+// for the selected chat so the panel can show "📍 12.97, 77.59" and
+// "⏰ 3 reminders" at a glance.
+// ────────────────────────────────────────────────────────────────────────
+
+interface Reminder {
+  id: string;
+  text: string;
+  fireAt: string;
+}
+
+function RemindersWidget({ chatId }: { chatId: number }) {
+  const [reminders, setReminders] = useState<Reminder[]>([]);
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const res = await fetch(
+          `/api/telegram/reminders?chatId=${chatId}`
+        );
+        const data = await res.json();
+        if (alive) setReminders(data.reminders ?? []);
+      } catch {}
+    };
+    load();
+    const i = setInterval(load, 30_000); // refresh every 30s
+    return () => {
+      alive = false;
+      clearInterval(i);
+    };
+  }, [chatId]);
+
+  if (reminders.length === 0) {
+    return (
+      <span className="text-text-secondary" title="No pending reminders">
+        ⏰ 0
+      </span>
+    );
+  }
+  return (
+    <span
+      className="text-cyan-300"
+      title={reminders.map((r) => `${r.text} @ ${r.fireAt}`).join("\n")}
+    >
+      ⏰ {reminders.length}
+    </span>
+  );
+}
+
+interface LocationInfo {
+  chatId: number;
+  latitude: number;
+  longitude: number;
+  updatedAt: string;
+}
+
+function LocationWidget({ chatId }: { chatId: number }) {
+  const [loc, setLoc] = useState<LocationInfo | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const res = await fetch(
+          `/api/telegram/location?chatId=${chatId}`
+        );
+        const data = await res.json();
+        if (alive) setLoc(data.location ?? null);
+      } catch {}
+    };
+    load();
+    const i = setInterval(load, 60_000); // refresh every 60s
+    return () => {
+      alive = false;
+      clearInterval(i);
+    };
+  }, [chatId]);
+
+  if (!loc) {
+    return (
+      <span className="text-text-secondary" title="No shared location">
+        📍 —
+      </span>
+    );
+  }
+  return (
+    <a
+      className="text-cyan-300 hover:underline"
+      title={`Updated ${new Date(loc.updatedAt).toLocaleString()}`}
+      href={`https://maps.google.com/?q=${loc.latitude},${loc.longitude}`}
+      target="_blank"
+      rel="noopener noreferrer"
+    >
+      📍 {loc.latitude.toFixed(3)}, {loc.longitude.toFixed(3)}
+    </a>
   );
 }

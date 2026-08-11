@@ -1,7 +1,31 @@
 // Telegram Bot API client
 // Simple polling-based implementation
 
+export { getFileMeta, downloadTelegramFile, saveToTmp, tmpPathFor } from "./media";
+
 const TELEGRAM_API = "https://api.telegram.org/bot";
+
+interface TelegramPhotoSize {
+  file_id: string;
+  width: number;
+  height: number;
+  file_size?: number;
+}
+
+interface TelegramDocument {
+  file_id: string;
+  file_name?: string;
+  mime_type?: string;
+  file_size?: number;
+}
+
+interface TelegramLocation {
+  latitude: number;
+  longitude: number;
+  horizontal_accuracy?: number;
+  live_period?: number;
+  heading?: number;
+}
 
 interface TelegramMessage {
   message_id: number;
@@ -9,6 +33,10 @@ interface TelegramMessage {
   from?: { id: number; is_bot: boolean };
   text?: string;
   voice?: { file_id: string; duration: number };
+  photo?: TelegramPhotoSize[];
+  document?: TelegramDocument;
+  caption?: string;
+  location?: TelegramLocation;
   date: number;
   isFromMe?: boolean;
 }

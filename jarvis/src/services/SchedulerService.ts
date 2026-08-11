@@ -93,6 +93,17 @@ async function runScheduledJob(id: string) {
       where: { id },
       data: { lastRun: new Date(), lastJobId: executed.id },
     });
+
+    // Push a one-liner to Telegram so the user sees the job landed
+    // even if they're away from the laptop. Fire-and-forget.
+    try {
+      const { notifyUser } = await import("@/lib/telegram/notify");
+      await notifyUser(null, `⏰ Job "${j.name}" finished.`, {
+        fromSource: "scheduler",
+      });
+    } catch {
+      // Non-fatal — the schedule still ran; just no notification.
+    }
   } catch (e) {
     console.error(`[Scheduler] run failed for ${id}:`, e);
   }

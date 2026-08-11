@@ -731,6 +731,16 @@ class OracleResearchService {
     } catch (e) {
       console.error('[Oracle] Notification failed:', e);
     }
+
+    // Also push to Telegram so the user gets the result on their phone.
+    // Fire-and-forget; the existing in-app notify above stays the
+    // primary surface for the panel.
+    try {
+      const { notifyUser } = await import("@/lib/telegram/notify");
+      await notifyUser(null, message, { fromSource: "oracle-research" });
+    } catch (e) {
+      console.error("[Oracle] Telegram notify failed:", e);
+    }
   }
 }
 

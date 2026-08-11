@@ -1,7 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   experimental: {
-    serverComponentsExternalPackages: ['puppeteer-extra-plugin-stealth', 'playwright-extra', 'playwright'],
+    serverComponentsExternalPackages: ['puppeteer-extra-plugin-stealth', 'playwright-extra', 'playwright', 'edge-tts', 'pdf-parse', 'mammoth', 'form-data'],
   },
   reactStrictMode: true,
   images: {

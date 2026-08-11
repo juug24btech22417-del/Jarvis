@@ -222,3 +222,60 @@ model TelegramMessage {
   @@index([status, createdAt])
   @@index([direction, createdAt])
 }
+
+// Telegram reminders — user-scheduled pings ("remind me in 5 min to
+// stretch"). Picked up by a 30s cron loop and delivered to the same
+// chat. `fireAt` is UTC; quiet-hours window is per-reminder and is
+// compared against Asia/Kolkata in the dispatcher. `idempotencyKey`
+// dedupes rapid double-taps of the same command.
+model Reminder {
+  id               String    @id @default(cuid())
+  chatId           BigInt
+  fireAt           DateTime
+  text             String
+  createdFromMsgId BigInt?
+  status           String    @default("pending") // pending | processing | dispatched | cancelled | failed
+  dispatchedAt     DateTime?
+  error            String?
+  idempotencyKey   String?
+  // Quiet hours stored as minutes-of-day; default IST 23:00 → 07:00.
+  quietStartMin    Int       @default(1380)
+  quietEndMin      Int       @default(420)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([status, fireAt])
+  @@index([chatId, fireAt])
+  @@unique([chatId, idempotencyKey])
+}
+
+// Telegram user location — one row per chat, latest write wins.
+// Populated when the user shares a location via the Telegram
+// attachment menu. Exposed via /whereami and /api/telegram/location.
+model UserLocation {
+  chatId           BigInt   @id
+  latitude         Float
+  longitude        Float
+  accuracyM        Float?
+  livePeriodSeconds Int?
+  heading          Float?
+  updatedAt        DateTime @updatedAt
+  createdAt        DateTime @default(now())
+}
+
+// Telegram destructive-OS actions — written when a chat requests
+// shutdown / restart so the user can confirm via inline button.
+// TTL of 5 minutes; the callback handler refuses expired rows.
+model PendingOsAction {
+  id        String   @id @default(cuid())
+  chatId    BigInt
+  action    String   // "shutdown" | "restart"
+  params    String?  // JSON: { delaySec?: number }
+  status    String   @default("pending") // pending | confirmed | cancelled | expired
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([chatId, status])
+  @@index([expiresAt])
+}

@@ -11,6 +11,7 @@ import {
   sendVoiceNote,
   sendFile,
   answerCallbackQuery,
+  downloadTelegramFile,
 } from "./index";
 import {
   claimNextPendingInbound,
@@ -22,6 +23,15 @@ import {
 } from "./queue";
 import { dispatchFromQueueRow } from "./handleInbound";
 import { replayPendingOnBoot } from "./queueReplay";
+import { startReminderLoop } from "./reminders";
+import { startClipboardWatcher } from "./clipboard";
+import { transcribeOggOpus } from "./transcribe";
+import { describeImage } from "./vision";
+import { parseDocument } from "./documents";
+import { upsertUserLocation } from "./location";
+import { saveToTmp } from "./media";
+import { resolveDestructiveCallback } from "./osBridge";
+import { setMyCommands } from "./setMyCommands";
 
 const POLL_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const POLL_CRON = process.env.TELEGRAM_POLL_CRON ?? "*/3 * * * * *"; // every 3s by default
@@ -56,6 +66,17 @@ export function ensurePollerStarted() {
     `[telegram/poller] starting (cron='${POLL_CRON}', allowed=${
       (process.env.TELEGRAM_ALLOWED_CHAT_IDS ?? "").split(",").filter(Boolean).length
     } chats)`
+  );
+
+  // Boot the related cron loops + watchers. These are idempotent on
+  // their own globalThis pins, so calling them from here is safe even
+  // if some other route also touched them.
+  startReminderLoop();
+  startClipboardWatcher();
+  // Register the bot's slash-command menu. Safe to call repeatedly;
+  // Telegram replaces the existing menu on each call.
+  setMyCommands(POLL_TOKEN).catch((err) =>
+    console.warn("[telegram/poller] setMyCommands failed:", err?.message || err)
   );
 
   // Cron expression validation — node-cron throws if invalid.
@@ -100,10 +121,166 @@ async function tick() {
       POLL_TOKEN
     );
 
-    // 1. Handle text messages
+    // 1. Handle inbound media. Each branch downloads eagerly (because
+    //    Telegram file_path URLs expire ~1h), transcribes / describes /
+    //    parses, then enqueues the processed text with metadata so the
+    //    dispatcher can show a "voice note" / "photo" / "document"
+    //    badge in the panel.
     for (const m of messages) {
       const chatId = m.chat.id;
-      if (!m.text) continue; // ignore stickers/photos/voice for v1
+      if (!isChatAllowed(chatId)) {
+        continue; // reject logic below for text messages; media from
+                  // unauthorized chats is dropped silently for now.
+      }
+
+      // 1a. Voice.
+      if (m.voice && !m.text) {
+        try {
+          const fileId = m.voice.file_id;
+          const buf = await downloadTelegramFile(POLL_TOKEN, fileId);
+          const tmpPath = await saveToTmp(chatId, "ogg", buf);
+          const { text } = await transcribeOggOpus(buf);
+          const row = await enqueueTelegramMessage({
+            chatId,
+            telegramMsgId: m.message_id,
+            direction: "inbound",
+            text,
+            status: "pending",
+            metadata: {
+              kind: "voice",
+              tmpPath,
+              duration: m.voice.duration,
+            },
+          });
+          console.log(
+            `[telegram/poller] enqueued voice ${row.id.slice(0, 8)} (${text.length} chars)`
+          );
+        } catch (err: any) {
+          console.error("[telegram/poller] voice error:", err?.message || err);
+          // Acknowledge to the user that the voice note failed.
+          await sendReply(
+            POLL_TOKEN,
+            chatId,
+            `Couldn't transcribe that voice note, Boss: ${err?.message || err}`
+          ).catch(() => {});
+        }
+        continue;
+      }
+
+      // 1b. Photo (largest size).
+      if (m.photo && m.photo.length > 0 && !m.text) {
+        try {
+          const largest = m.photo[m.photo.length - 1];
+          const buf = await downloadTelegramFile(POLL_TOKEN, largest.file_id);
+          const caption =
+            m.caption?.trim() || "Describe this image in detail.";
+          const text = await describeImage(buf, "image/jpeg", caption);
+          const row = await enqueueTelegramMessage({
+            chatId,
+            telegramMsgId: m.message_id,
+            direction: "inbound",
+            text,
+            status: "pending",
+            metadata: {
+              kind: "photo",
+              caption,
+              width: largest.width,
+              height: largest.height,
+            },
+          });
+          console.log(
+            `[telegram/poller] enqueued photo ${row.id.slice(0, 8)} (${text.length} chars)`
+          );
+        } catch (err: any) {
+          console.error("[telegram/poller] photo error:", err?.message || err);
+          await sendReply(
+            POLL_TOKEN,
+            chatId,
+            `Couldn't analyze that photo, Boss: ${err?.message || err}`
+          ).catch(() => {});
+        }
+        continue;
+      }
+
+      // 1c. Document.
+      if (m.document && !m.text) {
+        try {
+          const { file_id, mime_type, file_name } = m.document;
+          const buf = await downloadTelegramFile(POLL_TOKEN, file_id);
+          const parsed = await parseDocument(buf, mime_type ?? "application/octet-stream", file_name ?? "file");
+          const caption =
+            m.caption?.trim() ||
+            `Summarize "${file_name}" in 5 bullet points.`;
+          const combined = `${caption}\n\n---\n${parsed.text.slice(0, 6000)}`;
+          const row = await enqueueTelegramMessage({
+            chatId,
+            telegramMsgId: m.message_id,
+            direction: "inbound",
+            text: combined,
+            status: "pending",
+            metadata: {
+              kind: "document",
+              fileName: file_name,
+              mime: mime_type,
+              pages: parsed.meta.pages,
+              parser: parsed.meta.parser,
+            },
+          });
+          console.log(
+            `[telegram/poller] enqueued document ${row.id.slice(0, 8)} (${parsed.text.length} chars, parser=${parsed.meta.parser})`
+          );
+        } catch (err: any) {
+          console.error("[telegram/poller] document error:", err?.message || err);
+          await sendReply(
+            POLL_TOKEN,
+            chatId,
+            `Couldn't read that file, Boss: ${err?.message || err}`
+          ).catch(() => {});
+        }
+        continue;
+      }
+
+      // 1d. Location — short-circuit; ack directly without LLM round-trip.
+      if ((m as any).location && !m.text) {
+        try {
+          const loc = (m as any).location;
+          await upsertUserLocation(chatId, {
+            latitude: Number(loc.latitude),
+            longitude: Number(loc.longitude),
+            accuracyM:
+              typeof loc.horizontal_accuracy === "number"
+                ? loc.horizontal_accuracy
+                : null,
+            livePeriodSeconds:
+              typeof loc.live_period === "number" ? loc.live_period : null,
+            heading: typeof loc.heading === "number" ? loc.heading : null,
+          });
+          const row = await enqueueTelegramMessage({
+            chatId,
+            telegramMsgId: m.message_id,
+            direction: "inbound",
+            text: `📍 Location received: ${Number(loc.latitude).toFixed(5)}, ${Number(loc.longitude).toFixed(5)}`,
+            status: "sent",
+            metadata: {
+              kind: "location",
+              lat: Number(loc.latitude),
+              lng: Number(loc.longitude),
+            },
+          });
+          await sendReply(
+            POLL_TOKEN,
+            chatId,
+            `📍 Got it, Boss. Saved your location (${Number(loc.latitude).toFixed(4)}, ${Number(loc.longitude).toFixed(4)}).`
+          ).catch(() => {});
+          await markSent(row.id);
+        } catch (err: any) {
+          console.error("[telegram/poller] location error:", err?.message || err);
+        }
+        continue;
+      }
+
+      // 1e. Plain text (existing path).
+      if (!m.text) continue;
       const text = m.text.trim();
       if (!text) continue;
 
@@ -139,23 +316,70 @@ async function tick() {
       );
     }
 
-    // 2. Handle button taps
+    // 2. Handle button taps.
     for (const cb of callbackQueries) {
       const chatId = cb.chat?.id ?? cb.from?.id;
       if (!chatId || !isChatAllowed(chatId)) {
-        await answerCallbackQuery(
-          POLL_TOKEN,
-          cb.id,
-          "Not authorized"
-        ).catch(() => {});
+        await answerCallbackQuery(POLL_TOKEN, cb.id, "Not authorized").catch(
+          () => {}
+        );
         continue;
       }
       // Acknowledge immediately so the button doesn't spin.
       await answerCallbackQuery(POLL_TOKEN, cb.id).catch(() => {});
 
-      // Treat the button data as a new prompt.
       const data = (cb.data ?? "").trim();
       if (!data) continue;
+
+      // 2a. OS-action confirm/cancel buttons (handled inline; no LLM).
+      if (data.startsWith("os:")) {
+        const parts = data.split(":");
+        const action = parts[1] as "confirm" | "cancel";
+        const shortId = parts.slice(2).join(":");
+        if (!shortId || (action !== "confirm" && action !== "cancel")) {
+          await sendReply(
+            POLL_TOKEN,
+            chatId,
+            "Malformed confirmation button, Boss."
+          ).catch(() => {});
+          continue;
+        }
+        const result = await resolveDestructiveCallback(
+          chatId,
+          action,
+          shortId
+        );
+        if (result.notFound) {
+          await sendReply(
+            POLL_TOKEN,
+            chatId,
+            "Couldn't find that pending action. Send the command again if you still want it."
+          ).catch(() => {});
+        } else if (result.expired) {
+          await sendReply(
+            POLL_TOKEN,
+            chatId,
+            "⏰ That action expired, Boss. Send the command again if you still want it."
+          ).catch(() => {});
+        } else if (!result.ok) {
+          await sendReply(
+            POLL_TOKEN,
+            chatId,
+            `❌ ${result.error ?? "Action failed."}`
+          ).catch(() => {});
+        } else if (action === "cancel") {
+          await sendReply(POLL_TOKEN, chatId, "Cancelled.").catch(() => {});
+        } else {
+          await sendReply(
+            POLL_TOKEN,
+            chatId,
+            `✅ ${result.description ?? "Done."}`
+          ).catch(() => {});
+        }
+        continue;
+      }
+
+      // 2b. Anything else — treat the button data as a new prompt.
       await enqueueTelegramMessage({
         chatId,
         direction: "inbound",

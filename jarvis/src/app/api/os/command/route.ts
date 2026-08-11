@@ -44,11 +44,12 @@ const APP_MAP: Record<string, string> = {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
-    const { command, app, url, query } = body as {
+    const { command, app, url, query, level } = body as {
       command?: string;
       app?: string;
       url?: string;
       query?: string;
+      level?: number;
     };
 
     let shellCmd: string | null = null;
@@ -126,6 +127,30 @@ export async function POST(req: NextRequest) {
     else if (command === "kill_app" && app) {
       shellCmd = `taskkill /IM "${app}.exe" /F`;
       description = `Killing process: ${app}`;
+    }
+
+    // 7. Wake screen — mouse-move + power request. The mouse-jiggle
+    // forces Windows to push focus to the foreground even when locked,
+    // which wakes the display backlight on most hardware.
+    else if (command === "wake_screen") {
+      shellCmd = `powershell -Command "Add-Type -AssemblyName System.Windows.Forms; $p = [System.Windows.Forms.Cursor]::Position; [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point($p.X+1, $p.Y); [System.Windows.Forms.Cursor]::Position = $p"`;
+      description = "Waking the screen";
+    }
+
+    // 8. Play a short beep — used by /wake and any "make a sound"
+    //    command. ~500ms tone at 800Hz is audible but not annoying.
+    else if (command === "play_sound") {
+      shellCmd = `powershell -Command "[console]::beep(800,500)"`;
+      description = "Beep";
+    }
+
+    // 9. Volume set to N (0-100) — reads current level then presses
+    //    volume_down N times. Approximate; OS bridge absolute set is
+    //    a follow-up.
+    else if (command === "volume_set" && typeof body.level === "number") {
+      const target = Math.max(0, Math.min(100, body.level));
+      shellCmd = `powershell -Command "$target=${target}; Add-Type -AssemblyName System.Windows.Forms; $wm = New-Object System.Windows.Forms.Form; $api = (Get-WmiObject -Namespace root\\cimv2 -ClassName Win32_Volume | Select-Object -First 1).Name; $current = [math]::Round(([Audio]::Volume * 100)); $delta = [math]::Max(0, $current - $target); for ($i = 0; $i -lt $delta; $i++) { (New-Object -ComObject WScript.Shell).SendKeys([char]174) }"`;
+      description = `Setting volume to ${target}%`;
     }
 
     if (!shellCmd) {

@@ -19,7 +19,7 @@ type TelegramMessageModel = {
 const tm = (): TelegramMessageModel =>
   (prisma as unknown as { telegramMessage: TelegramMessageModel }).telegramMessage;
 
-export type TelegramDirection = "inbound" | "outbound";
+export type TelegramDirection = "inbound" | "outbound" | "system";
 export type TelegramStatus =
   | "pending"
   | "processing"
