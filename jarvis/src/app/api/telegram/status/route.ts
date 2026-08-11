@@ -1,10 +1,13 @@
 import { NextResponse } from "next/server";
-import { getBotInfo } from "@/lib/telegram";
+import { getBotInfo, getAllowedChatIds } from "@/lib/telegram";
+import { ensurePollerStarted } from "@/lib/telegram/poller";
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
 // GET /api/telegram/status - Check bot connection
 export async function GET() {
+  ensurePollerStarted();
+
   if (!TELEGRAM_TOKEN) {
     return NextResponse.json(
       { success: false, error: "Telegram bot token not configured" },
@@ -21,6 +24,8 @@ export async function GET() {
         botName: data.result.first_name,
         botUsername: data.result.username,
         canReadMessages: true,
+        allowedChatIds: Array.from(getAllowedChatIds()),
+        serverPolling: true,
       });
     } else {
       return NextResponse.json(

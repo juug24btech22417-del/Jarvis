@@ -32,6 +32,26 @@ interface TelegramMessage {
   isFromMe?: boolean;
 }
 
+interface QueueMessage {
+  id: string;
+  chatId: number;
+  telegramMsgId: number | null;
+  direction: "inbound" | "outbound";
+  text: string;
+  status: "pending" | "processing" | "sent" | "failed" | "rejected";
+  replyToId: string | null;
+  metadata: Record<string, unknown> | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface SeenChats {
+  seen: number[];
+  allowed: number[];
+  needsAuth: boolean;
+}
+
 interface Chat {
   id: number;
   name: string;
@@ -44,7 +64,7 @@ export default function TelegramPanel({
   onClose: () => void;
 }) {
   const [chats, setChats] = useState<Chat[]>([]);
-  const [messages, setMessages] = useState<TelegramMessage[]>([]);
+  const [queueMessages, setQueueMessages] = useState<QueueMessage[]>([]);
   const [selectedChat, setSelectedChat] = useState<Chat | null>(null);
   const [messageInput, setMessageInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -52,6 +72,7 @@ export default function TelegramPanel({
   const [isListening, setIsListening] = useState(false);
   const [error, setError] = useState("");
   const [botInfo, setBotInfo] = useState<{ name: string; username: string } | null>(null);
+  const [authInfo, setAuthInfo] = useState<SeenChats | null>(null);
 
   const panelRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -86,7 +107,7 @@ export default function TelegramPanel({
         animateMessageAppear(lastMsg as HTMLElement, isFromMe);
       }
     }
-  }, [messages]);
+  }, [queueMessages]);
 
   // Add hover effects to interactive elements
   useEffect(() => {
@@ -104,11 +125,14 @@ export default function TelegramPanel({
     }
   };
 
-  // Check bot status on mount
+  // The server polls Telegram and dispatches to the brain. The panel is
+  // display-only — it just refreshes its view of the queue on an
+  // interval. Slow interval (3s) is fine; the server reacts in 3s too.
   useEffect(() => {
     checkStatus();
-    pollMessages();
-    const interval = setInterval(pollMessages, 5000);
+    loadSeenChats();
+    refreshFromQueue();
+    const interval = setInterval(refreshFromQueue, 3000);
     return () => clearInterval(interval);
   }, []);
 
@@ -126,10 +150,47 @@ export default function TelegramPanel({
     }
   };
 
+  const loadSeenChats = async () => {
+    try {
+      const res = await fetch("/api/telegram/seen-chats");
+      const data = (await res.json()) as SeenChats & { success: boolean };
+      if (data?.success) setAuthInfo(data);
+    } catch {
+      // Non-fatal.
+    }
+  };
+
+  const refreshFromQueue = async () => {
+    try {
+      const res = await fetch("/api/telegram/recent?limit=200");
+      const data = await res.json();
+      if (data.success && Array.isArray(data.messages)) {
+        const rows = data.messages as QueueMessage[];
+        setQueueMessages(rows);
+        // Derive the chat list from the queue (unique chatIds).
+        const seenChats = new Map<number, Chat>();
+        for (const row of rows) {
+          if (!seenChats.has(row.chatId)) {
+            seenChats.set(row.chatId, {
+              id: row.chatId,
+              name: `Chat ${row.chatId}`,
+            });
+          }
+        }
+        setChats(Array.from(seenChats.values()));
+        setError("");
+      } else {
+        setError(data.error || "Failed to load messages");
+      }
+    } catch (err) {
+      setError("Connection error");
+    }
+  };
+
   // Auto-scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, selectedChat]);
+  }, [queueMessages, selectedChat]);
 
   // Initialize speech recognition
   useEffect(() => {
@@ -159,22 +220,6 @@ export default function TelegramPanel({
     }
   }, []);
 
-  const pollMessages = async () => {
-    try {
-      const res = await fetch("/api/telegram/poll");
-      const data = await res.json();
-      if (data.success) {
-        setChats(data.chats);
-        setMessages(data.messages);
-        setError("");
-      } else {
-        setError(data.error || "Failed to poll");
-      }
-    } catch (err) {
-      setError("Connection error");
-    }
-  };
-
   const handleSend = async (e?: React.MouseEvent) => {
     if (!selectedChat || !messageInput.trim()) return;
 
@@ -197,8 +242,8 @@ export default function TelegramPanel({
       const data = await res.json();
       if (data.success) {
         setMessageInput("");
-        // Refresh messages
-        pollMessages();
+        // Server writes to the queue; we re-read on the next 3s tick.
+        refreshFromQueue();
       } else {
         setError(data.error || "Failed to send");
         // Shake animation for error
@@ -232,10 +277,10 @@ export default function TelegramPanel({
     }
   };
 
-  const getChatMessages = (chatId: number) => {
-    return messages
-      .filter((m) => m.chat.id === chatId)
-      .sort((a, b) => a.date - b.date);
+  const getChatMessages = (chatId: number): QueueMessage[] => {
+    return queueMessages
+      .filter((m) => m.chatId === chatId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   };
 
   const formatTime = (timestamp: number) => {
@@ -243,7 +288,7 @@ export default function TelegramPanel({
     return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   };
 
-  const hasNewMessages = messages.length > 0;
+  const hasNewMessages = queueMessages.length > 0;
 
   return (
     <div
@@ -292,6 +337,36 @@ export default function TelegramPanel({
         </div>
       )}
 
+      {/* Auth helper: when the bot is connected but no chat IDs are
+          allow-listed, surface the seen chat IDs so the user can copy
+          them into .env.local. */}
+      {authInfo?.needsAuth && (
+        <div className="px-4 py-2 bg-amber-500/15 border-y border-amber-500/40 text-amber-200 text-xs font-rajdhani space-y-2">
+          <p className="font-bold text-amber-300">Authorize your chat</p>
+          <p>
+            The server received messages from these chat IDs, but none are
+            in <code className="bg-black/30 px-1 rounded">TELEGRAM_ALLOWED_CHAT_IDS</code>:
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {authInfo.seen.map((id) => (
+              <button
+                key={id}
+                onClick={() => {
+                  navigator.clipboard?.writeText(String(id));
+                }}
+                className="px-2 py-1 bg-amber-500/20 hover:bg-amber-500/30 rounded text-amber-200 font-mono text-xs"
+                title="Copy chat ID"
+              >
+                {id}
+              </button>
+            ))}
+          </div>
+          <p className="opacity-80">
+            Add to <code className="bg-black/30 px-1 rounded">jarvis/.env.local</code> and restart the dev server.
+          </p>
+        </div>
+      )}
+
       {/* Content */}
       <div className="flex h-[calc(100%-140px)]">
         {/* Chat List */}
@@ -325,7 +400,7 @@ export default function TelegramPanel({
                 </>
               )}
               <button
-                onClick={() => { checkStatus(); pollMessages(); }}
+                onClick={() => { checkStatus(); refreshFromQueue(); }}
                 className="px-3 py-1 bg-cyan-500/20 hover:bg-cyan-500/30 rounded text-cyan-500 text-xs transition-colors"
               >
                 {error ? "Retry Connection" : "Check for Messages"}
@@ -378,36 +453,39 @@ export default function TelegramPanel({
             <>
               {/* Messages Area */}
               <div className="flex-1 overflow-y-auto p-4 space-y-3">
-                {getChatMessages(selectedChat.id).map((msg) => (
-                  <div
-                    key={msg.message_id}
-                    className={`message-item flex ${
-                      msg.isFromMe || msg.from?.is_bot ? "justify-end message-from-me" : "justify-start"
-                    } ${msg.text ? "" : "opacity-50"}`}
-                  >
+                {getChatMessages(selectedChat.id).map((msg) => {
+                  const isMine = msg.direction === "outbound";
+                  const statusBadge =
+                    isMine && msg.status === "sent" ? " • Sent" :
+                    isMine && msg.status === "pending" ? " • Sending…" :
+                    isMine && msg.status === "processing" ? " • Jarvis is replying…" :
+                    isMine && msg.status === "failed" ? ` • Failed${msg.error ? `: ${msg.error.slice(0, 60)}` : ""}` :
+                    !isMine && msg.status === "rejected" ? " • Rejected" : "";
+                  return (
                     <div
-                      className={`max-w-[80%] p-3 rounded-lg ${
-                        msg.isFromMe || msg.from?.is_bot
-                          ? "bg-cyan-500/20 ml-auto"
-                          : "bg-panel-glass/50"
-                      }`}
+                      key={msg.id}
+                      className={`message-item flex ${
+                        isMine ? "justify-end message-from-me" : "justify-start"
+                      } ${msg.text ? "" : "opacity-50"}`}
                     >
-                      {msg.voice && (
-                        <div className="flex items-center gap-2 text-cyan-500 text-xs mb-1">
-                          <Mic className="w-3 h-3" />
-                          <span>Voice message ({msg.voice.duration}s)</span>
-                        </div>
-                      )}
-                      <p className="text-sm font-rajdhani text-text-primary">
-                        {msg.text || "[Voice message]"}
-                      </p>
-                      <p className="text-[10px] text-text-secondary mt-1">
-                        {formatTime(msg.date)}
-                        {msg.isFromMe && " • Sent"}
-                      </p>
+                      <div
+                        className={`max-w-[80%] p-3 rounded-lg ${
+                          isMine
+                            ? "bg-cyan-500/20 ml-auto"
+                            : "bg-panel-glass/50"
+                        }`}
+                      >
+                        <p className="text-sm font-rajdhani text-text-primary whitespace-pre-wrap">
+                          {msg.text || "[empty]"}
+                        </p>
+                        <p className="text-[10px] text-text-secondary mt-1">
+                          {formatTime(Math.floor(new Date(msg.createdAt).getTime() / 1000))}
+                          {statusBadge}
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
                 <div ref={messagesEndRef} />
               </div>
 

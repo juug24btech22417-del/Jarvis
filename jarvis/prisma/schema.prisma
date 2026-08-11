@@ -162,3 +162,63 @@ model ScheduledJob {
 
   @@index([enabled])
 }
+
+// Oracle Research — completed report library.
+// Persists every finished research task so the panel can show history,
+// and so contextual follow-up research can reuse prior facts.
+model Report {
+  id              String    @id @default(cuid())
+  query           String
+  reportType      String    // comparison | deep_research | news_roundup | briefing_memo | how_to | market_scan
+  status          String    // planning | searching | scraping | synthesizing | completed | failed
+  progress        Int       @default(0)
+  // JSON-encoded structured blocks (Notion block schema). Always present
+  // on completion; null for in-flight or failed reports.
+  structuredBlocks String?
+  // Plain markdown fallback for the panel preview and for "Copy to clipboard".
+  reportMarkdown  String?
+  notionUrl       String?
+  // For comparison reports: list of subjects researched in parallel.
+  subjects        String?   // JSON-encoded string[] (e.g. ["iPhone 17 Pro Max", "Galaxy Z Fold 7"])
+  // Aggregated metrics.
+  factsCount      Int       @default(0)
+  sourcesCount    Int       @default(0)
+  // For follow-up: id of the parent report this one was derived from.
+  parentReportId  String?
+  parentReport    Report?   @relation("ReportFollowups", fields: [parentReportId], references: [id])
+  followups       Report[]  @relation("ReportFollowups")
+  // The active in-memory task id at time of completion. Useful for backref
+  // from ResearchService.activeTasks if the process didn't restart.
+  taskId          String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  completedAt     DateTime?
+
+  @@index([reportType])
+  @@index([status])
+  @@index([createdAt])
+  @@index([parentReportId])
+}
+
+// Telegram remote-control queue.
+// Authoritative store for both inbound and outbound Telegram messages so
+// the laptop can pick up messages sent while the dev server was asleep,
+// and so the React panel can read history without a parallel in-memory
+// buffer. `chatId` is BigInt because Telegram chat IDs exceed Int32.
+model TelegramMessage {
+  id            String   @id @default(cuid())
+  chatId        BigInt
+  telegramMsgId BigInt?  // the message_id Telegram gave us, if any
+  direction     String   // "inbound" | "outbound"
+  text          String
+  status        String   // "pending" | "processing" | "sent" | "failed" | "rejected"
+  replyToId     String?  // cuid of the inbound row this outbound replies to
+  metadata      String?  // JSON: { buttons?, audioUrl?, attachments?, parseMode? }
+  error         String?  // last error message if status = "failed"
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([chatId, status])
+  @@index([status, createdAt])
+  @@index([direction, createdAt])
+}

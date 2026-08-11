@@ -1,10 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { sendMessage, getChatMessages, addSentMessage } from "@/lib/telegram";
+import { sendMessage, addSentMessage } from "@/lib/telegram";
+import { enqueueTelegramMessage } from "@/lib/telegram/queue";
+import { ensurePollerStarted } from "@/lib/telegram/poller";
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
-// POST /api/telegram/send - Send a message
+// POST /api/telegram/send - Send a message (also records in the queue so
+// the panel shows it alongside inbound).
 export async function POST(req: NextRequest) {
+  ensurePollerStarted();
+
   if (!TELEGRAM_TOKEN) {
     return NextResponse.json(
       { success: false, error: "Telegram bot token not configured" },
@@ -27,13 +32,21 @@ export async function POST(req: NextRequest) {
     const result = await sendMessage(TELEGRAM_TOKEN, chatIdNum, text);
 
     if (result.success) {
-      // Add sent message to local storage since Telegram doesn't include sent messages in updates
+      // Add to local in-memory buffer (legacy display support) and to
+      // the Prisma queue so the panel's display-only view sees it.
       addSentMessage(chatIdNum, text);
+      await enqueueTelegramMessage({
+        chatId: chatIdNum,
+        direction: "outbound",
+        text,
+        status: "sent",
+      }).catch((err) =>
+        console.error("[telegram/send] queue insert failed:", err)
+      );
 
       return NextResponse.json({
         success: true,
         message: "Message sent",
-        chatMessages: getChatMessages(chatIdNum),
       });
     } else {
       return NextResponse.json(

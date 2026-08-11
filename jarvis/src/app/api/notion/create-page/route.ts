@@ -57,7 +57,7 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
-    const { title, url, content, tags = [] } = body;
+    const { title, url, content, tags = [], blocks: structuredBlocks } = body;
 
     if (!title) {
       return NextResponse.json(
@@ -166,9 +166,17 @@ export async function POST(req: NextRequest) {
         body: JSON.stringify({
           parent: { database_id: notionDatabaseId },
           properties,
-          ...(content && {
-            children: splitContentIntoBlocks(content),
-          }),
+          // Prefer structured blocks when the caller sent them. The
+          // Oracle research pipeline passes a pre-shaped Notion block
+          // array (headings, callouts, tables, lists) that renders
+          // cleanly in Notion without losing the comparison/market
+          // structure. Fall back to flat markdown paragraphs.
+          children:
+            structuredBlocks && structuredBlocks.length > 0
+              ? structuredBlocks
+              : content
+              ? splitContentIntoBlocks(content)
+              : undefined,
         }),
       });
 
@@ -216,7 +224,11 @@ export async function POST(req: NextRequest) {
                 },
               ]
             : []),
-          ...splitContentIntoBlocks(content || ""),
+          ...(structuredBlocks && structuredBlocks.length > 0
+            ? structuredBlocks
+            : content
+            ? splitContentIntoBlocks(content)
+            : []),
         ],
       }),
     });

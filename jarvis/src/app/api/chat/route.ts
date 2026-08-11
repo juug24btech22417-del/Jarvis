@@ -66,12 +66,18 @@ async function applyPersonalityWrapper(factualResponse: string, apiKey: string):
 // Tries several free models in sequence — each has its own rate-limit pool
 // so a 429 on one doesn't necessarily mean the others are blocked.
 // Returns null if every model is rate-limited or the API key is missing.
+//
+// Last refreshed Aug 2026: several free-tier slugs from earlier in the
+// year (meta/llama-3.1-8b-instruct, gemma, mistral-small, older nemotron
+// variants) were sunset or moved behind paid plans. The list below is
+// restricted to slugs OpenRouter currently advertises as free; update
+// when the catalogue shifts again.
 const OPENROUTER_FALLBACK_MODELS = [
-  "meta/llama-3.1-8b-instruct",
-  "nvidia/nemotron-3-ultra-550b-a55b:free",
-  "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-  "google/gemma-3-27b-it:free",
-  "mistralai/mistral-small-3.1-24b-instruct:free",
+  "nvidia/nemotron-3.5-lightning:free",
+  "cohere/north-mini-code:free",
+  "poolside/laguna-s-2.1:free",
+  "poolside/laguna-xs-2.1:free",
+  "inclusionai/ling-3.0-tiny:free",
 ];
 
 async function tryOpenRouterFallback(
@@ -86,6 +92,19 @@ async function tryOpenRouterFallback(
     try {
       const c = new AbortController();
       const t = setTimeout(() => c.abort(), 10000);
+      // Same empty-system handling as Groq — payload shape varies by
+      // provider, so build the messages array defensively.
+      const orMessages: Array<{ role: string; content: string }> = [];
+      const trimmedSystem = (systemPrompt ?? "").trim();
+      if (trimmedSystem) {
+        orMessages.push({ role: "system", content: trimmedSystem });
+      }
+      for (const m of messages) {
+        if (typeof m?.content === "string") {
+          orMessages.push({ role: m.role, content: m.content });
+        }
+      }
+
       const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -96,10 +115,7 @@ async function tryOpenRouterFallback(
         },
         body: JSON.stringify({
           model,
-          messages: [
-            { role: "system", content: systemPrompt },
-            ...messages,
-          ],
+          messages: orMessages,
           max_tokens: 768,
           temperature: 0.75,
         }),
@@ -158,6 +174,22 @@ async function tryGroqFallback(
     try {
       const c = new AbortController();
       const t = setTimeout(() => c.abort(), 10000);
+      // Groq rejects messages with role:system when content is empty —
+      // its validator complains "messages.0.content: property is
+      // missing" even though OpenAI accepts the same payload. Build
+      // the messages array first; only prepend a system message if a
+      // non-empty systemPrompt was actually supplied.
+      const groqMessages: Array<{ role: string; content: string }> = [];
+      const trimmedSystem = (systemPrompt ?? "").trim();
+      if (trimmedSystem) {
+        groqMessages.push({ role: "system", content: trimmedSystem });
+      }
+      for (const m of messages) {
+        if (typeof m?.content === "string") {
+          groqMessages.push({ role: m.role, content: m.content });
+        }
+      }
+
       const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -166,10 +198,7 @@ async function tryGroqFallback(
         },
         body: JSON.stringify({
           model,
-          messages: [
-            { role: "system", content: systemPrompt },
-            ...messages,
-          ],
+          messages: groqMessages,
           max_tokens: 768,
           temperature: 0.75,
         }),

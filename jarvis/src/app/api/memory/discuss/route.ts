@@ -81,7 +81,7 @@ Answer in JARVIS's voice, grounded only in the memories above. Cite memory names
               "X-Title": "JARVIS Memory Discuss",
             },
             body: JSON.stringify({
-              model: "openai/gpt-oss-120b:free",
+              model: "nvidia/nemotron-3.5-lightning:free",
               messages: [
                 { role: "system", content: systemPrompt },
                 { role: "user", content: userPrompt },

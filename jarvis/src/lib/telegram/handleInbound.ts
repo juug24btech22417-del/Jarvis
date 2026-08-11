@@ -1,0 +1,513 @@
+// Telegram inbound dispatcher.
+//
+// Flow: inbound text from the bot user → loads conversation history from
+// Prisma → calls the existing /api/chat endpoint (which streams an SSE
+// response covering weather, LLM fallback, and inline Playwright automation
+// for Zomato, Amazon, flights, Spotify, YouTube, etc.) → parses the SSE
+// stream and sends chunks to Telegram → persists the round-trip.
+//
+// This module is the *brain connection* the existing send-only Telegram
+// routes were missing. It is deliberately a pure function with explicit
+// context dependencies so it can be unit-tested without real Telegram.
+
+import {
+  enqueueTelegramMessage,
+  getRecentForChat,
+  markFailed,
+  markSent,
+  type TelegramMessageRow,
+} from "./queue";
+import type {
+  InlineKeyboardButton,
+  ReplyOpts,
+} from "./index";
+
+// Use a relative fetch base so this works in both dev and prod.
+const API_BASE = process.env.INTERNAL_API_URL || "http://localhost:3000";
+
+// Suffix appended to whatever system prompt the chat route already has.
+// Some free-tier models (Nemotron, Llama-3.x-Instruct) tend to emit
+// their chain-of-thought as visible content — numbered "1. Analyze,
+// 2. Identify, …" lists. Telling them not to in the system prompt is
+// more reliable than trying to strip the leak from the output.
+const NO_LEAK_SUFFIX =
+  "\n\nImportant: respond with ONLY the final answer to the user. " +
+  "Do not include step-by-step analysis, planning, reasoning, numbered " +
+  "thinking lists, or meta-commentary about how you arrived at the " +
+  "answer. Keep replies concise and suitable for a chat bubble.";
+
+export interface InboundContext {
+  chatId: number;
+  /** The inbound row from the queue, used to link the outbound reply. */
+  inboundRowId: string;
+  /** Telegram message_id of the inbound message, used to sendChatAction etc. */
+  inboundTelegramMsgId: number | null;
+  sendTyping: () => Promise<void>;
+  sendReply: (
+    text: string,
+    opts?: ReplyOpts
+  ) => Promise<number[]>;
+  sendVoice: (audioUrl: string, caption?: string) => Promise<void>;
+  sendFile: (fileUrl: string, caption?: string) => Promise<void>;
+  editLastProgress: (text: string) => Promise<void>;
+}
+
+export interface DispatchResult {
+  ok: boolean;
+  outboundRowId?: string;
+  replyText?: string;
+  error?: string;
+}
+
+/**
+ * Build the messages array the chat route expects, pulling recent
+ * context from Prisma so the LLM/automation has a sense of the
+ * conversation.
+ */
+async function buildChatHistory(
+  chatId: number,
+  prompt: string
+): Promise<{ role: "user" | "assistant"; content: string }[]> {
+  const recent = await getRecentForChat(chatId, 20);
+  // Only include rows that have completed (sent / failed / rejected).
+  // We don't want to inject a half-finished reply into the context.
+  const completed = recent.filter(
+    (r) => r.status === "sent" || r.status === "failed"
+  );
+
+  const messages: { role: "user" | "assistant"; content: string }[] = [];
+  for (const row of completed) {
+    // Skip offline / canned-fallback replies. They were generated
+    // by the chat route's offline greeting path, not by an LLM,
+    // and injecting them as the assistant's previous reply causes
+    // the LLM to echo / continue the canned tone instead of
+    // answering the user's actual question. We persist them with
+    // `metadata.offline = true` exactly so this filter can drop
+    // them.
+    if (row.metadata?.offline === true) continue;
+
+    if (row.direction === "inbound") {
+      messages.push({ role: "user", content: row.text });
+    } else if (row.direction === "outbound" && row.text) {
+      messages.push({ role: "assistant", content: row.text });
+    }
+  }
+  messages.push({ role: "user", content: prompt });
+  return messages;
+}
+
+interface ParsedChatResponse {
+  text: string;
+  buttons?: InlineKeyboardButton[][];
+  audioUrl?: string;
+  attachments?: string[];
+}
+
+/**
+ * What the dispatcher learns from a /api/chat response besides the
+ * raw text. The chat route sets `offline: true` when the LLM chain
+ * is fully exhausted and the canned greeting was returned instead —
+ * we use that flag to (a) stop sending the canned greeting back into
+ * future context, and (b) tag it in the queue so the panel can show
+ * a "fallback reply" badge.
+ */
+interface ParsedChatReply {
+  text: string;
+  offline: boolean;
+  provider?: string;
+  model?: string;
+}
+
+/**
+ * Extract the assistant text from the /api/chat response.
+ *
+ * The chat route returns one of three shapes depending on whether an
+ * LLM provider is reachable:
+ *
+ *   1. application/json, {content: "...", offline?: true, model?: "..."}
+ *      — offline / rate-limited (or any JSON reply)
+ *   2. text/event-stream, "data: {choices:[{delta:{content}}]}\n\n..."
+ *      — real streaming success (browser fetch)
+ *   3. The whole SSE stream buffered as one text/plain body (Next.js
+ *      internal fetch often does this) — format is the same as #2
+ *      but arrived as a single string.
+ *
+ * We try the JSON shape first, then fall back to parsing SSE lines,
+ * then fall back to returning the raw text.
+ */
+async function readChatResponse(
+  res: Response,
+  onChunk: (text: string) => void
+): Promise<ParsedChatReply> {
+  // Read the entire body. This works for both JSON and "buffered SSE"
+  // forms; for real streaming responses we still get chunks as they
+  // arrive because res.text() awaits the stream.
+  const raw = await res.text();
+
+  // 1. JSON body?
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed?.content === "string" && parsed.content.length > 0) {
+      onChunk(parsed.content);
+      return {
+        text: parsed.content,
+        offline: parsed.offline === true,
+        provider:
+          typeof parsed.fallback === "string"
+            ? parsed.fallback
+            : undefined,
+        model: typeof parsed.model === "string" ? parsed.model : undefined,
+      };
+    }
+    if (typeof parsed?.error === "string") {
+      return { text: `⚠️ ${parsed.error}`, offline: true };
+    }
+  } catch {
+    // Not JSON — fall through to SSE parsing.
+  }
+
+  // 2. SSE body — split on lines, each "data: <json>" is a delta.
+  const lines = raw.split(/\r?\n/);
+  let full = "";
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (!line.startsWith("data:")) continue;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === "[DONE]") continue;
+    try {
+      const parsed = JSON.parse(payload);
+      const delta =
+        parsed?.choices?.[0]?.delta?.content ??
+        parsed?.choices?.[0]?.text ??
+        parsed?.content;
+      if (typeof delta === "string" && delta.length > 0) {
+        full += delta;
+        onChunk(delta);
+      }
+    } catch {
+      // Skip non-JSON lines.
+    }
+  }
+
+  // 3. If SSE parsing found nothing, return the raw text as-is.
+  //    Could be plain text or a final chunk with no `data:` prefix.
+  return { text: full || raw.trim(), offline: false };
+}
+
+/**
+ * Strip reasoning traces from the LLM output before sending to
+ * Telegram. We see three flavors of leak in the wild:
+ *
+ *   1. `<think ...>...</think>` XML blocks (Qwen, DeepSeek-distilled).
+ *   2. "Here's a thinking process:\n\n..." intros.
+ *   3. Numbered chain-of-thought lists at the start of the reply
+ *      — common with Llama-3.x-Instruct and Nemotron. The model
+ *      emits "1. **Analyze:**...\n2. **Identify:**...\n..." then
+ *      a blank line, then the actual answer.
+ *
+ * For #3 we don't know how many numbered items there will be, so
+ * the strategy is: drop everything from the start until the first
+ * sequence of two consecutive newlines that's followed by content
+ * that does NOT start with a numbered-step marker.
+ */
+function stripReasoning(text: string): string {
+  if (!text) return text;
+  let cleaned = text;
+
+  // 1. <think ...>...</think> blocks (greedy across newlines).
+  cleaned = cleaned.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, "");
+
+  // 2. "Here's a thinking process:" intro (some models).
+  cleaned = cleaned.replace(
+    /^Here's a (?:thinking )?process:[\s\S]*?(?=\n\n|\r\n\r\n)/i,
+    ""
+  );
+
+  // 3. Numbered chain-of-thought leak. A leading numbered list,
+  //    "1. **Foo:**", "2. **Bar:**", … until the numbered pattern
+  //    stops. We detect the start by checking that the first
+  //    non-blank line begins with a `N. **` marker, and we drop
+  //    everything from the start up to (but not including) the
+  //    first blank line that follows the last numbered item.
+  //
+  //    Implementation: find the first `\n\n` after which the next
+  //    line does NOT start with a numbered-step pattern. If such a
+  //    boundary exists within the first 4000 chars, drop everything
+  //    before it.
+  const numberedStep = /^\s*\d+\.\s+\*\*/;
+  const lines = cleaned.split(/\r?\n/);
+  if (lines.length > 1 && numberedStep.test(lines[0])) {
+    // Walk forward, tracking when we leave the numbered sequence.
+    let lastNumberedIdx = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (numberedStep.test(lines[i])) {
+        lastNumberedIdx = i;
+      } else if (lastNumberedIdx >= 0 && lines[i].trim() === "") {
+        // We hit a blank line AFTER the last numbered step — that's
+        // the boundary between the thinking block and the answer.
+        const remaining = lines.slice(i + 1).join("\n").trimStart();
+        if (remaining.length > 0) {
+          cleaned = remaining;
+        }
+        break;
+      }
+    }
+  }
+
+  // 4. Trim any orphaned leading whitespace left by the stripping.
+  cleaned = cleaned.replace(/^\s+/, "");
+  return cleaned;
+}
+
+/**
+ * Cap the user-visible reply. Telegram allows 4096 chars per message,
+ * but a 4000+ char chat dump is almost certainly a model reasoning
+ * leak, not a real answer. Truncate at a sentence boundary and
+ * append an ellipsis so the user knows there's more they didn't get.
+ */
+const TELEGRAM_USER_REPLY_CAP = 1500;
+function capReplyLength(text: string): string {
+  if (text.length <= TELEGRAM_USER_REPLY_CAP) return text;
+  const truncated = text.slice(0, TELEGRAM_USER_REPLY_CAP);
+  const lastBreak = Math.max(
+    truncated.lastIndexOf(". "),
+    truncated.lastIndexOf(".\n"),
+    truncated.lastIndexOf("\n\n"),
+  );
+  const cut = lastBreak > TELEGRAM_USER_REPLY_CAP * 0.6 ? lastBreak + 1 : TELEGRAM_USER_REPLY_CAP;
+  return truncated.slice(0, cut).trimEnd() + "…";
+}
+
+function detectButtons(text: string): {
+  cleaned: string;
+  buttons?: InlineKeyboardButton[][];
+} {
+  // Lightweight convention: if the response ends with a fenced block
+  // labelled `buttons` and a JSON array, render it as inline_keyboard.
+  // Example trailing block:
+  //   ```buttons
+  //   [{"text":"Yes","callback_data":"yes"}, {"text":"No","callback_data":"no"}]
+  //   ```
+  const m = text.match(/```buttons\s*\n([\s\S]*?)\n```\s*$/);
+  if (!m) return { cleaned: text };
+  try {
+    const arr = JSON.parse(m[1]) as InlineKeyboardButton[];
+    if (!Array.isArray(arr) || arr.length === 0) return { cleaned: text };
+    // Inline keyboards are arrays of rows; if the model returned a flat
+    // array of buttons, wrap each in its own row.
+    const looksLikeRows =
+      Array.isArray(arr[0]) && (arr[0] as unknown[]).every(
+        (b) => b && typeof b === "object" && "text" in (b as object) && "callback_data" in (b as object)
+      );
+    const rows: InlineKeyboardButton[][] = looksLikeRows
+      ? (arr as unknown as InlineKeyboardButton[][])
+      : [arr as InlineKeyboardButton[]];
+    return { cleaned: text.slice(0, m.index!).trimEnd(), buttons: rows };
+  } catch {
+    return { cleaned: text };
+  }
+}
+
+/**
+ * Main entry point. Called by the poll route and the boot-time replay.
+ * Side-effects only: the inbound row is updated to "processing" before
+ * this is called; we update it to "sent" or "failed" when done.
+ */
+export async function handleInboundMessage(
+  rawText: string,
+  ctx: InboundContext
+): Promise<DispatchResult> {
+  const text = rawText.trim();
+  if (!text) {
+    return { ok: false, error: "empty message" };
+  }
+
+  // 1. Continuous typing indicator (Telegram expires it after 5s).
+  await ctx.sendTyping();
+  const typingTimer = setInterval(() => {
+    ctx.sendTyping().catch(() => {});
+  }, 4500);
+  // All progress updates route through `editLastProgress` — that
+  // helper owns the message_id state, so we don't track it here.
+  // Routing the first push through the wrapper (instead of calling
+  // ctx.sendReply directly) ensures every subsequent update —
+  // including the final reply — edits the SAME message in place.
+  let lastProgressText = "🤖 *Jarvis* — thinking…";
+  await ctx.editLastProgress(lastProgressText);
+
+  try {
+    const messages = await buildChatHistory(ctx.chatId, text);
+
+    // 2. Call the chat route. It returns an SSE stream of text deltas;
+    //    after the [DONE] marker, the body closes. We collect everything.
+    const chatRes = await fetch(`${API_BASE}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messages,
+        // Append the no-leak suffix to whatever prompt the chat
+        // route already uses. Stripping reasoning traces from the
+        // output is brittle; instructing the model directly is
+        // more reliable across providers.
+        systemPrompt: process.env.JARVIS_TELEGRAM_SYSTEM_PROMPT
+          ? `${process.env.JARVIS_TELEGRAM_SYSTEM_PROMPT}${NO_LEAK_SUFFIX}`
+          : NO_LEAK_SUFFIX.trim(),
+      }),
+    });
+
+    if (!chatRes.ok) {
+      const errText = await chatRes.text().catch(() => "");
+      throw new Error(
+        `/api/chat returned ${chatRes.status}: ${errText.slice(0, 200)}`
+      );
+    }
+
+    // Extract the reply text. Handles JSON, SSE, and buffered-SSE
+    // shapes — see readChatResponse for the rationale. The JSON
+    // path returns metadata (offline flag, provider) alongside the
+    // text — collect everything in one place.
+    let streamed = "";
+    let offline = false;
+    let provider: string | undefined;
+    let model: string | undefined;
+    const replyResult = await readChatResponse(chatRes, async (chunk) => {
+      streamed += chunk;
+      // Throttle progress edits: only update the placeholder every ~30
+      // characters to avoid hitting Telegram's edit rate limits.
+      // The preview is run through stripReasoning so we never flash
+      // a chain-of-thought leak to the user mid-stream — without
+      // this, the user sees "1. **Analyze User Input:**..." flash
+      // for ~1s before the final sanitized answer overwrites it.
+      if (streamed.length - lastProgressText.length > 40) {
+        const preview = stripReasoning(streamed).slice(-200);
+        if (preview) {
+          const next = `🤖 _${preview}_`;
+          await ctx.editLastProgress(next).catch(() => {});
+          lastProgressText = next;
+        }
+      }
+    });
+    offline = replyResult.offline;
+    provider = replyResult.provider;
+    model = replyResult.model;
+    // For the JSON path, onChunk only fires once with the full text
+    // and the returned `text` is the same — but for the SSE path
+    // streamed already holds the full text from delta chunks, while
+    // replyResult.text is the same value. Trust `streamed` which is
+    // what we just sent to the user via the progress placeholder.
+    if (!streamed && replyResult.text) streamed = replyResult.text;
+
+    // Diagnostic: log what we got so we can debug if the wrong path
+    // is being taken (e.g. offline greeting showing up when an LLM
+    // should respond).
+    console.log(
+      `[telegram/handleInbound] chat reply (${streamed.length} chars, offline=${offline}, provider=${provider ?? "-"}, model=${model ?? "-"}): ${streamed.slice(0, 200).replace(/\n/g, " ")}`
+    );
+
+    // Clean reasoning traces and cap length BEFORE looking for
+    // buttons, since the ```buttons``` block convention is at the
+    // very end and 1.5k is plenty of room for a real reply.
+    const sanitized = capReplyLength(stripReasoning(streamed));
+
+    const parsed: ParsedChatResponse = (() => {
+      const { cleaned, buttons } = detectButtons(sanitized);
+      const text = cleaned.trim();
+      return {
+        text: text || "_(Jarvis had nothing to say — try rephrasing)_",
+        buttons,
+      };
+    })();
+
+    // 3. Overwrite the progress placeholder with the final reply.
+    //    `editLastProgress` is idempotent and tracks the message_id
+    //    in its closure — every push (the initial "thinking…", each
+    //    streaming preview, and this final write) edits the same
+    //    Telegram message in place. No second message bubble.
+    await ctx.editLastProgress(parsed.text).catch(() => {});
+
+    // 4. Optional: send voice (TTS) or file attachments. Out of scope for v1
+    //    until the user opts in — see the plan's "Out of scope" section.
+
+    // 5. Persist outbound. Tag offline replies so the panel can
+    //    show a "fallback" badge and `buildChatHistory` can filter
+    //    them out of future LLM context (the canned greeting
+    //    otherwise leaks back into future replies as the assistant's
+    //    "previous" message).
+    const outboundMetadata: Record<string, unknown> = {
+      parseMode: "Markdown",
+    };
+    if (parsed.buttons) outboundMetadata.buttons = parsed.buttons;
+    if (offline) outboundMetadata.offline = true;
+    if (provider) outboundMetadata.provider = provider;
+    if (model) outboundMetadata.model = model;
+
+    const outbound = await enqueueTelegramMessage({
+      chatId: ctx.chatId,
+      direction: "outbound",
+      text: parsed.text,
+      status: "sent",
+      replyToId: ctx.inboundRowId,
+      metadata: outboundMetadata,
+    });
+    await markSent(ctx.inboundRowId);
+
+    return {
+      ok: true,
+      outboundRowId: outbound.id,
+      replyText: parsed.text,
+    };
+  } catch (err: any) {
+    const msg = err?.message || String(err);
+    console.error("[telegram/handleInbound] error:", msg);
+    await ctx
+      .editLastProgress(`⚠️ _Error:_ ${msg.slice(0, 200)}`)
+      .catch(() => {});
+    await markFailed(ctx.inboundRowId, msg);
+    return { ok: false, error: msg };
+  } finally {
+    clearInterval(typingTimer);
+  }
+}
+
+/**
+ * Higher-level helper: takes a queue row that has just been claimed,
+ * builds the ctx, and dispatches. Used by the poll route and replay.
+ */
+export async function dispatchFromQueueRow(
+  row: TelegramMessageRow,
+  deps: {
+    token: string;
+    sendTyping: () => Promise<void>;
+    sendReply: (text: string, opts?: ReplyOpts) => Promise<number[]>;
+    sendVoice: (audioUrl: string, caption?: string) => Promise<void>;
+    sendFile: (fileUrl: string, caption?: string) => Promise<void>;
+  }
+): Promise<DispatchResult> {
+  let lastProgressId: number | null = null;
+  const editLastProgress = async (text: string) => {
+    if (lastProgressId == null) {
+      const ids = await deps.sendReply(text);
+      lastProgressId = ids[ids.length - 1] ?? null;
+    } else {
+      const { editMessageText } = await import("./index");
+      await editMessageText(
+        deps.token,
+        row.chatId,
+        lastProgressId,
+        text
+      );
+    }
+  };
+
+  return handleInboundMessage(row.text, {
+    chatId: row.chatId,
+    inboundRowId: row.id,
+    inboundTelegramMsgId: row.telegramMsgId,
+    sendTyping: deps.sendTyping,
+    sendReply: deps.sendReply,
+    sendVoice: deps.sendVoice,
+    sendFile: deps.sendFile,
+    editLastProgress,
+  });
+}

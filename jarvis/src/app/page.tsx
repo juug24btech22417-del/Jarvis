@@ -739,6 +739,45 @@ export default function Home() {
             )}
           </AnimatePresence>
 
+          {/* Telegram quick-launch button (floating) so the user can
+              open the panel without knowing the "open telegram" voice
+              command. Hidden when the panel is already open. */}
+          <AnimatePresence>
+            {!telegramOpen && (
+              <motion.button
+                key="telegram-launcher"
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.8 }}
+                whileHover={{ scale: 1.08 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={() => {
+                  recordPanelOpen("telegram");
+                  setTelegramOpen(true);
+                }}
+                title="Open Telegram panel"
+                aria-label="Open Telegram panel"
+                className="fixed top-20 left-1/2 -translate-x-1/2 z-[70] w-14 h-14 rounded-full shadow-lg flex items-center justify-center"
+                style={{
+                  background:
+                    "linear-gradient(135deg, #0088cc 0%, #229ed9 100%)",
+                  boxShadow:
+                    "0 6px 24px rgba(0, 136, 204, 0.4), 0 0 0 1px rgba(255,255,255,0.08)",
+                }}
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 24 24"
+                  fill="white"
+                  className="w-7 h-7"
+                  aria-hidden="true"
+                >
+                  <path d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 13.3 3.64 12c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.73 12.86c-.19.91-.74 1.13-1.5.71L12.6 16.3l-1.99 1.93c-.23.23-.42.42-.83.42z" />
+                </svg>
+              </motion.button>
+            )}
+          </AnimatePresence>
+
           {/* Communication Hub */}
           <AnimatePresence>
             {commHubOpen && (

@@ -1,47 +1,32 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
+import { runLlmChainAsResponse } from "@/services/LlmChain";
 
+/**
+ * Internal LLM proxy used by the Research/Oracle pipeline. Accepts a
+ * single { prompt } and returns the model content. Uses the shared
+ * NVIDIA -> OpenRouter -> Groq fallback chain (see LlmChain.ts) so
+ * a 429 on one model/provider doesn't take down the research flow.
+ *
+ * Response shape:
+ *   { success: true, content: string, provider: string, model: string }
+ *
+ *   provider = "nvidia" | "openrouter" | "groq"
+ */
 export async function POST(req: NextRequest) {
   try {
-    const { prompt, model = "meta/llama-3.3-70b-instruct" } = await req.json();
-
+    const { prompt, maxTokens, temperature } = await req.json();
     if (!prompt) {
-      return NextResponse.json({ error: "Prompt is required" }, { status: 400 });
+      return Response.json({ error: "Prompt is required" }, { status: 400 });
     }
-
-    const apiKey = process.env.NVIDIA_API_KEY;
-    if (!apiKey) {
-      return NextResponse.json({ error: "NVIDIA_API_KEY not configured" }, { status: 500 });
-    }
-
-    const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.2, // Lower temperature for more consistent structured output
-        max_tokens: 2048,
-        stream: false,
-      }),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      return NextResponse.json({ error: "NVIDIA API error", details: errorText }, { status: response.status });
-    }
-
-    const data = await response.json();
-    const content = data.choices?.[0]?.message?.content || "";
-
-    return NextResponse.json({
-      success: true,
-      content: content,
+    return runLlmChainAsResponse(prompt, {
+      maxTokens: typeof maxTokens === "number" ? maxTokens : undefined,
+      temperature: typeof temperature === "number" ? temperature : undefined,
     });
   } catch (error: any) {
     console.error("[Research LLM] Error:", error);
-    return NextResponse.json({ error: "Internal server error", details: error.message }, { status: 500 });
+    return Response.json(
+      { error: "Internal server error", details: error?.message || String(error) },
+      { status: 500 }
+    );
   }
 }

@@ -14,7 +14,10 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
-    const { messages, model = "openai/gpt-oss-120b:free", temperature = 0.7, max_tokens = 1000 } = body;
+    // Default to a slug that's actually free on OpenRouter today.
+    // Previously hardcoded to openai/gpt-oss-120b:free which moved
+    // behind a paid plan in mid-2026.
+    const { messages, model = "nvidia/nemotron-3.5-lightning:free", temperature = 0.7, max_tokens = 1000 } = body;
 
     if (!messages || !Array.isArray(messages)) {
       return NextResponse.json(
@@ -102,7 +105,7 @@ export async function GET(req: NextRequest) {
         "HTTP-Referer": "http://localhost:3000",
       },
       body: JSON.stringify({
-        model: "openai/gpt-oss-120b:free",
+        model: "nvidia/nemotron-3.5-lightning:free",
         messages: [{ role: "user", content: "Hi" }],
         max_tokens: 5,
       }),
@@ -112,7 +115,7 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({
         configured: true,
         status: "connected",
-        model: "openai/gpt-oss-120b:free",
+        model: "nvidia/nemotron-3.5-lightning:free",
       });
     } else {
       const error = await response.json().catch(() => ({}));
