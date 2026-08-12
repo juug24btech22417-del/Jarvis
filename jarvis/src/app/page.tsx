@@ -52,6 +52,7 @@ import { useTextToSpeech } from "@/hooks/useVoice";
 function BootSequence() {
   const { bootProgress, bootComplete, userInteracted, setUserInteracted } = useJarvisStore();
   const [showWelcome, setShowWelcome] = useState(false);
+  const [bootFinished, setBootFinished] = useState(false);
 
   useEffect(() => {
     if (bootComplete) {
@@ -59,6 +60,17 @@ function BootSequence() {
       return () => clearTimeout(timer);
     }
   }, [bootComplete]);
+
+  useEffect(() => {
+    if (userInteracted) {
+      const timer = setTimeout(() => {
+        setBootFinished(true);
+      }, 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [userInteracted]);
+
+  if (bootFinished) return null;
 
   if (bootComplete && showWelcome) {
     return (
@@ -111,7 +123,7 @@ function BootSequence() {
             initial={{ opacity: 1 }}
             animate={{ opacity: 0 }}
             transition={{ duration: 1, delay: 2 }}
-            className="fixed inset-0 z-50 flex items-center justify-center"
+            className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none"
           >
             <motion.div
               initial={{ opacity: 0, scale: 0.9 }}

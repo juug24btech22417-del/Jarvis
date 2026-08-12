@@ -14,7 +14,6 @@ import {
 } from "lucide-react";
 import {
   animatePanelOpen,
-  animatePanelClose,
   animateStagger,
   animateMessageAppear,
   createRipple,
@@ -116,13 +115,9 @@ export default function TelegramPanel({
     }
   }, []);
 
-  // Handle panel close with animation
+  // Handle panel close — AnimatePresence in the parent handles the exit animation
   const handleClose = () => {
-    if (panelRef.current) {
-      animatePanelClose(panelRef.current, 'right', onClose);
-    } else {
-      onClose();
-    }
+    onClose();
   };
 
   // The server polls Telegram and dispatches to the brain. The panel is
@@ -293,10 +288,35 @@ export default function TelegramPanel({
   return (
     <div
       ref={panelRef}
-      className="fixed right-0 top-0 h-full w-96 bg-panel-bg/95 backdrop-blur-sm border-l border-panel-border z-40 will-change-transform"
+      className="fixed z-50 corner-bracket"
+      style={{
+        top: "48px",
+        right: 0,
+        bottom: 0,
+        width: "24rem",
+        display: "flex",
+        flexDirection: "column",
+        background:
+          "linear-gradient(180deg, rgba(0, 30, 50, 0.95) 0%, rgba(0, 15, 30, 0.97) 100%)",
+        borderLeft: "1px solid rgba(0, 212, 255, 0.4)",
+        borderTop: "1px solid rgba(0, 212, 255, 0.2)",
+        boxShadow:
+          "-4px 0 24px rgba(0, 212, 255, 0.15), inset 1px 0 0 rgba(0, 212, 255, 0.1)",
+        backdropFilter: "blur(8px)",
+        overflow: "hidden",
+      }}
     >
-      {/* Header */}
-      <div className="flex items-center justify-between p-4 border-b border-panel-border">
+      {/* Scan lines overlay for holographic feel */}
+      <div
+        className="absolute inset-0 pointer-events-none rounded-lg scan-lines"
+        style={{ opacity: 0.4 }}
+      />
+
+      {/* Header — explicit min-height so it never collapses */}
+      <div
+        className="flex items-center justify-between p-4 border-b border-panel-border"
+        style={{ flex: "0 0 auto", minHeight: "72px" }}
+      >
         <div className="flex items-center gap-3">
           <MessageCircle className="w-6 h-6" style={{ color: "#0088cc" }} />
           <div>
@@ -324,53 +344,28 @@ export default function TelegramPanel({
         </div>
         <button
           onClick={handleClose}
-          className="p-2 hover:bg-accent-red/20 rounded transition-colors"
+          className="flex items-center gap-1.5 px-3 py-1.5 hover:bg-accent-red/20 rounded transition-colors border border-accent-red/40 text-accent-red"
+          title="Close Telegram panel"
+          aria-label="Close Telegram panel"
         >
-          <X className="w-4 h-4 text-accent-red" />
+          <X className="w-4 h-4" />
+          <span className="text-xs font-rajdhani font-bold tracking-wide">CLOSE</span>
         </button>
       </div>
 
-      {/* Error */}
-      {error && (
-        <div className="px-4 py-2 bg-accent-red/20 text-accent-red text-sm font-rajdhani">
-          {error}
-        </div>
-      )}
-
-      {/* Quick actions: test push, pending reminders, last-known location.
-          All three are fire-and-forget; they read from the new
-          /api/telegram/* routes and never block the panel. */}
-      {selectedChat && (
-        <div className="px-4 py-2 border-b border-panel-border flex items-center gap-2 font-rajdhani text-xs">
-          <button
-            onClick={async () => {
-              try {
-                await fetch("/api/telegram/notify", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    chatId: selectedChat.id,
-                    text: "🧪 Test push from panel.",
-                  }),
-                });
-              } catch {}
-              refreshFromQueue();
-            }}
-            className="px-2 py-1 rounded bg-panel-border hover:bg-cyan-500/30 transition-colors"
-          >
-            Test push
-          </button>
-          <RemindersWidget chatId={selectedChat.id} />
-          <LocationWidget chatId={selectedChat.id} />
-        </div>
-      )}
-
       {/* Auth helper: when the bot is connected but no chat IDs are
           allow-listed, surface the seen chat IDs so the user can copy
-          them into .env.local. */}
+          them into .env.local. — sticky so it never gets clipped. */}
       {authInfo?.needsAuth && (
-        <div className="px-4 py-2 bg-amber-500/15 border-y border-amber-500/40 text-amber-200 text-xs font-rajdhani space-y-2">
-          <p className="font-bold text-amber-300">Authorize your chat</p>
+        <div
+          className="px-4 py-3 bg-amber-500/15 border-b border-amber-500/40 text-amber-200 text-xs font-rajdhani space-y-2 overflow-y-auto"
+          style={{ flex: "0 0 auto", maxHeight: "12rem" }}
+        >
+          <div className="flex items-start justify-between gap-2">
+            <p className="font-bold text-amber-300 font-orbitron tracking-wide">
+              ⚠ AUTHORIZE YOUR CHAT
+            </p>
+          </div>
           <p>
             The server received messages from these chat IDs, but none are
             in <code className="bg-black/30 px-1 rounded">TELEGRAM_ALLOWED_CHAT_IDS</code>:
@@ -395,8 +390,51 @@ export default function TelegramPanel({
         </div>
       )}
 
-      {/* Content */}
-      <div className="flex h-[calc(100%-140px)]">
+      {/* Error */}
+      {error && (
+        <div
+          className="px-4 py-2 bg-accent-red/20 border-b border-accent-red/40 text-accent-red text-sm font-rajdhani"
+          style={{ flex: "0 0 auto" }}
+        >
+          {error}
+        </div>
+      )}
+
+      {/* Quick actions: test push, pending reminders, last-known location.
+          All three are fire-and-forget; they read from the new
+          /api/telegram/* routes and never block the panel. */}
+      {selectedChat && (
+        <div
+          className="px-4 py-2 border-b border-panel-border flex items-center gap-2 font-rajdhani text-xs"
+          style={{ flex: "0 0 auto" }}
+        >
+          <button
+            onClick={async () => {
+              try {
+                await fetch("/api/telegram/notify", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    chatId: selectedChat.id,
+                    text: "🧪 Test push from panel.",
+                  }),
+                });
+              } catch {}
+              refreshFromQueue();
+            }}
+            className="px-2 py-1 rounded bg-panel-border hover:bg-cyan-500/30 transition-colors"
+          >
+            Test push
+          </button>
+          <RemindersWidget chatId={selectedChat.id} />
+          <LocationWidget chatId={selectedChat.id} />
+        </div>
+      )}
+
+      {/* Content — takes remaining height; internal scroll */}
+      <div
+        style={{ flex: "1 1 auto", minHeight: 0, display: "flex" }}
+      >
         {/* Chat List */}
         <div ref={chatListRef} className="w-1/3 border-r border-panel-border overflow-y-auto">
           {chats.length === 0 ? (

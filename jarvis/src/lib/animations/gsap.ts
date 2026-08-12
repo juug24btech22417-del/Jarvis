@@ -15,14 +15,13 @@ export const animatePanelOpen = (element: HTMLElement | null, direction: 'left' 
   const fromY = direction === 'top' ? -400 : direction === 'bottom' ? 400 : 0;
 
   gsap.fromTo(element,
-    { opacity: 0, x: fromX, y: fromY, scale: 0.95 },
+    { opacity: 0, x: fromX, y: fromY },
     {
       opacity: 1,
       x: 0,
       y: 0,
-      scale: 1,
-      duration: 0.5,
-      ease: 'back.out(1.2)',
+      duration: 0.4,
+      ease: 'power3.out',
       clearProps: 'transform'
     }
   );
