@@ -9,9 +9,31 @@ import path from "path";
 import os from "os";
 
 const TELEGRAM_API = "https://api.telegram.org/bot";
+// `getFile` and the per-method endpoints live under `/bot<TOKEN>/...`.
+// The file-bytes download, however, is served under
+// `/file/bot<TOKEN>/<file_path>` — a different base. Keeping them in
+// one constant caused a silent 404 on every photo/PDF upload because
+// the URL was missing the `/file/` segment.
+const TELEGRAM_FILE_API = "https://api.telegram.org/file/bot";
 const MEDIA_DIR =
   process.env.JARVIS_TMP_DIR?.trim() ||
   path.join(os.tmpdir(), "jarvis-tg");
+
+// Timeout-aware fetch: aborts if the request takes longer than `ms`.
+// Without this, Telegram CDN fetches on slow mobile networks can hang
+// for 10-15 s before the OS kills the socket with ECONNRESET, which
+// surfaces as the generic "fetch failed" error the user sees.
+function fetchWithTimeout(
+  url: string,
+  opts: RequestInit = {},
+  ms = 20_000
+): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  return fetch(url, { ...opts, signal: ctrl.signal }).finally(() =>
+    clearTimeout(timer)
+  );
+}
 
 export interface TelegramFileMeta {
   file_id: string;
@@ -34,7 +56,17 @@ export async function getFileMeta(
   token: string,
   fileId: string
 ): Promise<TelegramFileMeta> {
-  const res = await fetch(`${TELEGRAM_API}${token}/getFile?file_id=${fileId}`);
+  let res: Response;
+  try {
+    res = await fetchWithTimeout(
+      `${TELEGRAM_API}${token}/getFile?file_id=${fileId}`,
+      {},
+      15_000  // 15 s — getFile is a small JSON call, should be fast
+    );
+  } catch (err: any) {
+    const reason = err?.name === "AbortError" ? "timed out (15 s)" : err?.message || String(err);
+    throw new Error(`getFile network error for ${fileId}: ${reason}`);
+  }
   const data = await res.json().catch(() => ({} as any));
   if (!data.ok) {
     throw new Error(data.description ?? `getFile failed for ${fileId}`);
@@ -61,10 +93,28 @@ export async function downloadTelegramFile(
   if (!meta.file_path) {
     throw new Error(`Telegram returned no file_path for ${fileId}`);
   }
-  const url = `${TELEGRAM_API}${token}/${meta.file_path}`;
-  const res = await fetch(url);
+  const url = `${TELEGRAM_FILE_API}${token}/${meta.file_path}`;
+  let res: Response;
+  try {
+    // Allow up to 20 s for the actual file bytes — PDFs can be a few MB
+    // and Telegram's CDN is slow from India on mobile networks.
+    res = await fetchWithTimeout(url, {}, 20_000);
+  } catch (err: any) {
+    const reason = err?.name === "AbortError" ? "download timed out (20 s)" : err?.message || String(err);
+    const safeUrl = url.replace(token, "<TOKEN>");
+    console.error(
+      `[telegram/media] download error: ${reason} url=${safeUrl}`
+    );
+    throw new Error(`Telegram file download failed: ${reason}`);
+  }
   if (!res.ok) {
-    throw new Error(`Telegram file download failed: ${res.status}`);
+    // Log the actual URL (sans token) so we can spot URL-construction
+    // regressions from the server logs.
+    const safeUrl = url.replace(token, "<TOKEN>");
+    console.error(
+      `[telegram/media] download failed: status=${res.status} url=${safeUrl} file_path=${meta.file_path}`
+    );
+    throw new Error(`Telegram file download failed: HTTP ${res.status}`);
   }
   const arr = new Uint8Array(await res.arrayBuffer());
   return Buffer.from(arr);

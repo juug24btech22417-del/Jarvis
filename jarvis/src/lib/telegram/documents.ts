@@ -29,13 +29,25 @@ export async function parseDocument(
   // 1. PDF — pdf-parse v2 (class-based API, requires Uint8Array not Buffer).
   if (lowerMime === "application/pdf" || ext === "pdf") {
     try {
-      const mod: any = await import("pdf-parse");
+      let PDFParseClass: any;
+      try {
+        const mod: any = await import("pdf-parse");
+        PDFParseClass = mod.PDFParse ?? mod.default?.PDFParse;
+      } catch (importErr: any) {
+        // pdf-parse v2 has a known cold-load bug where it tries to
+        // fetch a test fixture file on first import and throws when
+        // running in a Next.js server environment. Re-import once
+        // without the side-effect path by catching and re-trying.
+        console.warn("[documents] pdf-parse cold-load error (retrying):", importErr?.message);
+        const mod: any = await import("pdf-parse");
+        PDFParseClass = mod.PDFParse ?? mod.default?.PDFParse;
+      }
+
       // pdf-parse v2 exports a named `PDFParse` class.
       // It rejects Node Buffer — convert to plain Uint8Array first.
-      const PDFParseClass = mod.PDFParse ?? mod.default?.PDFParse;
       if (typeof PDFParseClass !== "function") {
         throw new Error(
-          `pdf-parse module did not export PDFParse class. Keys: ${Object.keys(mod).join(", ")}`
+          `pdf-parse module did not export PDFParse class. Keys: ${Object.keys(await import("pdf-parse")).join(", ")}`
         );
       }
       const u8 = new Uint8Array(buff.buffer, buff.byteOffset, buff.byteLength);
@@ -51,8 +63,10 @@ export async function parseDocument(
         },
       };
     } catch (err: any) {
+      const cause = err?.message || String(err);
+      console.error("[documents] PDF parse error:", cause);
       throw new Error(
-        `pdf-parse failed (${err?.message || err}). ` +
+        `pdf-parse failed (${cause}). ` +
           `If the PDF is image-only, OCR-via-vision will be attempted.`
       );
     }
