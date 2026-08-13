@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { exec } from "child_process";
 import { promisify } from "util";
+import os from "os";
+import path from "path";
 
 const execAsync = promisify(exec);
 
@@ -54,6 +56,7 @@ export async function POST(req: NextRequest) {
 
     let shellCmd: string | null = null;
     let description = "";
+    let filePath: string | undefined;
 
     // 1. Open a specific URL in the default browser
     if (command === "open_url" && url) {
@@ -97,8 +100,18 @@ export async function POST(req: NextRequest) {
       description = "Toggle mute";
     }
     else if (command === "screenshot") {
-      shellCmd = `powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('%{PRTSC}')"`;
-      description = "Taking screenshot";
+      filePath = path.join(os.tmpdir(), `jarvis_ss_${Date.now()}.png`);
+      const fp = filePath.replace(/\\/g, "\\\\");
+      shellCmd =
+        `powershell -NonInteractive -Command ` +
+        `"Add-Type -AssemblyName System.Windows.Forms,System.Drawing; ` +
+        `$b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; ` +
+        `$bmp=New-Object System.Drawing.Bitmap($b.Width,$b.Height); ` +
+        `$g=[System.Drawing.Graphics]::FromImage($bmp); ` +
+        `$g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size); ` +
+        `$bmp.Save('${fp}'); ` +
+        `$g.Dispose(); $bmp.Dispose()"`;
+      description = "Screenshot captured";
     }
     else if (command === "lock") {
       shellCmd = `rundll32.exe user32.dll,LockWorkStation`;
@@ -175,6 +188,7 @@ export async function POST(req: NextRequest) {
         command: shellCmd,
         stdout: stdout.trim().slice(0, 500),
         stderr: stderr ? stderr.trim().slice(0, 200) : undefined,
+        ...(filePath ? { filePath } : {}),
       })
     );
   } catch (err: any) {

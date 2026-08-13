@@ -430,6 +430,54 @@ async function applyReplyPlan(
       const command = plan.payload?.command as string;
       const params = (plan.payload?.params as Record<string, unknown>) ?? {};
       const result = await executeOsCommand(command, params);
+
+      // Screenshot: upload the PNG to Telegram directly instead of sending a text reply.
+      if (command === "screenshot" && result.ok && result.filePath) {
+        let photoSent = false;
+        try {
+          const { existsSync, readFileSync, unlinkSync } = await import("fs");
+          const token = process.env.TELEGRAM_BOT_TOKEN;
+          if (token && existsSync(result.filePath)) {
+            const buf = readFileSync(result.filePath);
+            const fd = new FormData();
+            fd.append("chat_id", String(ctx.chatId));
+            fd.append("photo", new Blob([buf], { type: "image/png" }), "screenshot.png");
+            fd.append("caption", "📸 Screenshot");
+            const tgRes = await fetch(
+              `https://api.telegram.org/bot${token}/sendPhoto`,
+              { method: "POST", body: fd }
+            );
+            if (tgRes.ok) {
+              photoSent = true;
+              console.log("[handleInbound] screenshot photo sent to Telegram");
+            } else {
+              const errText = await tgRes.text().catch(() => "");
+              console.error("[handleInbound] sendPhoto failed:", tgRes.status, errText);
+            }
+            try { unlinkSync(result.filePath); } catch {}
+          }
+        } catch (uploadErr: any) {
+          console.error("[handleInbound] screenshot upload error:", uploadErr?.message);
+        }
+
+        if (photoSent) {
+          // Persist the outbound row and mark inbound as done — no extra text reply needed.
+          await enqueueTelegramMessage({
+            chatId: ctx.chatId,
+            direction: "outbound",
+            text: "📸 Screenshot",
+            status: "sent",
+            replyToId: ctx.inboundRowId,
+            metadata: { commandPlan: "screenshot" },
+          });
+          await markSent(ctx.inboundRowId);
+          return { ok: true, replyText: "📸 Screenshot" };
+        }
+        // Photo upload failed — fall back to text error.
+        replyText = "⚠️ Screenshot was taken but I couldn't send the image. Try again, Boss.";
+        break;
+      }
+
       replyText = result.ok
         ? `✅ ${result.description ?? "Done."}`
         : `❌ ${result.error ?? "Action failed."}`;

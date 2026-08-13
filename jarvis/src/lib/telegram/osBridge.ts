@@ -182,7 +182,7 @@ export function parseOsCommand(text: string): ParsedOsCommand | null {
 export async function executeOsCommand(
   command: string,
   params: Record<string, unknown> = {}
-): Promise<{ ok: boolean; description?: string; error?: string }> {
+): Promise<{ ok: boolean; description?: string; error?: string; filePath?: string }> {
   if (!OS_ALLOWLIST.has(command)) {
     return { ok: false, error: `command not allowed: ${command}` };
   }
@@ -202,6 +202,7 @@ export async function executeOsCommand(
     return {
       ok: true,
       description: data.description ?? "Done.",
+      filePath: typeof data.filePath === "string" ? data.filePath : undefined,
       error: data.error,
     };
   } catch (e: any) {

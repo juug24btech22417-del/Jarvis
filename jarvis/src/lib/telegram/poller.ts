@@ -274,7 +274,16 @@ async function tick() {
             try {
               const buf = await downloadTelegramFile(POLL_TOKEN!, file_id);
               const parsed = await parseDocument(buf, mime_type ?? "application/octet-stream", file_name ?? "file");
-              const combined = `${caption}\n\n---\n${parsed.text.slice(0, 6000)}`;
+              const docText = parsed.text.slice(0, 4000).trim();
+              // Build a clear LLM prompt. The model must summarise/answer,
+              // NOT echo the raw text back. Cap at 4000 chars so the message
+              // stays within context and the reply stays concise.
+              const combined =
+                `[Document: "${file_name || "file"}" — ${parsed.meta.pages ?? "?"} page(s)]\n` +
+                `User request: ${caption}\n\n` +
+                `--- Document Content (extract) ---\n${docText}\n---\n\n` +
+                `Respond with a concise, well-formatted Telegram message that directly answers the user's request. ` +
+                `Do NOT repeat or quote the full document text. Keep it brief.`;
               await updateQueuedMessage(row.id, {
                 text: combined,
                 status: "pending",
