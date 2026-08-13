@@ -26,17 +26,25 @@ export async function parseDocument(
   const lowerMime = mime.toLowerCase();
   const ext = (filename.split(".").pop() || "").toLowerCase();
 
-  // 1. PDF — pdf-parse.
+  // 1. PDF — pdf-parse v2 (class-based API, requires Uint8Array not Buffer).
   if (lowerMime === "application/pdf" || ext === "pdf") {
     try {
-      // pdf-parse v2 has a default export that accepts a Buffer.
       const mod: any = await import("pdf-parse");
-      const fn = mod.default ?? mod.pdf ?? mod;
-      const result = await fn(buff);
+      // pdf-parse v2 exports a named `PDFParse` class.
+      // It rejects Node Buffer — convert to plain Uint8Array first.
+      const PDFParseClass = mod.PDFParse ?? mod.default?.PDFParse;
+      if (typeof PDFParseClass !== "function") {
+        throw new Error(
+          `pdf-parse module did not export PDFParse class. Keys: ${Object.keys(mod).join(", ")}`
+        );
+      }
+      const u8 = new Uint8Array(buff.buffer, buff.byteOffset, buff.byteLength);
+      const parser = new PDFParseClass(u8);
+      const result = await parser.getText();
       return {
         text: result.text || "",
         meta: {
-          pages: result.numpages,
+          pages: result.total ?? result.pages?.length,
           mime,
           filename,
           parser: "pdf-parse",

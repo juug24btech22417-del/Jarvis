@@ -29,8 +29,8 @@ export async function describeImage(
 
   const modelsToTry = [
     preferredModel,
-    "meta-llama/llama-3.2-11b-vision-instruct:free",
-    "openrouter/free"
+    "google/gemma-4-31b-it:free",
+    "google/gemini-2.5-flash"
   ];
 
   let lastError: any = null;
