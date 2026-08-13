@@ -345,12 +345,13 @@ function stripReasoning(text: string): string {
 }
 
 /**
- * Cap the user-visible reply. Telegram allows 4096 chars per message,
- * but a 4000+ char chat dump is almost certainly a model reasoning
- * leak, not a real answer. Truncate at a sentence boundary and
- * append an ellipsis so the user knows there's more they didn't get.
+ * Cap the user-visible reply. Telegram allows 4096 chars per message
+ * and `sendReply` chunks at 4000. Keep the cap below that so a single
+ * chunk is enough for the common case. Vision / document summaries
+ * regularly run 2-3k chars, so the previous 1500 was cutting them off
+ * mid-sentence.
  */
-const TELEGRAM_USER_REPLY_CAP = 1500;
+const TELEGRAM_USER_REPLY_CAP = 3500;
 function capReplyLength(text: string): string {
   if (text.length <= TELEGRAM_USER_REPLY_CAP) return text;
   const truncated = text.slice(0, TELEGRAM_USER_REPLY_CAP);
@@ -687,7 +688,12 @@ export async function handleInboundMessage(
       if (streamed.length - lastProgressText.length > 40) {
         const preview = stripReasoning(streamed).slice(-200);
         if (preview) {
-          const next = `🤖 _${preview}_`;
+          // No Markdown wrapping: the previous `_${preview}_` italic
+          // made replies render as truncated-at-the-last-`_` whenever
+          // the final edit failed or was throttled. Plain text is the
+          // safe default and Telegram still shows the 🤖 prefix as
+          // a recognizable bot indicator.
+          const next = `🤖 ${preview}`;
           await ctx.editLastProgress(next).catch(() => {});
           lastProgressText = next;
         }
@@ -789,6 +795,52 @@ export async function dispatchFromQueueRow(
     sendFile: (fileUrl: string, caption?: string) => Promise<void>;
   }
 ): Promise<DispatchResult> {
+  // Media rows (photo, document, voice) carry pre-processed content in row.text:
+  //   - photo:    the image description from the vision model
+  //   - document: the extracted/summarised text from the document parser
+  //   - voice:    the transcription from whisper/whisper-openai
+  //
+  // Fix: we MUST send this content back to the user on Telegram, otherwise
+  // they receive nothing after uploading a file.
+  //
+  //   • Photos and documents → send the description/extract directly.
+  //     There is no need to send them through the LLM again; the vision
+  //     model already wrote a natural-language description.
+  //   • Voice → run through the LLM so JARVIS can *respond* to what was
+  //     said (e.g. if the user dictated "set a reminder for 6pm",
+  //     JARVIS should honour the request).
+  const mediaKind = (row.metadata as { kind?: string } | null)?.kind;
+
+  if (mediaKind === "photo" || mediaKind === "document") {
+    // Send the vision/document description directly to the user.
+    const description = row.text?.trim() || "_(No description available)_";
+    const label = mediaKind === "photo" ? "📸 *Image Analysis*" : "📄 *Document Summary*";
+    try {
+      await deps.sendReply(`${label}\n\n${description}`);
+    } catch (sendErr: any) {
+      console.error(
+        `[telegram/dispatchFromQueueRow] failed to send ${mediaKind} description:`,
+        sendErr?.message || sendErr
+      );
+    }
+    // Persist the outbound reply in the queue so the panel renders it.
+    await enqueueTelegramMessage({
+      chatId: row.chatId,
+      direction: "outbound",
+      text: description,
+      status: "sent",
+      replyToId: row.id,
+      metadata: { parseMode: "Markdown", mediaReply: mediaKind },
+    });
+    await markSent(row.id);
+    return { ok: true, replyText: description };
+  }
+
+  // Voice: pass the transcript through the LLM so JARVIS can respond to it.
+  // The row.text already holds the transcription text; we feed it as a user
+  // prompt so slash-commands, reminders, and general chat all work.
+  // (No early return here — fall through to the standard LLM path below.)
+
   let lastProgressId: number | null = null;
   const editLastProgress = async (text: string) => {
     if (lastProgressId == null) {
