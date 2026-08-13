@@ -35,7 +35,8 @@ export type ReplyKind =
   | "tasks_done"
   | "whoami"
   | "help"
-  | "start";
+  | "start"
+  | "research";         // deep-research via OracleResearchService
 
 export interface ReplyPlan {
   kind: ReplyKind;
@@ -84,8 +85,65 @@ export async function routeCommand(
   // fall through to LLM otherwise.
   if (meta?.fromCallback) return { kind: "chat" };
 
+  // Natural-language research intent — intercept before the LLM.
+  const researchQuery = detectResearchIntent(trimmed);
+  if (researchQuery) {
+    return {
+      kind: "research",
+      payload: { query: researchQuery },
+    };
+  }
+
   // Otherwise let the LLM handle it.
   return { kind: "chat" };
+}
+
+// ─── Research intent detector ───────────────────────────────────────────────
+// Matches queries that are clearly asking Jarvis to research/compare/find
+// something on the web. Returns the cleaned query string, or null if no
+// research intent is detected. Keep patterns specific enough to avoid
+// swallowing short conversational messages.
+
+function detectResearchIntent(text: string): string | null {
+  const t = text.trim();
+  if (t.length < 15) return null; // Too short to be a real research query.
+
+  const lower = t.toLowerCase();
+
+  // Explicit research triggers
+  const explicitPrefixes = [
+    /^research\s+(.+)$/i,
+    /^find\s+(?:me\s+)?the\s+best\s+(.+)$/i,
+    /^what(?:'s|\s+is)\s+the\s+best\s+(.+?)(?:\s+to\s+buy|\s+in\s+india|\s+under\s+[\d,]+(?:rs|inr|₹|k)?)?\s*$/i,
+    /^compare\s+(.+)\s+(?:and|vs\.?|versus)\s+(.+)$/i,
+    /^which\s+is\s+better[,:]?\s+(.+)$/i,
+    /^give\s+me\s+a\s+(?:report|summary|analysis|breakdown|comparison)\s+(?:on|of|about)\s+(.+)$/i,
+    /^(?:deep\s+)?dive\s+into\s+(.+)$/i,
+    /^analyse?\s+(?:the\s+market\s+for|the\s+best|all)\s+(.+)$/i,
+    /^look\s+into\s+(.+)\s+and\s+(?:report|summarize|tell\s+me)$/i,
+  ];
+
+  for (const rx of explicitPrefixes) {
+    const m = t.match(rx);
+    if (m) return t; // Return the full original query — Oracle handles parsing.
+  }
+
+  // Implicit research signals — longer sentences mentioning web-knowledge tasks.
+  const hasResearchSignal =
+    lower.includes("best laptop") ||
+    lower.includes("best phone") ||
+    lower.includes("best monitor") ||
+    lower.includes("best headphone") ||
+    lower.includes("best tv") ||
+    lower.includes("pros and cons") ||
+    lower.includes("vs ") ||
+    lower.includes(" versus ") ||
+    (lower.includes("under ") && /under\s+[\d,]+(?:rs|inr|₹|k)/i.test(lower)) ||
+    (lower.includes("top ") && /top\s+\d+\s+/i.test(lower));
+
+  if (hasResearchSignal && t.length > 25) return t;
+
+  return null;
 }
 
 // ─── Slash command parser ──────────────────────────────────────────────────
@@ -148,6 +206,16 @@ async function routeSlash(chatId: number, text: string): Promise<ReplyPlan> {
 
     case "done":
       return { kind: "tasks_done", payload: { id: args } };
+
+    case "research": {
+      if (!args) {
+        return {
+          kind: "reply",
+          text: "Usage: /research <your query>\n\nExample: /research best laptop under 80000 rs",
+        };
+      }
+      return { kind: "research", payload: { query: args } };
+    }
 
     case "lock":
     case "sleep":
@@ -442,6 +510,9 @@ export async function formatWhereami(chatId: number): Promise<string> {
 
 const HELP_TEXT =
   `*Jarvis Telegram commands*\n\n` +
+  `*Research & Web*\n` +
+  `/research <query> — deep web research + report\n` +
+  `_Or just say:_ "find the best laptop under 80k" / "compare A vs B"\n\n` +
   `*Daily*\n` +
   `/brief — morning / evening briefing\n` +
   `/clip — laptop clipboard → here\n` +

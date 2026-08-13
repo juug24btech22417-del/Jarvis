@@ -33,6 +33,7 @@ import {
   createDestructivePending,
   destructiveConfirmButtons,
 } from "./osBridge";
+import { notifyUser } from "./notify";
 import { getLastClipboard } from "./clipboard";
 import { composeLocalBriefing, type BriefingKind } from "@/services/BriefingService";
 import type { DayPhase } from "@/hooks/useAmbientContext";
@@ -588,6 +589,46 @@ async function applyReplyPlan(
     case "start":
       // commands.ts already produced the reply text.
       break;
+
+    case "research": {
+      const query = (plan.payload?.query as string | undefined)?.trim();
+      if (!query) {
+        replyText = "Please provide a research query, Boss.";
+        break;
+      }
+
+      // Fire Oracle research asynchronously and return an immediate ack.
+      // The final report is delivered via notifyUser once Oracle completes.
+      const researchId = `oracle_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      const chatIdForResearch = ctx.chatId;
+
+      // Kick off in the background — don't await.
+      (async () => {
+        try {
+          const { oracleResearchService } = await import("@/services/OracleResearchService");
+          await oracleResearchService.startOracleResearch({
+            id: researchId,
+            query,
+            depth: "standard",
+            telegramChatId: chatIdForResearch,
+          });
+        } catch (err: any) {
+          console.error("[handleInbound/research] Oracle error:", err?.message || err);
+          await notifyUser(
+            chatIdForResearch,
+            `⚠️ Research failed: ${(err?.message || "unknown error").slice(0, 200)}`,
+            { fromSource: "oracle" }
+          ).catch(() => {});
+        }
+      })();
+
+      replyText =
+        `🔍 *Oracle Research Engine activated*\n\n` +
+        `Query: _${query}_\n\n` +
+        `I'm searching, scraping, and synthesizing. This usually takes 1–3 minutes. ` +
+        `I'll send you the full report when it's ready, Boss.`;
+      break;
+    }
 
     default:
       return { ok: false, error: `unhandled plan: ${plan.kind}` };

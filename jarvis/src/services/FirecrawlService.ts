@@ -1,4 +1,7 @@
 import FirecrawlApp from '@mendable/firecrawl-js';
+import * as crypto from 'crypto';
+import * as fs from 'fs';
+import * as path from 'path';
 
 // ─── TYPES ──────────────────────────────────────────────────────────────────
 
@@ -50,6 +53,45 @@ class FirecrawlService {
     return this.client;
   }
 
+  private getCachePath(url: string): string {
+    const hash = crypto.createHash('md5').update(url).digest('hex');
+    const dir = path.join(process.cwd(), 'scratch', 'scrape_cache');
+    return path.join(dir, `${hash}.json`);
+  }
+
+  private getFromCache(url: string): FirecrawlScrapeResult | null {
+    try {
+      const cachePath = this.getCachePath(url);
+      if (fs.existsSync(cachePath)) {
+        const stat = fs.statSync(cachePath);
+        // Cache is valid for 24 hours (86400000 ms)
+        const age = Date.now() - stat.mtimeMs;
+        if (age < 24 * 60 * 60 * 1000) {
+          const content = fs.readFileSync(cachePath, 'utf8');
+          console.log(`[Firecrawl Cache] Hit for: ${url}`);
+          return JSON.parse(content);
+        }
+      }
+    } catch (err) {
+      console.error(`[Firecrawl Cache] Read error for ${url}:`, err);
+    }
+    return null;
+  }
+
+  private saveToCache(url: string, result: FirecrawlScrapeResult) {
+    try {
+      const dir = path.join(process.cwd(), 'scratch', 'scrape_cache');
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      const cachePath = this.getCachePath(url);
+      fs.writeFileSync(cachePath, JSON.stringify(result, null, 2), 'utf8');
+      console.log(`[Firecrawl Cache] Saved: ${url}`);
+    } catch (err) {
+      console.error(`[Firecrawl Cache] Write error for ${url}:`, err);
+    }
+  }
+
   /**
    * Check if Firecrawl is configured and available
    */
@@ -64,6 +106,10 @@ class FirecrawlService {
     onlyMainContent?: boolean;
     waitFor?: number;
   }): Promise<FirecrawlScrapeResult> {
+    // 1. Check persistent cache first for lightning fast retrieval
+    const cached = this.getFromCache(url);
+    if (cached) return cached;
+
     try {
       const client = this.getClient();
       console.log(`[Firecrawl] Scraping: ${url}`);
@@ -119,13 +165,18 @@ class FirecrawlService {
 
       console.log(`[Firecrawl] Scraped "${title}" (${markdown.length} chars)`);
 
-      return {
+      const result: FirecrawlScrapeResult = {
         success: true,
         url,
         title,
         markdown,
         metadata,
       };
+
+      // 2. Save result to cache on success
+      this.saveToCache(url, result);
+
+      return result;
     } catch (e: any) {
       console.error('[Firecrawl] Scrape error:', e.message);
       return {

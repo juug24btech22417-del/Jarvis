@@ -13,6 +13,8 @@ export const BOT_COMMANDS: Array<{ command: string; description: string }> = [
   { command: "help", description: "Show all commands" },
   { command: "whoami", description: "Show your chat_id" },
 
+  { command: "research", description: "Deep web research + report (e.g. /research best laptop under 80k)" },
+
   { command: "brief", description: "Morning / evening briefing" },
   { command: "clip", description: "Send laptop clipboard" },
   { command: "whereami", description: "Last shared location" },

@@ -57,6 +57,8 @@ interface TaskInternal {
   visitedUrls: Set<string>;
   // Optional: id of the parent report for follow-ups.
   parentReportId?: string;
+  // Optional: Telegram chat_id that requested this research.
+  telegramChatId?: number;
 }
 
 class OracleResearchService {
@@ -100,6 +102,8 @@ class OracleResearchService {
     reportType?: ReportType;
     depth?: 'quick' | 'standard' | 'deep';
     parentReportId?: string;
+    /** Telegram chat_id that requested this research — used to deliver the final report. */
+    telegramChatId?: number;
   }) {
     const { id, query, depth = 'standard', parentReportId } = opts;
 
@@ -126,6 +130,7 @@ class OracleResearchService {
       collectedFacts: new Map(),
       visitedUrls: new Set(),
       parentReportId,
+      telegramChatId: opts.telegramChatId,
     };
     this.tasks.set(id, internal);
 
@@ -337,7 +342,7 @@ class OracleResearchService {
         );
       }
       await this.persistReport(status);
-      await this.sendCompletionNotification(query, reportType);
+      await this.sendCompletionNotification(query, reportType, false, status.reportMarkdown, internal.telegramChatId);
     } catch (e: any) {
       console.error(`[Oracle ${id}] pipeline failed:`, e);
       this.addLog(status, `🚨 Error: ${e?.message || String(e)}`, status.progress, 'failed');
@@ -347,7 +352,7 @@ class OracleResearchService {
       } catch (pe) {
         console.error(`[Oracle ${id}] failed to persist error row:`, pe);
       }
-      await this.sendCompletionNotification(query, reportType, true);
+      await this.sendCompletionNotification(query, reportType, true, undefined, internal.telegramChatId);
     }
   }
 
@@ -717,27 +722,64 @@ class OracleResearchService {
   private async sendCompletionNotification(
     query: string,
     reportType: ReportType,
-    isError = false
+    isError = false,
+    reportMarkdown?: string,
+    telegramChatId?: number
   ) {
-    const message = isError
-      ? `Boss, I hit an error while running a ${reportType} report on "${query}". I'll surface it in the panel.`
-      : `${REPORT_TYPE_TITLES[reportType]} report complete: "${query}". Structured blocks are in the panel and the full report is in Notion.`;
+    const shortMsg = isError
+      ? `⚠️ Research failed: "${query}" — check the panel for details.`
+      : `✅ *${REPORT_TYPE_TITLES[reportType]}* complete!\n\nQuery: _${query}_\n\nFull report saved to Notion. Summary below ↓`;
+
+    // In-app notify (panel banner).
     try {
       await fetch(`${API_BASE}/api/notify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, status: isError ? 'error' : 'success' }),
+        body: JSON.stringify({ message: shortMsg.replace(/[*_]/g, ''), status: isError ? 'error' : 'success' }),
       });
     } catch (e) {
-      console.error('[Oracle] Notification failed:', e);
+      console.error('[Oracle] In-app notification failed:', e);
     }
 
-    // Also push to Telegram so the user gets the result on their phone.
-    // Fire-and-forget; the existing in-app notify above stays the
-    // primary surface for the panel.
+    // Telegram push — deliver the actual markdown report in chunks.
     try {
       const { notifyUser } = await import("@/lib/telegram/notify");
-      await notifyUser(null, message, { fromSource: "oracle-research" });
+      const targetChatId = telegramChatId ?? null; // null = default first allowed chat
+
+      if (isError) {
+        await notifyUser(targetChatId, shortMsg, { fromSource: "oracle-research" });
+        return;
+      }
+
+      // Send the header message first.
+      await notifyUser(targetChatId, shortMsg, { fromSource: "oracle-research" });
+
+      // If we have the markdown report, deliver it in Telegram-safe chunks.
+      // Telegram limit is 4096 chars; we use 3800 to leave headroom.
+      if (reportMarkdown && reportMarkdown.trim().length > 0) {
+        const CHUNK_SIZE = 3800;
+        const md = reportMarkdown.trim();
+        let offset = 0;
+        let chunkIndex = 0;
+        while (offset < md.length) {
+          // Try to break at a paragraph boundary.
+          let end = offset + CHUNK_SIZE;
+          if (end < md.length) {
+            const boundary = md.lastIndexOf('\n\n', end);
+            if (boundary > offset + CHUNK_SIZE * 0.5) end = boundary + 2;
+          } else {
+            end = md.length;
+          }
+          const chunk = md.slice(offset, end).trim();
+          if (chunk) {
+            // Brief delay between chunks to avoid Telegram flood limits.
+            if (chunkIndex > 0) await new Promise(r => setTimeout(r, 800));
+            await notifyUser(targetChatId, chunk, { fromSource: "oracle-research" });
+            chunkIndex++;
+          }
+          offset = end;
+        }
+      }
     } catch (e) {
       console.error("[Oracle] Telegram notify failed:", e);
     }
