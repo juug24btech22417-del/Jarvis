@@ -164,6 +164,26 @@ export async function markRejected(id: string, reason: string): Promise<void> {
   });
 }
 
+export async function updateQueuedMessage(
+  id: string,
+  data: {
+    text?: string;
+    status?: TelegramStatus;
+    metadata?: Record<string, unknown>;
+    error?: string | null;
+  }
+): Promise<void> {
+  await tm().update({
+    where: { id },
+    data: {
+      text: data.text,
+      status: data.status,
+      metadata: data.metadata ? JSON.stringify(data.metadata) : undefined,
+      error: data.error,
+    },
+  });
+}
+
 /**
  * Claim and atomically mark the next pending inbound message as processing.
  * Returns null if nothing is pending. The caller is responsible for calling

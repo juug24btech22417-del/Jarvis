@@ -20,6 +20,7 @@ import {
   getSeenChatIds,
   markRejected,
   markSent,
+  updateQueuedMessage,
 } from "./queue";
 import { dispatchFromQueueRow } from "./handleInbound";
 import { replayPendingOnBoot } from "./queueReplay";
@@ -137,32 +138,54 @@ async function tick() {
       if (m.voice && !m.text) {
         try {
           const fileId = m.voice.file_id;
-          const buf = await downloadTelegramFile(POLL_TOKEN, fileId);
-          const tmpPath = await saveToTmp(chatId, "ogg", buf);
-          const { text } = await transcribeOggOpus(buf);
+          const duration = m.voice.duration;
           const row = await enqueueTelegramMessage({
             chatId,
             telegramMsgId: m.message_id,
             direction: "inbound",
-            text,
-            status: "pending",
+            text: "🎙️ _[Transcribing voice note...]_",
+            status: "processing",
             metadata: {
               kind: "voice",
-              tmpPath,
-              duration: m.voice.duration,
+              duration,
             },
           });
           console.log(
-            `[telegram/poller] enqueued voice ${row.id.slice(0, 8)} (${text.length} chars)`
+            `[telegram/poller] enqueued voice ${row.id.slice(0, 8)} (status: processing, message_id=${m.message_id})`
           );
+
+          // Process in background to avoid blocking the polling tick
+          (async () => {
+            try {
+              const buf = await downloadTelegramFile(POLL_TOKEN!, fileId);
+              const tmpPath = await saveToTmp(chatId, "ogg", buf);
+              const { text } = await transcribeOggOpus(buf);
+              await updateQueuedMessage(row.id, {
+                text,
+                status: "pending",
+                metadata: {
+                  kind: "voice",
+                  tmpPath,
+                  duration,
+                },
+              });
+              console.log(`[telegram/poller] async voice transcription complete for ${row.id.slice(0, 8)}`);
+              drainQueue().catch(() => {});
+            } catch (err: any) {
+              console.error("[telegram/poller] async voice error:", err?.message || err);
+              await updateQueuedMessage(row.id, {
+                status: "failed",
+                error: err?.message || String(err),
+              });
+              await sendReply(
+                POLL_TOKEN!,
+                chatId,
+                `Couldn't transcribe that voice note, Boss: ${err?.message || err}`
+              ).catch(() => {});
+            }
+          })();
         } catch (err: any) {
-          console.error("[telegram/poller] voice error:", err?.message || err);
-          // Acknowledge to the user that the voice note failed.
-          await sendReply(
-            POLL_TOKEN,
-            chatId,
-            `Couldn't transcribe that voice note, Boss: ${err?.message || err}`
-          ).catch(() => {});
+          console.error("[telegram/poller] voice enqueue error:", err?.message || err);
         }
         continue;
       }
@@ -171,16 +194,13 @@ async function tick() {
       if (m.photo && m.photo.length > 0 && !m.text) {
         try {
           const largest = m.photo[m.photo.length - 1];
-          const buf = await downloadTelegramFile(POLL_TOKEN, largest.file_id);
-          const caption =
-            m.caption?.trim() || "Describe this image in detail.";
-          const text = await describeImage(buf, "image/jpeg", caption);
+          const caption = m.caption?.trim() || "Describe this image in detail.";
           const row = await enqueueTelegramMessage({
             chatId,
             telegramMsgId: m.message_id,
             direction: "inbound",
-            text,
-            status: "pending",
+            text: "📸 _[Analyzing photo...]_",
+            status: "processing",
             metadata: {
               kind: "photo",
               caption,
@@ -189,15 +209,41 @@ async function tick() {
             },
           });
           console.log(
-            `[telegram/poller] enqueued photo ${row.id.slice(0, 8)} (${text.length} chars)`
+            `[telegram/poller] enqueued photo ${row.id.slice(0, 8)} (status: processing, message_id=${m.message_id})`
           );
+
+          // Process in background to avoid blocking the polling tick
+          (async () => {
+            try {
+              const buf = await downloadTelegramFile(POLL_TOKEN!, largest.file_id);
+              const text = await describeImage(buf, "image/jpeg", caption);
+              await updateQueuedMessage(row.id, {
+                text,
+                status: "pending",
+                metadata: {
+                  kind: "photo",
+                  caption,
+                  width: largest.width,
+                  height: largest.height,
+                },
+              });
+              console.log(`[telegram/poller] async photo analysis complete for ${row.id.slice(0, 8)}`);
+              drainQueue().catch(() => {});
+            } catch (err: any) {
+              console.error("[telegram/poller] async photo error:", err?.message || err);
+              await updateQueuedMessage(row.id, {
+                status: "failed",
+                error: err?.message || String(err),
+              });
+              await sendReply(
+                POLL_TOKEN!,
+                chatId,
+                `Couldn't analyze that photo, Boss: ${err?.message || err}`
+              ).catch(() => {});
+            }
+          })();
         } catch (err: any) {
-          console.error("[telegram/poller] photo error:", err?.message || err);
-          await sendReply(
-            POLL_TOKEN,
-            chatId,
-            `Couldn't analyze that photo, Boss: ${err?.message || err}`
-          ).catch(() => {});
+          console.error("[telegram/poller] photo enqueue error:", err?.message || err);
         }
         continue;
       }
@@ -206,36 +252,57 @@ async function tick() {
       if (m.document && !m.text) {
         try {
           const { file_id, mime_type, file_name } = m.document;
-          const buf = await downloadTelegramFile(POLL_TOKEN, file_id);
-          const parsed = await parseDocument(buf, mime_type ?? "application/octet-stream", file_name ?? "file");
-          const caption =
-            m.caption?.trim() ||
-            `Summarize "${file_name}" in 5 bullet points.`;
-          const combined = `${caption}\n\n---\n${parsed.text.slice(0, 6000)}`;
+          const caption = m.caption?.trim() || `Summarize "${file_name || "file"}" in 5 bullet points.`;
           const row = await enqueueTelegramMessage({
             chatId,
             telegramMsgId: m.message_id,
             direction: "inbound",
-            text: combined,
-            status: "pending",
+            text: "📄 _[Analyzing document...]_",
+            status: "processing",
             metadata: {
               kind: "document",
               fileName: file_name,
               mime: mime_type,
-              pages: parsed.meta.pages,
-              parser: parsed.meta.parser,
             },
           });
           console.log(
-            `[telegram/poller] enqueued document ${row.id.slice(0, 8)} (${parsed.text.length} chars, parser=${parsed.meta.parser})`
+            `[telegram/poller] enqueued document ${row.id.slice(0, 8)} (status: processing, message_id=${m.message_id})`
           );
+
+          // Process in background to avoid blocking the polling tick
+          (async () => {
+            try {
+              const buf = await downloadTelegramFile(POLL_TOKEN!, file_id);
+              const parsed = await parseDocument(buf, mime_type ?? "application/octet-stream", file_name ?? "file");
+              const combined = `${caption}\n\n---\n${parsed.text.slice(0, 6000)}`;
+              await updateQueuedMessage(row.id, {
+                text: combined,
+                status: "pending",
+                metadata: {
+                  kind: "document",
+                  fileName: file_name,
+                  mime: mime_type,
+                  pages: parsed.meta.pages,
+                  parser: parsed.meta.parser,
+                },
+              });
+              console.log(`[telegram/poller] async document analysis complete for ${row.id.slice(0, 8)}`);
+              drainQueue().catch(() => {});
+            } catch (err: any) {
+              console.error("[telegram/poller] async document error:", err?.message || err);
+              await updateQueuedMessage(row.id, {
+                status: "failed",
+                error: err?.message || String(err),
+              });
+              await sendReply(
+                POLL_TOKEN!,
+                chatId,
+                `Couldn't read that file, Boss: ${err?.message || err}`
+              ).catch(() => {});
+            }
+          })();
         } catch (err: any) {
-          console.error("[telegram/poller] document error:", err?.message || err);
-          await sendReply(
-            POLL_TOKEN,
-            chatId,
-            `Couldn't read that file, Boss: ${err?.message || err}`
-          ).catch(() => {});
+          console.error("[telegram/poller] document enqueue error:", err?.message || err);
         }
         continue;
       }
