@@ -166,6 +166,16 @@ async function buildChatHistory(
     // them.
     if (row.metadata?.offline === true) continue;
 
+    // Skip previous document extraction rows. Their text is a raw
+    // PDF-content prompt (starts with "[Document:"), not a
+    // conversational turn. Injecting them back into history causes
+    // the LLM to see the PDF text a second time and echo it.
+    if (
+      row.direction === "inbound" &&
+      typeof row.text === "string" &&
+      row.text.trimStart().startsWith("[Document:")
+    ) continue;
+
     if (row.direction === "inbound") {
       messages.push({ role: "user", content: row.text });
     } else if (row.direction === "outbound" && row.text) {
@@ -797,49 +807,43 @@ export async function dispatchFromQueueRow(
 ): Promise<DispatchResult> {
   // Media rows (photo, document, voice) carry pre-processed content in row.text:
   //   - photo:    the image description from the vision model
-  //   - document: the extracted/summarised text from the document parser
-  //   - voice:    the transcription from whisper/whisper-openai
+  //   - photo:    description already written by the vision model → send directly
+  //   - document: raw extracted text + user instruction → feed to LLM for summary
+  //   - voice:    transcription → feed to LLM so JARVIS responds to the request
   //
-  // Fix: we MUST send this content back to the user on Telegram, otherwise
-  // they receive nothing after uploading a file.
-  //
-  //   • Photos and documents → send the description/extract directly.
-  //     There is no need to send them through the LLM again; the vision
-  //     model already wrote a natural-language description.
-  //   • Voice → run through the LLM so JARVIS can *respond* to what was
-  //     said (e.g. if the user dictated "set a reminder for 6pm",
-  //     JARVIS should honour the request).
+  // Photos are the only kind that bypass the LLM because the vision model
+  // already produces a finished natural-language description.
+  // Documents and voice both need the LLM to produce a useful reply.
   const mediaKind = (row.metadata as { kind?: string } | null)?.kind;
 
-  if (mediaKind === "photo" || mediaKind === "document") {
-    // Send the vision/document description directly to the user.
+  if (mediaKind === "photo") {
+    // Send the vision description directly — no LLM round-trip needed.
     const description = row.text?.trim() || "_(No description available)_";
-    const label = mediaKind === "photo" ? "📸 *Image Analysis*" : "📄 *Document Summary*";
     try {
-      await deps.sendReply(`${label}\n\n${description}`);
+      await deps.sendReply(`📸 *Image Analysis*\n\n${description}`);
     } catch (sendErr: any) {
       console.error(
-        `[telegram/dispatchFromQueueRow] failed to send ${mediaKind} description:`,
+        `[telegram/dispatchFromQueueRow] failed to send photo description:`,
         sendErr?.message || sendErr
       );
     }
-    // Persist the outbound reply in the queue so the panel renders it.
     await enqueueTelegramMessage({
       chatId: row.chatId,
       direction: "outbound",
       text: description,
       status: "sent",
       replyToId: row.id,
-      metadata: { parseMode: "Markdown", mediaReply: mediaKind },
+      metadata: { parseMode: "Markdown", mediaReply: "photo" },
     });
     await markSent(row.id);
     return { ok: true, replyText: description };
   }
 
-  // Voice: pass the transcript through the LLM so JARVIS can respond to it.
-  // The row.text already holds the transcription text; we feed it as a user
-  // prompt so slash-commands, reminders, and general chat all work.
-  // (No early return here — fall through to the standard LLM path below.)
+  // Documents and voice both fall through to the LLM path below.
+  // For documents, row.text is a structured extraction prompt that begins
+  // with "[Document: ...]". We give them a direct, history-free LLM call
+  // so the model sees ONLY the extraction prompt — not 20 prior messages
+  // that could re-introduce the raw PDF content a second time.
 
   let lastProgressId: number | null = null;
   const editLastProgress = async (text: string) => {
@@ -857,6 +861,108 @@ export async function dispatchFromQueueRow(
     }
   };
 
+  // Document rows: use a dedicated, history-free summarization path.
+  // This prevents the extracted PDF text from appearing twice in the
+  // LLM context (once in history, once in the current message).
+  if (mediaKind === "document") {
+    await deps.sendTyping();
+    const typingTimer = setInterval(() => { deps.sendTyping().catch(() => {}); }, 4500);
+    await editLastProgress("📄 *Jarvis* — reading document…");
+    try {
+      const DOC_SYSTEM_PROMPT =
+        "You are a concise document summarizer. " +
+        "Your ONLY job is to answer the user's request about the document. " +
+        "STRICT RULES — violating any rule is a critical failure:\n" +
+        "  1. Do NOT copy, quote, or repeat any raw text from the document.\n" +
+        "  2. Do NOT output the document content section verbatim.\n" +
+        "  3. Keep your entire reply under 300 words.\n" +
+        "  4. Use plain prose or a short bullet list (max 6 bullets).\n" +
+        "  5. Do NOT include headings, code fences, or markdown tables.\n" +
+        "  6. Reply in the same language the user wrote in.\n" +
+        "Produce ONLY the summary/answer — nothing else.";
+
+      const API_BASE_DOC = process.env.INTERNAL_API_URL || "http://localhost:3000";
+      const chatRes = await fetch(`${API_BASE_DOC}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          // Only one message: the extraction prompt. No chat history.
+          messages: [{ role: "user", content: row.text }],
+          systemPrompt: DOC_SYSTEM_PROMPT,
+        }),
+      });
+
+      if (!chatRes.ok) {
+        throw new Error(`/api/chat returned ${chatRes.status}`);
+      }
+
+      let streamed = "";
+      const replyResult = await (async () => {
+        const raw = await chatRes.text();
+        try {
+          const parsed = JSON.parse(raw);
+          if (typeof parsed?.content === "string" && parsed.content.length > 0) {
+            streamed = parsed.content;
+            return { text: parsed.content, offline: parsed.offline === true };
+          }
+        } catch { /* fall through to SSE */ }
+        const lines = raw.split(/\r?\n/);
+        let full = "";
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
+          if (!line || !line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (!payload || payload === "[DONE]") continue;
+          try {
+            const p = JSON.parse(payload);
+            const delta = p?.choices?.[0]?.delta?.content ?? p?.choices?.[0]?.text ?? p?.content;
+            if (typeof delta === "string") full += delta;
+          } catch { /* skip */ }
+        }
+        streamed = full || raw.trim();
+        return { text: streamed, offline: false };
+      })();
+
+      if (!streamed && replyResult.text) streamed = replyResult.text;
+
+      // Strip reasoning leaks and cap length.
+      const sanitized = capReplyLength(stripReasoning(streamed));
+      const finalText = sanitized.trim() || "_(Jarvis had nothing to say — try rephrasing)_";
+
+      console.log(
+        `[telegram/dispatchFromQueueRow] document summary (${finalText.length} chars): ${finalText.slice(0, 120).replace(/\n/g, " ")}`
+      );
+
+      await editLastProgress(finalText).catch(() => {});
+
+      const outbound = await enqueueTelegramMessage({
+        chatId: row.chatId,
+        direction: "outbound",
+        text: finalText,
+        status: "sent",
+        replyToId: row.id,
+        metadata: {
+          parseMode: "Markdown",
+          mediaReply: "document",
+          offline: replyResult.offline || undefined,
+        },
+      });
+      await markSent(row.id);
+      clearInterval(typingTimer);
+      return { ok: true, outboundRowId: outbound.id, replyText: finalText };
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      console.error("[telegram/dispatchFromQueueRow] document dispatch error:", msg);
+      await editLastProgress(`⚠️ _Error reading document:_ ${msg.slice(0, 200)}`).catch(() => {});
+      await markFailed(row.id, msg);
+      clearInterval(typingTimer);
+      return { ok: false, error: msg };
+    }
+  }
+
+  // Voice: pass the transcript through the LLM so JARVIS can respond to it.
+  // The row.text already holds the transcription text; we feed it as a user
+  // prompt so slash-commands, reminders, and general chat all work.
   return handleInboundMessage(row.text, {
     chatId: row.chatId,
     inboundRowId: row.id,
