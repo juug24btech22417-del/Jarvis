@@ -1,56 +1,141 @@
 import { NextRequest, NextResponse } from "next/server";
 import { exec } from "child_process";
 import { promisify } from "util";
+import os from "os";
+import path from "path";
+import fs from "fs/promises";
 
 const execAsync = promisify(exec);
 
-// Download and use nircmd if available, otherwise use PowerShell
+const CORE_AUDIO_C_SHARP = `
+using System;
+using System.Runtime.InteropServices;
+
+public class Audio {
+    [DllImport("ole32.dll")]
+    private static extern int CoCreateInstance(ref Guid rclsid, IntPtr pUnkOuter, int dwClsContext, ref Guid riid, out IntPtr ppv);
+
+    private static readonly Guid CLSID_MMDeviceEnumerator = new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E");
+    private static readonly Guid IID_IMMDeviceEnumerator   = new Guid("A95664D2-9614-4F35-A746-DE8DB63617E6");
+    private static readonly Guid IID_IAudioEndpointVolume  = new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
+
+    [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IMMDeviceEnumerator {
+        int EnumAudioEndpoints(int dataFlow, int dwStateMask, out IntPtr ppDevices);
+        [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IntPtr ppEndpoint);
+    }
+
+    [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IMMDevice {
+        [PreserveSig] int Activate(ref Guid iid, uint clsCtx, IntPtr activationParams, [MarshalAs(UnmanagedType.IUnknown)] out object ppInterface);
+        [PreserveSig] int OpenPropertyStore(uint stgmAccess, out IntPtr ppProperties);
+        [PreserveSig] int GetId([MarshalAs(UnmanagedType.LPWStr)] out string ppstrId);
+        [PreserveSig] int GetState(out uint pdwState);
+    }
+
+    [ComImport, Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IAudioEndpointVolume {
+        int RegisterControlChangeNotify(IntPtr pNotify);
+        int UnregisterControlChangeNotify(IntPtr pNotify);
+        int GetChannelCount(out uint pnChannelCount);
+        int SetMasterVolumeLevel(float fLevelDB, ref Guid pguidEventContext);
+        int SetMasterVolumeLevelScalar(float fLevel, ref Guid pguidEventContext);
+        int GetMasterVolumeLevel(out float pfLevelDB);
+        int GetMasterVolumeLevelScalar(out float pfLevel);
+        int SetChannelVolumeLevel(uint nChannel, float fLevelDB, ref Guid pguidEventContext);
+        int SetChannelVolumeLevelScalar(uint nChannel, float fLevel, ref Guid pguidEventContext);
+        int GetChannelVolumeLevel(uint nChannel, out float pfLevelDB);
+        int GetChannelVolumeLevelScalar(uint nChannel, out float pfLevel);
+        int SetMute([MarshalAs(UnmanagedType.Bool)] bool bMute, ref Guid pguidEventContext);
+        int GetMute(out bool bMute);
+    }
+
+    private static IAudioEndpointVolume GetVolumeInterface() {
+        Guid clsid = CLSID_MMDeviceEnumerator;
+        Guid iid   = IID_IMMDeviceEnumerator;
+        IntPtr pEnum;
+        int hr = CoCreateInstance(ref clsid, IntPtr.Zero, 1, ref iid, out pEnum);
+        if (hr != 0) throw new System.Runtime.InteropServices.COMException("CoCreateInstance failed: 0x" + hr.ToString("X8"), hr);
+
+        var enumerator = (IMMDeviceEnumerator)Marshal.GetObjectForIUnknown(pEnum);
+        IntPtr pDevice;
+        hr = enumerator.GetDefaultAudioEndpoint(0, 1, out pDevice);
+        if (hr != 0) throw new System.Runtime.InteropServices.COMException("GetDefaultAudioEndpoint failed: 0x" + hr.ToString("X8"), hr);
+
+        var device = (IMMDevice)Marshal.GetObjectForIUnknown(pDevice);
+        Guid volIid = IID_IAudioEndpointVolume;
+        object volObj;
+        hr = device.Activate(ref volIid, 23, IntPtr.Zero, out volObj);
+        if (hr != 0) throw new System.Runtime.InteropServices.COMException("Activate IAudioEndpointVolume failed: 0x" + hr.ToString("X8"), hr);
+
+        return (IAudioEndpointVolume)volObj;
+    }
+
+    public static float GetVolume() {
+        var vol = GetVolumeInterface();
+        float level;
+        vol.GetMasterVolumeLevelScalar(out level);
+        return level * 100f;
+    }
+
+    public static void SetVolume(float percent) {
+        var vol = GetVolumeInterface();
+        Guid g = Guid.Empty;
+        float scalar = Math.Max(0f, Math.Min(1f, percent / 100f));
+        vol.SetMasterVolumeLevelScalar(scalar, ref g);
+    }
+
+    public static void SetMute(bool bMute) {
+        var vol = GetVolumeInterface();
+        Guid g = Guid.Empty;
+        vol.SetMute(bMute, ref g);
+    }
+
+    public static void ToggleMute() {
+        var vol = GetVolumeInterface();
+        bool muted;
+        vol.GetMute(out muted);
+        Guid g = Guid.Empty;
+        vol.SetMute(!muted, ref g);
+    }
+}
+`;
+
+// Helper to run PowerShell via temporary script files for safety & reliability
+async function runVolumeScript(scriptBody: string): Promise<string> {
+  const script = `$Source = @'\n${CORE_AUDIO_C_SHARP}\n'@\nAdd-Type -TypeDefinition $Source -ErrorAction Stop\n${scriptBody}`;
+  const tempScriptPath = path.join(os.tmpdir(), `jarvis_system_vol_${Date.now()}_${Math.random().toString(36).slice(2)}.ps1`);
+  
+  await fs.writeFile(tempScriptPath, script, "utf8");
+  try {
+    const { stdout } = await execAsync(`powershell -NonInteractive -File "${tempScriptPath}"`);
+    return stdout.trim();
+  } finally {
+    try {
+      await fs.unlink(tempScriptPath);
+    } catch {}
+  }
+}
+
 async function setWindowsVolume(level: number): Promise<boolean> {
   const volume = Math.max(0, Math.min(100, level));
-  const normalizedVolume = Math.round((volume / 100) * 65535);
-
   try {
-    // Try nircmd first (most reliable)
-    await execAsync(`nircmd setsysvolume ${normalizedVolume}`);
+    await runVolumeScript(`[Audio]::SetVolume(${volume})`);
     return true;
-  } catch {
-    // Fallback to PowerShell volume keys approach
-    try {
-      const psScript = `
-$wsh = New-Object -ComObject WScript.Shell;
-# First send many volume down keys to ensure we're at 0
-1..50 | ForEach-Object { $wsh.SendKeys([char]174); Start-Sleep -Milliseconds 5 }
-# Calculate number of volume up presses needed (each press is ~2%)
-$presses = [Math]::Ceiling(${volume} / 2)
-1..$presses | ForEach-Object { $wsh.SendKeys([char]175); Start-Sleep -Milliseconds 5 }
-`;
-      await execAsync(`powershell -ExecutionPolicy Bypass -Command "${psScript.replace(/"/g, '\\"').replace(/\n/g, '; ')}"`);
-      return true;
-    } catch (error) {
-      console.error("Volume control failed:", error);
-      return false;
-    }
+  } catch (error) {
+    console.error("Volume control failed:", error);
+    return false;
   }
 }
 
 async function toggleMute(mute: boolean): Promise<boolean> {
   try {
-    // Try nircmd first
-    await execAsync(`nircmd mutesysvolume ${mute ? 1 : 0}`);
+    const boolStr = mute ? "$true" : "$false";
+    await runVolumeScript(`[Audio]::SetMute(${boolStr})`);
     return true;
-  } catch {
-    // Fallback to mute key
-    try {
-      const psScript = `
-$wsh = New-Object -ComObject WScript.Shell;
-$wsh.SendKeys([char]173)
-`;
-      await execAsync(`powershell -ExecutionPolicy Bypass -Command "${psScript.replace(/"/g, '\\"').replace(/\n/g, '; ')}"`);
-      return true;
-    } catch (error) {
-      console.error("Mute control failed:", error);
-      return false;
-    }
+  } catch (error) {
+    console.error("Mute control failed:", error);
+    return false;
   }
 }
 
@@ -59,7 +144,7 @@ async function setSystemAlarm(time: string, label: string): Promise<boolean> {
   try {
     // Parse time (format: "5:00" or "14:30")
     const [hours, minutes] = time.split(":").map(Number);
-    if (!hours || isNaN(minutes)) {
+    if (hours === undefined || isNaN(minutes)) {
       throw new Error("Invalid time format. Use HH:MM");
     }
 
