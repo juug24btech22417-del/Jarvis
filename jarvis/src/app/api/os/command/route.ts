@@ -3,8 +3,98 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import os from "os";
 import path from "path";
+import fs from "fs/promises";
 
 const execAsync = promisify(exec);
+
+const CORE_AUDIO_C_SHARP = `
+using System;
+using System.Runtime.InteropServices;
+
+public class Audio {
+    [DllImport("ole32.dll")]
+    private static extern int CoCreateInstance(ref Guid rclsid, IntPtr pUnkOuter, int dwClsContext, ref Guid riid, out IntPtr ppv);
+
+    private static readonly Guid CLSID_MMDeviceEnumerator = new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E");
+    private static readonly Guid IID_IMMDeviceEnumerator   = new Guid("A95664D2-9614-4F35-A746-DE8DB63617E6");
+    private static readonly Guid IID_IAudioEndpointVolume  = new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
+
+    [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IMMDeviceEnumerator {
+        int EnumAudioEndpoints(int dataFlow, int dwStateMask, out IntPtr ppDevices);
+        [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IntPtr ppEndpoint);
+    }
+
+    [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IMMDevice {
+        [PreserveSig] int Activate(ref Guid iid, uint clsCtx, IntPtr activationParams, [MarshalAs(UnmanagedType.IUnknown)] out object ppInterface);
+        [PreserveSig] int OpenPropertyStore(uint stgmAccess, out IntPtr ppProperties);
+        [PreserveSig] int GetId([MarshalAs(UnmanagedType.LPWStr)] out string ppstrId);
+        [PreserveSig] int GetState(out uint pdwState);
+    }
+
+    [ComImport, Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IAudioEndpointVolume {
+        int RegisterControlChangeNotify(IntPtr pNotify);
+        int UnregisterControlChangeNotify(IntPtr pNotify);
+        int GetChannelCount(out uint pnChannelCount);
+        int SetMasterVolumeLevel(float fLevelDB, ref Guid pguidEventContext);
+        int SetMasterVolumeLevelScalar(float fLevel, ref Guid pguidEventContext);
+        int GetMasterVolumeLevel(out float pfLevelDB);
+        int GetMasterVolumeLevelScalar(out float pfLevel);
+        int SetChannelVolumeLevel(uint nChannel, float fLevelDB, ref Guid pguidEventContext);
+        int SetChannelVolumeLevelScalar(uint nChannel, float fLevel, ref Guid pguidEventContext);
+        int GetChannelVolumeLevel(uint nChannel, out float pfLevelDB);
+        int GetChannelVolumeLevelScalar(uint nChannel, out float pfLevel);
+        int SetMute([MarshalAs(UnmanagedType.Bool)] bool bMute, ref Guid pguidEventContext);
+        int GetMute(out bool bMute);
+    }
+
+    private static IAudioEndpointVolume GetVolumeInterface() {
+        Guid clsid = CLSID_MMDeviceEnumerator;
+        Guid iid   = IID_IMMDeviceEnumerator;
+        IntPtr pEnum;
+        int hr = CoCreateInstance(ref clsid, IntPtr.Zero, 1, ref iid, out pEnum);
+        if (hr != 0) throw new System.Runtime.InteropServices.COMException("CoCreateInstance failed: 0x" + hr.ToString("X8"), hr);
+
+        var enumerator = (IMMDeviceEnumerator)Marshal.GetObjectForIUnknown(pEnum);
+        IntPtr pDevice;
+        hr = enumerator.GetDefaultAudioEndpoint(0, 1, out pDevice);
+        if (hr != 0) throw new System.Runtime.InteropServices.COMException("GetDefaultAudioEndpoint failed: 0x" + hr.ToString("X8"), hr);
+
+        var device = (IMMDevice)Marshal.GetObjectForIUnknown(pDevice);
+        Guid volIid = IID_IAudioEndpointVolume;
+        object volObj;
+        hr = device.Activate(ref volIid, 23, IntPtr.Zero, out volObj);
+        if (hr != 0) throw new System.Runtime.InteropServices.COMException("Activate IAudioEndpointVolume failed: 0x" + hr.ToString("X8"), hr);
+
+        return (IAudioEndpointVolume)volObj;
+    }
+
+    public static float GetVolume() {
+        var vol = GetVolumeInterface();
+        float level;
+        vol.GetMasterVolumeLevelScalar(out level);
+        return level * 100f;
+    }
+
+    public static void SetVolume(float percent) {
+        var vol = GetVolumeInterface();
+        Guid g = Guid.Empty;
+        float scalar = Math.Max(0f, Math.Min(1f, percent / 100f));
+        vol.SetMasterVolumeLevelScalar(scalar, ref g);
+    }
+
+    public static void ToggleMute() {
+        var vol = GetVolumeInterface();
+        bool muted;
+        vol.GetMute(out muted);
+        Guid g = Guid.Empty;
+        vol.SetMute(!muted, ref g);
+    }
+}
+`;
+
 
 // ─── CORS helpers ──────────────────────────────────────────────────────────
 function cors(res: NextResponse) {
@@ -58,6 +148,7 @@ export async function POST(req: NextRequest) {
     let shellCmd: string | null = null;
     let description = "";
     let filePath: string | undefined;
+    let tempScriptPath: string | null = null;
 
     // 1. Open a specific URL in the default browser
     if (command === "open_url" && url) {
@@ -104,45 +195,49 @@ export async function POST(req: NextRequest) {
     //    waveOutGetVolume(IntPtr.Zero) reads the first device's
     //    volume (== the default waveOut endpoint = the master).
     else if (command === "volume_up") {
-      shellCmd =
-        `powershell -NonInteractive -Command "` +
-        `Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;` +
-        `public class W{[DllImport(\"winmm.dll\")]public static extern int waveOutGetVolume(IntPtr h, out uint v);` +
-        `[DllImport(\"winmm.dll\")]public static extern int waveOutSetVolume(IntPtr h, uint v);}';` +
-        `$cur = 0;$null = [W]::waveOutGetVolume([IntPtr]::Zero, [ref]$cur);` +
-        `$curPct = [int](($cur -band 0xFFFF) * 100 / 65535);` +
-        `$next = [Math]::Min(100, $curPct + 5);` +
-        `$raw = [uint32]([Math]::Round(65535 * $next / 100));` +
-        `$both = [uint32](($raw -shl 16) -bor $raw);` +
-        `[void][W]::waveOutSetVolume([IntPtr]::Zero, $both);` +
-        `Write-Output ('before:' + $curPct + ' after:' + $next)` +
-        `"`;
+      const script = `
+$Source = @'
+${CORE_AUDIO_C_SHARP}
+'@
+Add-Type -TypeDefinition $Source -ErrorAction Stop
+$cur = [Audio]::GetVolume()
+$next = [Math]::Min(100, $cur + 5)
+[Audio]::SetVolume($next)
+Write-Output ("before:" + [int]$cur + " after:" + [int]$next)
+`;
+      tempScriptPath = path.join(os.tmpdir(), `jarvis_vol_up_${Date.now()}_${Math.random().toString(36).slice(2)}.ps1`);
+      await fs.writeFile(tempScriptPath, script, "utf8");
+      shellCmd = `powershell -NonInteractive -File "${tempScriptPath}"`;
       description = "Volume up (+5)";
     }
     else if (command === "volume_down") {
-      shellCmd =
-        `powershell -NonInteractive -Command "` +
-        `Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;` +
-        `public class W{[DllImport(\"winmm.dll\")]public static extern int waveOutGetVolume(IntPtr h, out uint v);` +
-        `[DllImport(\"winmm.dll\")]public static extern int waveOutSetVolume(IntPtr h, uint v);}';` +
-        `$cur = 0;$null = [W]::waveOutGetVolume([IntPtr]::Zero, [ref]$cur);` +
-        `$curPct = [int](($cur -band 0xFFFF) * 100 / 65535);` +
-        `$next = [Math]::Max(0, $curPct - 5);` +
-        `$raw = [uint32]([Math]::Round(65535 * $next / 100));` +
-        `$both = [uint32](($raw -shl 16) -bor $raw);` +
-        `[void][W]::waveOutSetVolume([IntPtr]::Zero, $both);` +
-        `Write-Output ('before:' + $curPct + ' after:' + $next)` +
-        `"`;
+      const script = `
+$Source = @'
+${CORE_AUDIO_C_SHARP}
+'@
+Add-Type -TypeDefinition $Source -ErrorAction Stop
+$cur = [Audio]::GetVolume()
+$next = [Math]::Max(0, $cur - 5)
+[Audio]::SetVolume($next)
+Write-Output ("before:" + [int]$cur + " after:" + [int]$next)
+`;
+      tempScriptPath = path.join(os.tmpdir(), `jarvis_vol_down_${Date.now()}_${Math.random().toString(36).slice(2)}.ps1`);
+      await fs.writeFile(tempScriptPath, script, "utf8");
+      shellCmd = `powershell -NonInteractive -File "${tempScriptPath}"`;
       description = "Volume down (-5)";
     }
     else if (command === "mute") {
-      shellCmd =
-        `powershell -NonInteractive -Command "` +
-        `Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;` +
-        `public class W{[DllImport(\"winmm.dll\")]public static extern int waveOutSetVolume(IntPtr h, uint v);}';` +
-        `[void][W]::waveOutSetVolume([IntPtr]::Zero, [uint32]0);` +
-        `Write-Output 'muted'` +
-        `"`;
+      const script = `
+$Source = @'
+${CORE_AUDIO_C_SHARP}
+'@
+Add-Type -TypeDefinition $Source -ErrorAction Stop
+[Audio]::ToggleMute()
+Write-Output "muted"
+`;
+      tempScriptPath = path.join(os.tmpdir(), `jarvis_vol_mute_${Date.now()}_${Math.random().toString(36).slice(2)}.ps1`);
+      await fs.writeFile(tempScriptPath, script, "utf8");
+      shellCmd = `powershell -NonInteractive -File "${tempScriptPath}"`;
       description = "Muting system volume";
     }
     else if (command === "screenshot") {
@@ -203,26 +298,20 @@ export async function POST(req: NextRequest) {
       description = "Beep";
     }
 
-    // 9. Volume set to N (0-100) — sets the system master volume
-    //    via winmm.dll!waveOutSetVolume. See the block above (volume_up
-    //    / volume_down / mute) for why this is the only API that
-    //    actually works on this machine — SAPI.SpVoice.Volume is
-    //    per-instance only and IMMDeviceEnumerator fails with
-    //    REGDB_E_CLASSNOTREG.
     else if (command === "volume_set" && typeof body.level === "number") {
       const target = Math.max(0, Math.min(100, body.level));
-      shellCmd =
-        `powershell -NonInteractive -Command "` +
-        `Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;` +
-        `public class W{[DllImport(\"winmm.dll\")]public static extern int waveOutGetVolume(IntPtr h, out uint v);` +
-        `[DllImport(\"winmm.dll\")]public static extern int waveOutSetVolume(IntPtr h, uint v);}';` +
-        `$cur = 0;$null = [W]::waveOutGetVolume([IntPtr]::Zero, [ref]$cur);` +
-        `$curPct = [int](($cur -band 0xFFFF) * 100 / 65535);` +
-        `$raw = [uint32]([Math]::Round(65535 * ${target} / 100));` +
-        `$both = [uint32](($raw -shl 16) -bor $raw);` +
-        `[void][W]::waveOutSetVolume([IntPtr]::Zero, $both);` +
-        `Write-Output ('before:' + $curPct + ' after:${target}')` +
-        `"`;
+      const script = `
+$Source = @'
+${CORE_AUDIO_C_SHARP}
+'@
+Add-Type -TypeDefinition $Source -ErrorAction Stop
+$cur = [Audio]::GetVolume()
+[Audio]::SetVolume(${target})
+Write-Output ("before:" + [int]$cur + " after:${target}")
+`;
+      tempScriptPath = path.join(os.tmpdir(), `jarvis_vol_set_${Date.now()}_${Math.random().toString(36).slice(2)}.ps1`);
+      await fs.writeFile(tempScriptPath, script, "utf8");
+      shellCmd = `powershell -NonInteractive -File "${tempScriptPath}"`;
       description = `Setting volume to ${target}%`;
     }
 
@@ -303,5 +392,11 @@ export async function POST(req: NextRequest) {
         { status: 500 }
       )
     );
+  } finally {
+    if (tempScriptPath) {
+      try {
+        await fs.unlink(tempScriptPath);
+      } catch {}
+    }
   }
 }
