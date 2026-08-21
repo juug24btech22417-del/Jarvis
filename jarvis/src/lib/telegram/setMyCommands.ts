@@ -31,6 +31,7 @@ export const BOT_COMMANDS: Array<{ command: string; description: string }> = [
   { command: "restart", description: "Restart (with confirm)" },
   { command: "cancel_shutdown", description: "Abort a pending shutdown" },
   { command: "vol", description: "Volume: /vol 30 | up | down | mute" },
+  { command: "brightness", description: "Brightness: /brightness 80 | up | down" },
   { command: "open", description: "Open an app or URL" },
   { command: "kill", description: "Force-kill an app" },
   { command: "search", description: "Web search the default browser" },

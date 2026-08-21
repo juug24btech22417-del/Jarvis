@@ -24,6 +24,9 @@ export const OS_ALLOWLIST = new Set([
   "volume_down",
   "mute",
   "volume_set",
+  "brightness_up",
+  "brightness_down",
+  "brightness_set",
   "screenshot",
   "lock",
   "sleep",
@@ -97,25 +100,47 @@ export function parseOsCommand(text: string): ParsedOsCommand | null {
     return { command: "play_sound", destructive: false, raw: t };
   }
 
-  // volume up/down/mute
-  if (/^(volume\s+up|vol\s+up|louder)$/i.test(lower)) {
+  // volume up/down/mute — expanded NL patterns
+  if (/^(volume\s+up|vol\s+up|louder|increase\s+(the\s+)?volume|raise\s+(the\s+)?volume|turn\s+up\s+(the\s+)?volume|boost\s+(the\s+)?volume|volume\s+badhao|volume\s+tez\s+karo)$/i.test(lower)) {
     return { command: "volume_up", destructive: false, raw: t };
   }
-  if (/^(volume\s+down|vol\s+down|quieter|softer)$/i.test(lower)) {
+  if (/^(volume\s+down|vol\s+down|quieter|softer|decrease\s+(the\s+)?volume|lower\s+(the\s+)?volume|turn\s+down\s+(the\s+)?volume|reduce\s+(the\s+)?volume|volume\s+kam\s+karo)$/i.test(lower)) {
     return { command: "volume_down", destructive: false, raw: t };
   }
-  if (/^(mute|unmute|toggle\s+mute)$/i.test(lower)) {
+  if (/^(mute|unmute|toggle\s+mute|silence)$/i.test(lower)) {
     return { command: "mute", destructive: false, raw: t };
   }
 
   // set volume to N / volume N / vol N
   const setVol = lower.match(
-    /^(set\s+)?(volume|vol)\s+to\s+(\d{1,3})\s*(%|percent)?$/
+    /^(?:set\s+)?(?:volume|vol)\s+(?:to\s+)?(\d{1,3})\s*(?:%|percent)?$/
   );
   if (setVol) {
-    const level = Math.max(0, Math.min(100, parseInt(setVol[3], 10)));
+    const level = Math.max(0, Math.min(100, parseInt(setVol[1], 10)));
     return {
       command: "volume_set",
+      params: { level },
+      destructive: false,
+      raw: t,
+    };
+  }
+
+  // ─── Brightness controls ─────────────────────────────────────────────────
+  if (/^(brightness\s+up|increase\s+(the\s+)?brightness|raise\s+(the\s+)?brightness|turn\s+up\s+(the\s+)?brightness|screen\s+brighter|brighter|brighten\s+(the\s+|my\s+)?(screen|display)?)$/i.test(lower)) {
+    return { command: "brightness_up", destructive: false, raw: t };
+  }
+  if (/^(brightness\s+down|decrease\s+(the\s+)?brightness|lower\s+(the\s+)?brightness|turn\s+down\s+(the\s+)?brightness|dim\s+(the\s+|my\s+)?(screen|display)?|screen\s+dimmer|dimmer)$/i.test(lower)) {
+    return { command: "brightness_down", destructive: false, raw: t };
+  }
+
+  // set brightness to N%
+  const setBright = lower.match(
+    /^(?:set\s+)?(?:brightness|bright|screen\s+brightness)\s+(?:to\s+)?(\d{1,3})\s*(?:%|percent)?$/
+  );
+  if (setBright) {
+    const level = Math.max(0, Math.min(100, parseInt(setBright[1], 10)));
+    return {
+      command: "brightness_set",
       params: { level },
       destructive: false,
       raw: t,

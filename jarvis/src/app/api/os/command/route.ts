@@ -52,6 +52,7 @@ export async function POST(req: NextRequest) {
       url?: string;
       query?: string;
       level?: number;
+      percent?: number;
     };
 
     let shellCmd: string | null = null;
@@ -85,19 +86,64 @@ export async function POST(req: NextRequest) {
       description = `Searching the web for: ${query}`;
     }
 
-    // 4. System controls
+    // 4. System controls — volume via winmm.dll!waveOutSetVolume.
+    //    This is the only API that ACTUALLY changes the OS master
+    //    volume (verified end-to-end: read 100%, write 50%, read
+    //    back 50%; persists across calls; reflects in the Windows
+    //    volume slider).
+    //
+    //    SAPI.SpVoice.Volume looked tempting but only changes SAPI's
+    //    own TTS volume (reverts when the COM object is released).
+    //    IAudioEndpointVolume / IMMDeviceEnumerator COM binding
+    //    fails with REGDB_E_CLASSNOTREG on this machine's audio
+    //    stack. winmm.dll ships with every Windows install and
+    //    works without registration.
+    //
+    //    waveOutSetVolume takes a uint32 with bits 0-15 = left
+    //    channel, 16-31 = right channel, in 0-65535 scale.
+    //    waveOutGetVolume(IntPtr.Zero) reads the first device's
+    //    volume (== the default waveOut endpoint = the master).
     else if (command === "volume_up") {
-      // Use nircmd if available, else PowerShell
-      shellCmd = `powershell -Command "(New-Object -ComObject WScript.Shell).SendKeys([char]175)"`;
-      description = "Volume up";
+      shellCmd =
+        `powershell -NonInteractive -Command "` +
+        `Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;` +
+        `public class W{[DllImport(\"winmm.dll\")]public static extern int waveOutGetVolume(IntPtr h, out uint v);` +
+        `[DllImport(\"winmm.dll\")]public static extern int waveOutSetVolume(IntPtr h, uint v);}';` +
+        `$cur = 0;$null = [W]::waveOutGetVolume([IntPtr]::Zero, [ref]$cur);` +
+        `$curPct = [int](($cur -band 0xFFFF) * 100 / 65535);` +
+        `$next = [Math]::Min(100, $curPct + 5);` +
+        `$raw = [uint32]([Math]::Round(65535 * $next / 100));` +
+        `$both = [uint32](($raw -shl 16) -bor $raw);` +
+        `[void][W]::waveOutSetVolume([IntPtr]::Zero, $both);` +
+        `Write-Output ('before:' + $curPct + ' after:' + $next)` +
+        `"`;
+      description = "Volume up (+5)";
     }
     else if (command === "volume_down") {
-      shellCmd = `powershell -Command "(New-Object -ComObject WScript.Shell).SendKeys([char]174)"`;
-      description = "Volume down";
+      shellCmd =
+        `powershell -NonInteractive -Command "` +
+        `Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;` +
+        `public class W{[DllImport(\"winmm.dll\")]public static extern int waveOutGetVolume(IntPtr h, out uint v);` +
+        `[DllImport(\"winmm.dll\")]public static extern int waveOutSetVolume(IntPtr h, uint v);}';` +
+        `$cur = 0;$null = [W]::waveOutGetVolume([IntPtr]::Zero, [ref]$cur);` +
+        `$curPct = [int](($cur -band 0xFFFF) * 100 / 65535);` +
+        `$next = [Math]::Max(0, $curPct - 5);` +
+        `$raw = [uint32]([Math]::Round(65535 * $next / 100));` +
+        `$both = [uint32](($raw -shl 16) -bor $raw);` +
+        `[void][W]::waveOutSetVolume([IntPtr]::Zero, $both);` +
+        `Write-Output ('before:' + $curPct + ' after:' + $next)` +
+        `"`;
+      description = "Volume down (-5)";
     }
     else if (command === "mute") {
-      shellCmd = `powershell -Command "(New-Object -ComObject WScript.Shell).SendKeys([char]173)"`;
-      description = "Toggle mute";
+      shellCmd =
+        `powershell -NonInteractive -Command "` +
+        `Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;` +
+        `public class W{[DllImport(\"winmm.dll\")]public static extern int waveOutSetVolume(IntPtr h, uint v);}';` +
+        `[void][W]::waveOutSetVolume([IntPtr]::Zero, [uint32]0);` +
+        `Write-Output 'muted'` +
+        `"`;
+      description = "Muting system volume";
     }
     else if (command === "screenshot") {
       filePath = path.join(os.tmpdir(), `jarvis_ss_${Date.now()}.png`);
@@ -157,13 +203,71 @@ export async function POST(req: NextRequest) {
       description = "Beep";
     }
 
-    // 9. Volume set to N (0-100) — reads current level then presses
-    //    volume_down N times. Approximate; OS bridge absolute set is
-    //    a follow-up.
+    // 9. Volume set to N (0-100) — sets the system master volume
+    //    via winmm.dll!waveOutSetVolume. See the block above (volume_up
+    //    / volume_down / mute) for why this is the only API that
+    //    actually works on this machine — SAPI.SpVoice.Volume is
+    //    per-instance only and IMMDeviceEnumerator fails with
+    //    REGDB_E_CLASSNOTREG.
     else if (command === "volume_set" && typeof body.level === "number") {
       const target = Math.max(0, Math.min(100, body.level));
-      shellCmd = `powershell -Command "$target=${target}; Add-Type -AssemblyName System.Windows.Forms; $wm = New-Object System.Windows.Forms.Form; $api = (Get-WmiObject -Namespace root\\cimv2 -ClassName Win32_Volume | Select-Object -First 1).Name; $current = [math]::Round(([Audio]::Volume * 100)); $delta = [math]::Max(0, $current - $target); for ($i = 0; $i -lt $delta; $i++) { (New-Object -ComObject WScript.Shell).SendKeys([char]174) }"`;
+      shellCmd =
+        `powershell -NonInteractive -Command "` +
+        `Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;` +
+        `public class W{[DllImport(\"winmm.dll\")]public static extern int waveOutGetVolume(IntPtr h, out uint v);` +
+        `[DllImport(\"winmm.dll\")]public static extern int waveOutSetVolume(IntPtr h, uint v);}';` +
+        `$cur = 0;$null = [W]::waveOutGetVolume([IntPtr]::Zero, [ref]$cur);` +
+        `$curPct = [int](($cur -band 0xFFFF) * 100 / 65535);` +
+        `$raw = [uint32]([Math]::Round(65535 * ${target} / 100));` +
+        `$both = [uint32](($raw -shl 16) -bor $raw);` +
+        `[void][W]::waveOutSetVolume([IntPtr]::Zero, $both);` +
+        `Write-Output ('before:' + $curPct + ' after:${target}')` +
+        `"`;
       description = `Setting volume to ${target}%`;
+    }
+
+    // 10. Brightness up (+10) via Windows WMI (laptop internal display only).
+    //     Uses Get-WmiObject WmiMonitorBrightness to read current level,
+    //     then WmiMonitorBrightnessMethods.WmiSetBrightness to apply the new value.
+    //     Works on all modern Windows laptops; desktop monitors with no WMI
+    //     driver will return a non-fatal error that we swallow gracefully.
+    else if (command === "brightness_up") {
+      shellCmd =
+        `powershell -NonInteractive -Command "` +
+        `$cur = (Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightness -ErrorAction SilentlyContinue).CurrentBrightness;` +
+        `if ($cur -eq $null) { Write-Output 'wmi_not_supported'; exit 0 };` +
+        `$next = [Math]::Min(100, [int]$cur + 10);` +
+        `(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1,$next);` +
+        `Write-Output ('before:' + $cur + ' after:' + $next)` +
+        `"`;
+      description = "Brightness up (+10)";
+    }
+
+    // 11. Brightness down (-10)
+    else if (command === "brightness_down") {
+      shellCmd =
+        `powershell -NonInteractive -Command "` +
+        `$cur = (Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightness -ErrorAction SilentlyContinue).CurrentBrightness;` +
+        `if ($cur -eq $null) { Write-Output 'wmi_not_supported'; exit 0 };` +
+        `$next = [Math]::Max(0, [int]$cur - 10);` +
+        `(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1,$next);` +
+        `Write-Output ('before:' + $cur + ' after:' + $next)` +
+        `"`;
+      description = "Brightness down (-10)";
+    }
+
+    // 12. Brightness set to N (0-100)
+    else if (command === "brightness_set") {
+      const raw = body.level ?? body.percent;
+      const target = Math.max(0, Math.min(100, Number(raw ?? 50)));
+      shellCmd =
+        `powershell -NonInteractive -Command "` +
+        `$cur = (Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightness -ErrorAction SilentlyContinue).CurrentBrightness;` +
+        `if ($cur -eq $null) { Write-Output 'wmi_not_supported'; exit 0 };` +
+        `(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1,${target});` +
+        `Write-Output ('before:' + $cur + ' after:${target}')` +
+        `"`;
+      description = `Setting brightness to ${target}%`;
     }
 
     if (!shellCmd) {

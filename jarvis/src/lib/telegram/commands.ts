@@ -255,6 +255,11 @@ async function routeSlash(chatId: number, text: string): Promise<ReplyPlan> {
     case "volume":
       return handleVolume(args);
 
+    case "brightness":
+    case "bright":
+    case "dim":
+      return handleBrightness(args);
+
     case "open":
     case "launch":
       return handleOpen(args);
@@ -301,6 +306,24 @@ function handleVolume(args: string): ReplyPlan {
     };
   }
   return { kind: "reply", text: "Usage: /vol <0-100 | up | down | mute>" };
+}
+
+function handleBrightness(args: string): ReplyPlan {
+  const lower = args.toLowerCase().trim();
+  if (!lower)
+    return { kind: "reply", text: "Usage: /brightness <0-100 | up | down>" };
+  if (lower === "up" || lower === "+")
+    return { kind: "execute_os", payload: { command: "brightness_up", params: {} } };
+  if (lower === "down" || lower === "-")
+    return { kind: "execute_os", payload: { command: "brightness_down", params: {} } };
+  const n = parseInt(lower, 10);
+  if (Number.isFinite(n) && n >= 0 && n <= 100) {
+    return {
+      kind: "execute_os",
+      payload: { command: "brightness_set", params: { level: n } },
+    };
+  }
+  return { kind: "reply", text: "Usage: /brightness <0-100 | up | down>" };
 }
 
 function handleOpen(args: string): ReplyPlan {
@@ -524,7 +547,8 @@ const HELP_TEXT =
   `*Laptop control*\n` +
   `/lock · /sleep · /screenshot\n` +
   `/shutdown · /restart · /cancel_shutdown\n` +
-  `/vol <0-100|up|down|mute>\n` +
+  `/vol <0-100|up|down|mute> — or say "increase volume"\n` +
+  `/brightness <0-100|up|down> — or say "dim the screen"\n` +
   `/open <app|url> · /kill <app> · /search <q>\n` +
   `/wake — wake screen + chime\n\n` +
   `*Tasks*\n` +
