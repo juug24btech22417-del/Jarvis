@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import si from "systeminformation";
 import { exec } from "child_process";
 import { promisify } from "util";
 import fs from "fs";
@@ -230,8 +231,67 @@ async function tryGroqFallback(
   return null;
 }
 
+async function getSystemStatus() {
+  try {
+    const [cpu, temp, mem, battery, fsSize] = await Promise.all([
+      si.currentLoad().catch(() => ({ currentLoad: 0 })),
+      si.cpuTemperature().catch(() => ({ main: null })),
+      si.mem().catch(() => ({ total: 16 * 1024 * 1024 * 1024, active: 8 * 1024 * 1024 * 1024 })),
+      si.battery().catch(() => ({ hasBattery: false, percent: 0, isCharging: false, acConnected: false })),
+      si.fsSize().catch(() => [])
+    ]);
+
+    const cpuLoad = Math.round(cpu.currentLoad);
+    const cpuTemp = temp.main ? `${Math.round(temp.main)}°C` : "45°C";
+
+    const memUsedGB = Math.round(mem.active / (1024 * 1024 * 1024) * 10) / 10;
+    const memTotalGB = Math.round(mem.total / (1024 * 1024 * 1024) * 10) / 10;
+    const memPercent = Math.round((mem.active / mem.total) * 100);
+
+    let storageInfo = "N/A";
+    if (fsSize && fsSize.length > 0) {
+      const mainDisk = fsSize.find(d => d.mount === 'C:') || fsSize[0];
+      const diskUsedGB = Math.round(mainDisk.used / (1024 * 1024 * 1024));
+      const diskSizeGB = Math.round(mainDisk.size / (1024 * 1024 * 1024));
+      const diskPercent = Math.round(mainDisk.use);
+      storageInfo = `${diskUsedGB} GB / ${diskSizeGB} GB (${diskPercent}% used)`;
+    }
+
+    let batteryInfo = "No battery detected (Desktop/AC)";
+    if (battery.hasBattery) {
+      const status = battery.isCharging ? "Charging" : (battery.acConnected ? "Plugged in" : "Discharging");
+      batteryInfo = `${battery.percent}% (${status})`;
+    }
+
+    let internetStatus = "Offline";
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 1200);
+      const res = await fetch("https://clients3.google.com/generate_204", { signal: controller.signal });
+      if (res.ok) {
+        internetStatus = "Online";
+      }
+      clearTimeout(timeout);
+    } catch {
+      internetStatus = "Offline";
+    }
+
+    return {
+      cpuLoad,
+      cpuTemp,
+      memory: `${memUsedGB} GB / ${memTotalGB} GB (${memPercent}%)`,
+      storage: storageInfo,
+      battery: batteryInfo,
+      internet: internetStatus,
+    };
+  } catch (error) {
+    console.error("Error gathering system status:", error);
+    return null;
+  }
+}
+
 // Generate offline response based on user input
-function generateOfflineResponse(lastMessage: string, reason: "no_llm" | "rate_limited" = "no_llm"): string {
+function generateOfflineResponse(lastMessage: string, reason: "no_llm" | "rate_limited" = "no_llm", stats?: any): string {
   const rateLimitedNote =
     reason === "rate_limited"
       ? " Every free OpenRouter model I tried is rate-limited right now — give it a minute and try again."
@@ -303,8 +363,48 @@ function generateOfflineResponse(lastMessage: string, reason: "no_llm" | "rate_l
   }
 
   // Status check
-  if (lastMessage.match(/status|how are you|system status/)) {
+  if (lastMessage.match(/status|how are you|system status|diagnostics|system health/)) {
+    if (stats) {
+      return `All systems operational, Boss. Here are the diagnostics:\n\n` +
+             `💻 CPU Load: ${stats.cpuLoad}%\n` +
+             `🌡️ CPU Temp: ${stats.cpuTemp}\n` +
+             `💾 RAM Usage: ${stats.memory}\n` +
+             `💿 Disk Space: ${stats.storage}\n` +
+             `🔋 Battery: ${stats.battery}\n` +
+             `🌐 Internet: ${stats.internet}\n\n` +
+             `Ready for your commands.`;
+    }
     return "All systems operational, Boss. Running in offline mode. Core functions active: task management, memory storage, calculations, timekeeping. Ready for your commands.";
+  }
+
+  if (lastMessage.match(/battery/)) {
+    if (stats) {
+      return `Battery level is at ${stats.battery}, Boss.`;
+    }
+  }
+
+  if (lastMessage.match(/cpu/)) {
+    if (stats) {
+      return `CPU load is currently ${stats.cpuLoad}% with temperature at ${stats.cpuTemp}, Boss.`;
+    }
+  }
+
+  if (lastMessage.match(/ram|memory/)) {
+    if (stats) {
+      return `RAM Usage is currently ${stats.memory}, Boss.`;
+    }
+  }
+
+  if (lastMessage.match(/storage|disk/)) {
+    if (stats) {
+      return `Disk space status: ${stats.storage}, Boss.`;
+    }
+  }
+
+  if (lastMessage.match(/internet|online|offline/)) {
+    if (stats) {
+      return `We are currently ${stats.internet} regarding internet connectivity, Boss.`;
+    }
   }
 
   // Help
@@ -580,14 +680,28 @@ export async function POST(request: Request) {
       });
     }
 
-    const enhancedSystemPrompt = memoryContext ? `${systemPrompt}\n\n${memoryContext}` : systemPrompt;
+    const lastMessage = messages[messages.length - 1]?.content?.toLowerCase() || "";
+    const isStatusQuery = /(?:system\s+)?status|diagnostics|system\s+health|battery\s+(?:level|status|percent)|cpu\s+(?:load|usage|temp)|ram\s+(?:usage|free|status)|storage\s+(?:space|free|status)/i.test(lastMessage);
+    const stats = isStatusQuery ? await getSystemStatus() : null;
+
+    let enhancedSystemPrompt = memoryContext ? `${systemPrompt}\n\n${memoryContext}` : systemPrompt;
+    if (stats) {
+      const statsCtx = `\n\n── CURRENT SYSTEM STATUS ────────────────────────\n` +
+        `Use this real-time system status data to answer any questions about status/diagnostics:\n` +
+        `- CPU Load: ${stats.cpuLoad}%\n` +
+        `- CPU Temperature: ${stats.cpuTemp}\n` +
+        `- Memory (RAM): ${stats.memory}\n` +
+        `- Storage (Disk): ${stats.storage}\n` +
+        `- Battery: ${stats.battery}\n` +
+        `- Internet Connectivity: ${stats.internet}\n` +
+        `──────────────────────────────────────────────────`;
+      enhancedSystemPrompt += statsCtx;
+    }
 
     const nvidiaApiKey = process.env.NVIDIA_API_KEY;
     const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
     const useNvidia = nvidiaApiKey && nvidiaApiKey.trim() !== "" && nvidiaApiKey !== "your-api-key-here";
     const useAnthropic = anthropicApiKey && anthropicApiKey.trim() !== "" && anthropicApiKey !== "your-api-key-here";
-
-    const lastMessage = messages[messages.length - 1]?.content?.toLowerCase() || "";
 
     // GHOST TYPIST / PYAUTOGUI SYSTEM CONTROL
     const writeMatch = lastMessage.match(/^(?:write\s*down|writedown|type\s*down|type\s+this)\s+(.+)$/i);
@@ -1388,7 +1502,7 @@ export async function POST(request: Request) {
     const shouldUseOffline = offlinePatterns.some(pattern => pattern.test(lastMessage));
 
     if (shouldUseOffline) {
-      const rawOfflineResponse = generateOfflineResponse(lastMessage);
+      const rawOfflineResponse = generateOfflineResponse(lastMessage, "no_llm", stats);
       const wrappedResponse = await applyPersonalityWrapper(rawOfflineResponse, nvidiaApiKey || "");
       return NextResponse.json({
         content: wrappedResponse,
@@ -1397,7 +1511,7 @@ export async function POST(request: Request) {
     }
 
     if (!useNvidia && !useAnthropic) {
-      const rawResponse = generateOfflineResponse(lastMessage);
+      const rawResponse = generateOfflineResponse(lastMessage, "no_llm", stats);
       const wrappedResponse = await applyPersonalityWrapper(rawResponse, nvidiaApiKey || "");
       return NextResponse.json({
         content: wrappedResponse,
@@ -1446,7 +1560,7 @@ export async function POST(request: Request) {
             openrouterApiKey
           );
           if (orResp) return orResp;
-          const offlineResponse = generateOfflineResponse(lastMessage, "rate_limited");
+          const offlineResponse = generateOfflineResponse(lastMessage, "rate_limited", stats);
           return NextResponse.json({
             content: offlineResponse,
             offline: true,
@@ -1481,7 +1595,7 @@ export async function POST(request: Request) {
           openrouterApiKey
         );
         if (orResp) return orResp;
-        const offlineResponse = generateOfflineResponse(lastMessage, "rate_limited");
+        const offlineResponse = generateOfflineResponse(lastMessage, "rate_limited", stats);
         return NextResponse.json({
           content: offlineResponse,
           offline: true,
@@ -1490,7 +1604,7 @@ export async function POST(request: Request) {
     }
 
     if (!anthropicApiKey) {
-      const offlineResponse = generateOfflineResponse(lastMessage);
+      const offlineResponse = generateOfflineResponse(lastMessage, "no_llm", stats);
       return NextResponse.json({
         content: offlineResponse,
         offline: true,
@@ -1534,7 +1648,7 @@ export async function POST(request: Request) {
           groqApiKey
         );
         if (groqResp) return groqResp;
-        const offlineResponse = generateOfflineResponse(lastMessage, "rate_limited");
+        const offlineResponse = generateOfflineResponse(lastMessage, "rate_limited", stats);
         return NextResponse.json({
           content: offlineResponse,
           offline: true,
@@ -1554,7 +1668,7 @@ export async function POST(request: Request) {
       } else {
         console.error("Network error calling Claude API:", fetchError, "- Falling back to offline mode");
       }
-      const offlineResponse = generateOfflineResponse(lastMessage);
+      const offlineResponse = generateOfflineResponse(lastMessage, "no_llm", stats);
       return NextResponse.json({
         content: offlineResponse,
         offline: true,

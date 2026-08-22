@@ -545,7 +545,7 @@ const HELP_TEXT =
   `/reminders — list pending\n` +
   `/cancel <id> — cancel a reminder\n\n` +
   `*Laptop control*\n` +
-  `/lock · /sleep · /screenshot\n` +
+  `/status · /lock · /sleep · /screenshot\n` +
   `/shutdown · /restart · /cancel_shutdown\n` +
   `/vol <0-100|up|down|mute> — or say "increase volume"\n` +
   `/brightness <0-100|up|down> — or say "dim the screen"\n` +
