@@ -134,6 +134,9 @@ const APP_MAP: Record<string, string> = {
 
 // ─── Route handler ─────────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
+  // Declared outside try so the finally block can access them for cleanup.
+  let tempScriptPath: string | null = null;
+  let filePath: string | undefined;
   try {
     const body = await req.json().catch(() => ({}));
     const { command, app, url, query, level } = body as {
@@ -147,8 +150,6 @@ export async function POST(req: NextRequest) {
 
     let shellCmd: string | null = null;
     let description = "";
-    let filePath: string | undefined;
-    let tempScriptPath: string | null = null;
 
     // 1. Open a specific URL in the default browser
     if (command === "open_url" && url) {

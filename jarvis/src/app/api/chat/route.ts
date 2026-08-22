@@ -63,9 +63,9 @@ async function applyPersonalityWrapper(factualResponse: string, apiKey: string):
 }
 
 // Try OpenRouter as a fallback when NVIDIA is rate-limited / slow / broken.
-// Tries several free models in sequence — each has its own rate-limit pool
-// so a 429 on one doesn't necessarily mean the others are blocked.
-// Returns null if every model is rate-limited or the API key is missing.
+// Races all free models in PARALLEL — first successful response wins.
+// This avoids the old sequential approach where a slow model blocked 10s
+// before we could try the next one.
 //
 // Last refreshed Aug 2026: several free-tier slugs from earlier in the
 // year (meta/llama-3.1-8b-instruct, gemma, mistral-small, older nemotron
@@ -80,6 +80,40 @@ const OPENROUTER_FALLBACK_MODELS = [
   "inclusionai/ling-3.0-tiny:free",
 ];
 
+async function tryOneOpenRouterModel(
+  model: string,
+  orMessages: Array<{ role: string; content: string }>,
+  apiKey: string
+): Promise<string> {
+  // Throws on failure so Promise.any() can skip to the next winner.
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), 10000);
+  let response: Response;
+  try {
+    response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "http://localhost:3000",
+        "X-Title": "JARVIS AI Assistant",
+      },
+      body: JSON.stringify({ model, messages: orMessages, max_tokens: 768, temperature: 0.75 }),
+      signal: c.signal,
+    });
+  } finally {
+    clearTimeout(t);
+  }
+  if (!response.ok) {
+    const errText = await response.text().catch(() => "");
+    throw new Error(`HTTP ${response.status}: ${errText.slice(0, 80)}`);
+  }
+  const data = await response.json();
+  const content = data.choices?.[0]?.message?.content?.trim();
+  if (!content) throw new Error("empty content");
+  return content;
+}
+
 async function tryOpenRouterFallback(
   messages: any[],
   systemPrompt: string,
@@ -88,67 +122,29 @@ async function tryOpenRouterFallback(
   if (!apiKey || apiKey.trim() === "" || apiKey === "your-api-key-here") {
     return null;
   }
-  for (const model of OPENROUTER_FALLBACK_MODELS) {
-    try {
-      const c = new AbortController();
-      const t = setTimeout(() => c.abort(), 10000);
-      // Same empty-system handling as Groq — payload shape varies by
-      // provider, so build the messages array defensively.
-      const orMessages: Array<{ role: string; content: string }> = [];
-      const trimmedSystem = (systemPrompt ?? "").trim();
-      if (trimmedSystem) {
-        orMessages.push({ role: "system", content: trimmedSystem });
-      }
-      for (const m of messages) {
-        if (typeof m?.content === "string") {
-          orMessages.push({ role: m.role, content: m.content });
-        }
-      }
 
-      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-          "HTTP-Referer": "http://localhost:3000",
-          "X-Title": "JARVIS AI Assistant",
-        },
-        body: JSON.stringify({
-          model,
-          messages: orMessages,
-          max_tokens: 768,
-          temperature: 0.75,
-        }),
-        signal: c.signal,
-      });
-      clearTimeout(t);
-
-      if (!response.ok) {
-        const errText = await response.text().catch(() => "");
-        console.warn(`[OpenRouter fallback] ${model} → HTTP ${response.status}: ${errText.slice(0, 120)}`);
-        if (response.status === 429 || response.status === 404) {
-          // Rate-limited or model unavailable — try the next one.
-          continue;
-        }
-        // Other errors (5xx, 401) — bail out, the chain is broken.
-        return null;
-      }
-
-      const data = await response.json();
-      const content = data.choices?.[0]?.message?.content?.trim();
-      if (!content) {
-        console.warn(`[OpenRouter fallback] ${model} returned empty content`);
-        continue;
-      }
-
-      console.log(`[OpenRouter fallback] Served response via ${model}`);
-      return NextResponse.json({ content, fallback: "openrouter", model });
-    } catch (e: any) {
-      console.warn(`[OpenRouter fallback] ${model} fetch failed:`, e?.name || e?.message);
-      continue;
-    }
+  const orMessages: Array<{ role: string; content: string }> = [];
+  const trimmedSystem = (systemPrompt ?? "").trim();
+  if (trimmedSystem) orMessages.push({ role: "system", content: trimmedSystem });
+  for (const m of messages) {
+    if (typeof m?.content === "string") orMessages.push({ role: m.role, content: m.content });
   }
-  return null;
+
+  try {
+    // Race all models in parallel — fastest successful response wins.
+    const content = await Promise.any(
+      OPENROUTER_FALLBACK_MODELS.map(model =>
+        tryOneOpenRouterModel(model, orMessages, apiKey)
+          .then(c => { console.log(`[OpenRouter fallback] Won race via ${model}`); return c; })
+          .catch(e => { console.warn(`[OpenRouter fallback] ${model} failed:`, e?.message); throw e; })
+      )
+    );
+    return NextResponse.json({ content, fallback: "openrouter" });
+  } catch {
+    // AggregateError — all models failed.
+    console.warn("[OpenRouter fallback] All models failed");
+    return null;
+  }
 }
 
 // Try Groq as a third fallback after NVIDIA and OpenRouter.
@@ -1435,13 +1431,7 @@ export async function POST(request: Request) {
         if (!response.ok) {
           const errorText = await response.text();
           console.error("NVIDIA API error:", response.status, errorText, "- Trying OpenRouter → Groq fallback");
-          const openrouterApiKey = process.env.OPENROUTER_API_KEY;
-          const orResp = await tryOpenRouterFallback(
-            messages.map((m: { role: string; content: string }) => ({ role: m.role, content: m.content })),
-            enhancedSystemPrompt,
-            openrouterApiKey
-          );
-          if (orResp) return orResp;
+          // Groq first — it's a dedicated inference engine, ~1-2s vs OpenRouter's free tier.
           const groqApiKey = process.env.GROQ_API_KEY;
           const groqResp = await tryGroqFallback(
             messages.map((m: { role: string; content: string }) => ({ role: m.role, content: m.content })),
@@ -1449,6 +1439,13 @@ export async function POST(request: Request) {
             groqApiKey
           );
           if (groqResp) return groqResp;
+          const openrouterApiKey = process.env.OPENROUTER_API_KEY;
+          const orResp = await tryOpenRouterFallback(
+            messages.map((m: { role: string; content: string }) => ({ role: m.role, content: m.content })),
+            enhancedSystemPrompt,
+            openrouterApiKey
+          );
+          if (orResp) return orResp;
           const offlineResponse = generateOfflineResponse(lastMessage, "rate_limited");
           return NextResponse.json({
             content: offlineResponse,
@@ -1469,13 +1466,7 @@ export async function POST(request: Request) {
         } else {
           console.error("Network error calling NVIDIA API:", fetchError, "- Trying OpenRouter → Groq fallback");
         }
-        const openrouterApiKey = process.env.OPENROUTER_API_KEY;
-        const orResp = await tryOpenRouterFallback(
-          messages.map((m: { role: string; content: string }) => ({ role: m.role, content: m.content })),
-          enhancedSystemPrompt,
-          openrouterApiKey
-        );
-        if (orResp) return orResp;
+        // Groq first — it's a dedicated inference engine, ~1-2s vs OpenRouter's free tier.
         const groqApiKey = process.env.GROQ_API_KEY;
         const groqResp = await tryGroqFallback(
           messages.map((m: { role: string; content: string }) => ({ role: m.role, content: m.content })),
@@ -1483,6 +1474,13 @@ export async function POST(request: Request) {
           groqApiKey
         );
         if (groqResp) return groqResp;
+        const openrouterApiKey = process.env.OPENROUTER_API_KEY;
+        const orResp = await tryOpenRouterFallback(
+          messages.map((m: { role: string; content: string }) => ({ role: m.role, content: m.content })),
+          enhancedSystemPrompt,
+          openrouterApiKey
+        );
+        if (orResp) return orResp;
         const offlineResponse = generateOfflineResponse(lastMessage, "rate_limited");
         return NextResponse.json({
           content: offlineResponse,

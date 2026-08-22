@@ -71,41 +71,70 @@ export async function extractMemoriesFromMessage(
       ? `${EXTRACTION_PROMPT}\n\nContext: ${context}\n\nMessage: ${message}`
       : `${EXTRACTION_PROMPT}\n\nMessage: ${message}`;
 
-    // Use NVIDIA API for extraction (or fallback to local)
-    const apiBase = process.env.INTERNAL_API_URL || 'http://localhost:3000';
-    // 5s timeout — extraction runs in the background, must never block the chat
-    // or hang the process if the upstream is rate-limited / unreachable.
+    // ── Direct LLM call — never route through localhost to avoid deadlock ──
+    // Try OpenRouter first, fall back to Groq.
+    const openrouterKey = process.env.OPENROUTER_API_KEY;
+    const groqKey = process.env.GROQ_API_KEY;
+
+    if (!openrouterKey && !groqKey) {
+      console.warn("[MemoryExtractor] No LLM API key — skipping extraction");
+      return { entities: [], relationships: [] };
+    }
+
     const c = new AbortController();
-    const t = setTimeout(() => c.abort(), 5000);
-    let response: Response;
+    const t = setTimeout(() => c.abort(), 8000);
+    let response: Response | null = null;
+
     try {
-      response = await fetch(`${apiBase}/api/openai`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: [{ role: "user", content: prompt }],
-          temperature: 0.3, // Low temperature for consistent extraction
-          max_tokens: 1500,
-          response_format: { type: "json_object" },
-        }),
-        signal: c.signal,
-      });
+      if (openrouterKey) {
+        response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${openrouterKey}`,
+            "Content-Type": "application/json",
+            "HTTP-Referer": "http://localhost:3000",
+            "X-Title": "JARVIS Memory Extractor",
+          },
+          body: JSON.stringify({
+            model: "nvidia/nemotron-3.5-lightning:free",
+            messages: [{ role: "user", content: prompt }],
+            temperature: 0.3,
+            max_tokens: 1500,
+            response_format: { type: "json_object" },
+          }),
+          signal: c.signal,
+        });
+      } else if (groqKey) {
+        response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${groqKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "llama-3.1-8b-instant",
+            messages: [{ role: "user", content: prompt }],
+            temperature: 0.3,
+            max_tokens: 1500,
+            response_format: { type: "json_object" },
+          }),
+          signal: c.signal,
+        });
+      }
     } catch (e: any) {
-      // Upstream unreachable / timed out / TLS reset. Memory extraction is
-      // best-effort background work — never throw out of here.
-      console.warn("[MemoryExtractor] /api/openai unreachable — skipping extraction:", e?.name || e?.message);
+      console.warn("[MemoryExtractor] LLM unreachable — skipping extraction:", e?.name || e?.message);
       return { entities: [], relationships: [] };
     } finally {
       clearTimeout(t);
     }
 
-    if (!response.ok) {
-      console.error("[MemoryExtractor] API error:", response.status);
+    if (!response || !response.ok) {
+      console.error("[MemoryExtractor] API error:", response?.status);
       return { entities: [], relationships: [] };
     }
 
     const data = await response.json();
-    const content = data.content || data.choices?.[0]?.message?.content;
+    const content = data.choices?.[0]?.message?.content;
 
     if (!content) {
       console.warn("[MemoryExtractor] No content in response");
@@ -286,36 +315,67 @@ Return JSON: {"preference": "what they prefer", "category": "ui|behavior|content
 Statement: ${statement}`;
 
   try {
-    const apiBase = process.env.INTERNAL_API_URL || 'http://localhost:3000';
-    // 5s timeout — preference extraction is best-effort and must never hang.
+    // ── Direct LLM call — never route through localhost to avoid deadlock ──
+    const openrouterKey = process.env.OPENROUTER_API_KEY;
+    const groqKey = process.env.GROQ_API_KEY;
+
+    if (!openrouterKey && !groqKey) {
+      return { success: false, message: "extraction_unavailable" };
+    }
+
     const c = new AbortController();
-    const t = setTimeout(() => c.abort(), 5000);
-    let response: Response;
+    const t = setTimeout(() => c.abort(), 8000);
+    let response: Response | null = null;
+
     try {
-      response = await fetch(`${apiBase}/api/openai`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: [{ role: "user", content: prompt }],
-          temperature: 0.2,
-          max_tokens: 200,
-          response_format: { type: "json_object" },
-        }),
-        signal: c.signal,
-      });
+      if (openrouterKey) {
+        response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${openrouterKey}`,
+            "Content-Type": "application/json",
+            "HTTP-Referer": "http://localhost:3000",
+            "X-Title": "JARVIS Memory Extractor",
+          },
+          body: JSON.stringify({
+            model: "nvidia/nemotron-3.5-lightning:free",
+            messages: [{ role: "user", content: prompt }],
+            temperature: 0.2,
+            max_tokens: 200,
+            response_format: { type: "json_object" },
+          }),
+          signal: c.signal,
+        });
+      } else if (groqKey) {
+        response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${groqKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "llama-3.1-8b-instant",
+            messages: [{ role: "user", content: prompt }],
+            temperature: 0.2,
+            max_tokens: 200,
+            response_format: { type: "json_object" },
+          }),
+          signal: c.signal,
+        });
+      }
     } catch (e: any) {
-      console.warn("[MemoryExtractor] /api/openai unreachable — skipping preference extraction:", e?.name || e?.message);
+      console.warn("[MemoryExtractor] LLM unreachable — skipping preference extraction:", e?.name || e?.message);
       return { success: false, message: "extraction_unavailable" };
     } finally {
       clearTimeout(t);
     }
 
-    if (!response.ok) {
+    if (!response || !response.ok) {
       return { success: false, message: "Failed to extract preference" };
     }
 
     const data = await response.json();
-    const content = data.content || data.choices?.[0]?.message?.content;
+    const content = data.choices?.[0]?.message?.content;
     const parsed = JSON.parse(content);
 
     if (!parsed.preference) {

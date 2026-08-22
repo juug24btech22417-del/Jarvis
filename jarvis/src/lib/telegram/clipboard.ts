@@ -3,11 +3,10 @@
 // from this snapshot.
 //
 // Implementation uses PowerShell's `Get-Clipboard` because Node has no
-// first-class clipboard API on Windows. We use spawnSync with a
-// generous timeout because the watcher runs on a hot cron path and we
-// don't want a single slow PowerShell launch to back up the loop.
+// first-class clipboard API on Windows. We use async execFile to avoid
+// blocking the event loop — each poll runs entirely in the background.
 
-import { execFileSync } from "child_process";
+import { execFile } from "child_process";
 
 const CLIPBOARD_KEY = Symbol.for("jarvis.telegram.clipboardWatcher");
 type GlobalWithWatcher = typeof globalThis & {
@@ -16,14 +15,21 @@ type GlobalWithWatcher = typeof globalThis & {
 
 const POLL_INTERVAL_MS = 2000;
 
-function readClipboardWindows(): string {
-  // PowerShell: read the clipboard as plain text. -Raw keeps newlines.
-  const out = execFileSync(
-    "powershell",
-    ["-NoProfile", "-Command", "Get-Clipboard -Raw"],
-    { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }
-  );
-  return out.replace(/\r?\n$/, "");
+function readClipboardWindowsAsync(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      "powershell",
+      ["-NoProfile", "-Command", "Get-Clipboard -Raw"],
+      { encoding: "utf8", timeout: 2000 },
+      (error, stdout) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve((stdout as string).replace(/\r?\n$/, ""));
+        }
+      }
+    );
+  });
 }
 
 export function getLastClipboard(): string | null {
@@ -36,9 +42,9 @@ export function startClipboardWatcher(): void {
   if (g[CLIPBOARD_KEY]?.started) return;
   g[CLIPBOARD_KEY] = { started: true, lastText: null, lastErrorAt: 0 };
 
-  const tick = () => {
+  const tick = async () => {
     try {
-      const text = readClipboardWindows();
+      const text = await readClipboardWindowsAsync();
       g[CLIPBOARD_KEY]!.lastText = text;
     } catch (err: any) {
       // Throttle error logging so a broken PowerShell doesn't flood logs.

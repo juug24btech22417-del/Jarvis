@@ -172,6 +172,15 @@ export async function POST(req: NextRequest) {
     const { action, value, time, label } = body;
 
     switch (action) {
+      case "getVolume": {
+        try {
+          const result = await runVolumeScript(`Write-Output ([int][Audio]::GetVolume())`);
+          const level = parseInt(result, 10);
+          return NextResponse.json({ success: true, action: "getVolume", level: isNaN(level) ? 0 : level });
+        } catch (error) {
+          return NextResponse.json({ success: false, action: "getVolume", error: String(error) }, { status: 500 });
+        }
+      }
       case "setVolume": {
         const success = await setWindowsVolume(value);
         return NextResponse.json({ success, action: "setVolume", level: value });
