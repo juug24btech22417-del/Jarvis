@@ -313,16 +313,19 @@ export default function SecurityPanel({
     }
   };
 
-  if (isLoading) {
-    return (
-      <div className="h-full flex items-center justify-center">
-        <Loader2 className="w-8 h-8 text-cyan-400 animate-spin" />
-      </div>
-    );
-  }
-
   return (
-    <div className="h-full flex flex-col">
+    <motion.div
+      initial={{ opacity: 0, x: 400 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: 400 }}
+      className="fixed right-0 top-0 h-full w-96 bg-panel-bg/95 backdrop-blur-sm border-l border-panel-border z-50 flex flex-col"
+    >
+      {isLoading ? (
+        <div className="flex-1 flex items-center justify-center">
+          <Loader2 className="w-8 h-8 text-cyan-400 animate-spin" />
+        </div>
+      ) : (
+        <>
       {/* Header */}
       <div className="flex items-center justify-between p-4 border-b border-white/10">
         <div className="flex items-center gap-3">
@@ -675,6 +678,8 @@ export default function SecurityPanel({
           Face recognition powered by face-api.js · All data stored locally
         </p>
       </div>
-    </div>
+      </>
+      )}
+    </motion.div>
   );
 }
