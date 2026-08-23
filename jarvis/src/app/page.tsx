@@ -290,6 +290,7 @@ import { useAutoPersona } from "@/hooks/useAutoPersona";
 import { useReactorDrive } from "@/hooks/useReactorDrive";
 import { useAmbientContext } from "@/hooks/useAmbientContext";
 import { composeLocalBriefing, polishBriefing } from "@/services/BriefingService";
+import SentinelSuggestionWidget from "@/components/ui/SentinelSuggestionWidget";
 
 export default function Home() {
   const bootComplete = useJarvisStore((s) => s.bootComplete);
@@ -1197,6 +1198,9 @@ export default function Home() {
             isOpen={agentOpen}
             onClose={() => setAgentOpen(false)}
           />
+
+          {/* Sentinel Proactive Suggestion Widget */}
+          <SentinelSuggestionWidget />
         </>
       )}
 

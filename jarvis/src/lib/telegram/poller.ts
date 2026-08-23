@@ -407,6 +407,31 @@ async function tick() {
       const data = (cb.data ?? "").trim();
       if (!data) continue;
 
+      // 2b. Security alert action buttons
+      if (data.startsWith("security:")) {
+        const action = data.split(":")[1];
+        if (action === "lock") {
+          const { executeOsCommand } = await import("./osBridge");
+          const result = await executeOsCommand("lock");
+          if (result.ok) {
+            await sendReply(POLL_TOKEN, chatId, "🔒 Laptop locked successfully, Boss.").catch(() => {});
+          } else {
+            await sendReply(POLL_TOKEN, chatId, `❌ Failed to lock laptop: ${result.error}`).catch(() => {});
+          }
+        } else if (action === "alarm") {
+          const { executeOsCommand } = await import("./osBridge");
+          const result = await executeOsCommand("play_sound");
+          if (result.ok) {
+            await sendReply(POLL_TOKEN, chatId, "🔔 Alarm triggered (chime played on laptop).").catch(() => {});
+          } else {
+            await sendReply(POLL_TOKEN, chatId, `❌ Failed to trigger alarm: ${result.error}`).catch(() => {});
+          }
+        } else if (action === "dismiss") {
+          await sendReply(POLL_TOKEN, chatId, "✅ Threat alert dismissed.").catch(() => {});
+        }
+        continue;
+      }
+
       // 2a. OS-action confirm/cancel buttons (handled inline; no LLM).
       if (data.startsWith("os:")) {
         const parts = data.split(":");
@@ -455,7 +480,11 @@ async function tick() {
         continue;
       }
 
-      // 2b. Anything else — treat the button data as a new prompt.
+      // 2b. Anything else — treat the button data as a new prompt unless it is ignore_suggestion.
+      if (data === "ignore_suggestion") {
+        continue;
+      }
+
       await enqueueTelegramMessage({
         chatId,
         direction: "inbound",

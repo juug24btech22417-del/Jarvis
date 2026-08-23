@@ -26,6 +26,7 @@ import {
   Scan,
 } from "lucide-react";
 import { useFaceRecognition } from "@/hooks/useFaceRecognition";
+import { useTextToSpeech } from "@/hooks/useVoice";
 
 interface SecuritySettings {
   enabled: boolean;
@@ -46,6 +47,36 @@ interface SecurityEvent {
   details: string;
 }
 
+const drawMesh = (ctx: CanvasRenderingContext2D, points: Array<{ x: number; y: number }>) => {
+  const drawPath = (indices: number[], loop = false) => {
+    if (indices.length === 0) return;
+    ctx.beginPath();
+    ctx.moveTo(points[indices[0]].x, points[indices[0]].y);
+    for (let i = 1; i < indices.length; i++) {
+      if (points[indices[i]]) {
+        ctx.lineTo(points[indices[i]].x, points[indices[i]].y);
+      }
+    }
+    if (loop) ctx.closePath();
+    ctx.stroke();
+  };
+
+  // Jaw
+  drawPath([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+  // Eyebrows
+  drawPath([17, 18, 19, 20, 21]);
+  drawPath([22, 23, 24, 25, 26]);
+  // Nose
+  drawPath([27, 28, 29, 30]);
+  drawPath([31, 32, 33, 34, 35]);
+  // Eyes
+  drawPath([36, 37, 38, 39, 40, 41], true);
+  drawPath([42, 43, 44, 45, 46, 47], true);
+  // Mouth
+  drawPath([48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59], true);
+  drawPath([60, 61, 62, 63, 64, 65, 66, 67], true);
+};
+
 export default function SecurityPanel({
   onClose,
 }: {
@@ -59,9 +90,22 @@ export default function SecurityPanel({
     stopCamera,
     captureAndExtract,
     registerFace,
+    matchAgainstStored,
     videoRef,
     isCameraActive,
+    stream,
   } = useFaceRecognition();
+
+  const { speak } = useTextToSpeech();
+
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [detectedStatus, setDetectedStatus] = useState<string>("System Standby");
+  const [matchName, setMatchName] = useState<string | null>(null);
+  const [confidence, setConfidence] = useState<number | null>(null);
+  const unknownFaceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const isAlertSentRef = useRef<boolean>(false);
+  const lastSpeechTimeRef = useRef<{ welcome: number; warning: number }>({ welcome: 0, warning: 0 });
+  const latestDetectionRef = useRef<any>(null);
 
   const [settings, setSettings] = useState<SecuritySettings>({
     enabled: false,
@@ -90,6 +134,351 @@ export default function SecurityPanel({
       setError(faceError);
     }
   }, [faceError]);
+
+  // Bind camera stream to video element when video element is rendered and stream is active
+  useEffect(() => {
+    if (showCamera && videoRef.current && stream) {
+      videoRef.current.srcObject = stream;
+    }
+  }, [showCamera, stream, videoRef]);
+
+  const triggerTelegramThreatAlert = async (video: HTMLVideoElement) => {
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.drawImage(video, 0, 0);
+      const imageData = canvas.toDataURL("image/jpeg", 0.85);
+
+      const timestamp = new Date().toLocaleTimeString();
+      const message = `⚠️ [Sentinel Eyes Alert] Unauthorized presence detected at ${timestamp}!`;
+      
+      const response = await fetch("/api/security", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "alert",
+          data: {
+            imageData,
+            message,
+          },
+        }),
+      });
+      const data = await response.json();
+      if (data.success) {
+        console.log("Telegram security threat alert pushed successfully");
+        fetchSecurityData();
+      } else {
+        console.error("Failed to push Telegram threat alert:", data.error);
+      }
+    } catch (e) {
+      console.error("Error triggering threat alert:", e);
+    }
+  };
+
+  // Ref to track recognition state for the rendering loop without stale closures
+  const recognitionStateRef = useRef<{ isAuthorized: boolean; name: string | null; confidence: number | null }>({
+    isAuthorized: false,
+    name: null,
+    confidence: null,
+  });
+
+  // Real-time Holographic Scan HUD Loop & Background Detector
+  useEffect(() => {
+    if (!showCamera || !videoRef.current || !faceReady) {
+      setDetectedStatus("System Standby");
+      setMatchName(null);
+      setConfidence(null);
+      latestDetectionRef.current = null;
+      recognitionStateRef.current = {
+        isAuthorized: false,
+        name: null,
+        confidence: null,
+      };
+      isAlertSentRef.current = false;
+      if (unknownFaceTimerRef.current) {
+        clearTimeout(unknownFaceTimerRef.current);
+        unknownFaceTimerRef.current = null;
+      }
+      return;
+    }
+
+    let active = true;
+    let animationFrameId: number;
+    let detectionTimeoutId: NodeJS.Timeout;
+
+    let laserY = 0;
+    let laserDirection = 1;
+
+    // Background-tolerant Detection Loop: Runs every 750ms using standard setTimeout
+    // Since it's using setTimeout instead of requestAnimationFrame, it continues to run
+    // in background tabs or when the window is hidden.
+    const startDetectionLoop = async () => {
+      const { detectSingleFaceWithLandmarks } = await import("@/lib/security/face-recognition");
+
+      const runDetection = async () => {
+        if (!active) return;
+
+        const video = videoRef.current;
+        if (video && !video.paused && !video.ended && video.videoWidth && video.videoHeight) {
+          try {
+            const detection = await detectSingleFaceWithLandmarks(video);
+            latestDetectionRef.current = detection;
+
+            if (detection) {
+              const { descriptor } = detection;
+              const descArray = Array.from(descriptor);
+              const threshold = settings.strictMode ? 0.50 : 0.55;
+              const localMatch = matchAgainstStored(descArray, threshold);
+              
+              console.log('[Sentinel] Face scanned. Match result:', localMatch, 'Threshold:', threshold);
+
+              const isAuthorized = localMatch !== null;
+
+              if (isAuthorized) {
+                const confVal = localMatch.distance ? 1 - localMatch.distance : 0.8;
+                setDetectedStatus("Access Granted");
+                setMatchName(localMatch.name);
+                setConfidence(confVal);
+
+                recognitionStateRef.current = {
+                  isAuthorized: true,
+                  name: localMatch.name,
+                  confidence: confVal,
+                };
+
+                if (unknownFaceTimerRef.current) {
+                  clearTimeout(unknownFaceTimerRef.current);
+                  unknownFaceTimerRef.current = null;
+                }
+
+                // 45 seconds Speech Cooldown for welcome message
+                const now = Date.now();
+                if (now - lastSpeechTimeRef.current.welcome > 45000) {
+                  speak(`Access granted. Welcome back, ${localMatch.name}.`);
+                  lastSpeechTimeRef.current.welcome = now;
+                  lastSpeechTimeRef.current.warning = 0; // Reset warning cooldown on identity switch
+                }
+                isAlertSentRef.current = false;
+              } else {
+                setDetectedStatus("UNAUTHORIZED SUBJECT");
+                setMatchName("UNKNOWN");
+                setConfidence(null);
+
+                recognitionStateRef.current = {
+                  isAuthorized: false,
+                  name: "UNKNOWN",
+                  confidence: null,
+                };
+
+                // 45 seconds Speech Cooldown for warning message
+                const now = Date.now();
+                if (now - lastSpeechTimeRef.current.warning > 45000) {
+                  speak("Warning. Unidentified subject detected.");
+                  lastSpeechTimeRef.current.warning = now;
+                  lastSpeechTimeRef.current.welcome = 0; // Reset welcome cooldown on identity switch
+                }
+
+                if (!unknownFaceTimerRef.current && !isAlertSentRef.current) {
+                  unknownFaceTimerRef.current = setTimeout(async () => {
+                    if (active && !isAlertSentRef.current) {
+                      isAlertSentRef.current = true;
+                      await triggerTelegramThreatAlert(video);
+                    }
+                  }, 4000);
+                }
+              }
+            } else {
+              setDetectedStatus("Scanning presence...");
+              setMatchName(null);
+              setConfidence(null);
+
+              recognitionStateRef.current = {
+                isAuthorized: false,
+                name: null,
+                confidence: null,
+              };
+
+              if (unknownFaceTimerRef.current) {
+                clearTimeout(unknownFaceTimerRef.current);
+                unknownFaceTimerRef.current = null;
+              }
+            }
+          } catch (err) {
+            console.error("Detection error in loop", err);
+          }
+        }
+
+        // Schedule next detection.
+        // Standard timeouts persist in background tabs (though throttled to ~1-2s, which is perfect for security checks).
+        if (active) {
+          detectionTimeoutId = setTimeout(runDetection, 750);
+        }
+      };
+
+      runDetection();
+    };
+
+    // HUD Animation / Canvas Drawing Loop: Runs at 60fps when active
+    const startDrawingLoop = () => {
+      const drawHUD = () => {
+        if (!active) return;
+
+        const video = videoRef.current;
+        const canvas = canvasRef.current;
+
+        if (!video || !canvas || video.paused || video.ended || !video.videoWidth || !video.videoHeight) {
+          animationFrameId = requestAnimationFrame(drawHUD);
+          return;
+        }
+
+        // Sync canvas dimensions
+        if (canvas.width !== video.clientWidth || canvas.height !== video.clientHeight) {
+          canvas.width = video.clientWidth;
+          canvas.height = video.clientHeight;
+        }
+
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          animationFrameId = requestAnimationFrame(drawHUD);
+          return;
+        }
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // Draw sci-fi border grid overlay
+        ctx.strokeStyle = "rgba(6, 182, 212, 0.1)";
+        ctx.lineWidth = 1;
+        for (let y = 15; y < canvas.height; y += 30) {
+          ctx.beginPath();
+          ctx.moveTo(0, y);
+          ctx.lineTo(canvas.width, y);
+          ctx.stroke();
+        }
+        for (let x = 15; x < canvas.width; x += 30) {
+          ctx.beginPath();
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, canvas.height);
+          ctx.stroke();
+        }
+
+        // Laser scan sweep line
+        laserY += 2.5 * laserDirection;
+        if (laserY >= canvas.height) {
+          laserY = canvas.height;
+          laserDirection = -1;
+        } else if (laserY <= 0) {
+          laserY = 0;
+          laserDirection = 1;
+        }
+
+        const detection = latestDetectionRef.current;
+
+        if (detection) {
+          const { box, landmarks } = detection;
+
+          const scaleX = canvas.width / video.videoWidth;
+          const scaleY = canvas.height / video.videoHeight;
+
+          const x = box.x * scaleX;
+          const y = box.y * scaleY;
+          const w = box.width * scaleX;
+          const h = box.height * scaleY;
+
+          // Read state from ref to avoid closures issues
+          const recState = recognitionStateRef.current;
+          const isAuthorized = recState.isAuthorized;
+
+          // Draw HUD face frame corner brackets
+          ctx.strokeStyle = isAuthorized ? "rgba(34, 197, 94, 0.8)" : "rgba(239, 68, 68, 0.8)";
+          ctx.lineWidth = 2;
+          
+          const len = 12;
+          ctx.beginPath(); ctx.moveTo(x, y + len); ctx.lineTo(x, y); ctx.lineTo(x + len, y); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(x + w, y + len); ctx.lineTo(x + w, y); ctx.lineTo(x + w - len, y); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(x, y + h - len); ctx.lineTo(x, y + h); ctx.lineTo(x + len, y + h); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(x + w, y + h - len); ctx.lineTo(x + w, y + h); ctx.lineTo(x + w - len, y + h); ctx.stroke();
+
+          // Glowing face background
+          ctx.fillStyle = isAuthorized ? "rgba(34, 197, 94, 0.04)" : "rgba(239, 68, 68, 0.04)";
+          ctx.fillRect(x, y, w, h);
+
+          // Draw facial landmarks
+          const pts = landmarks.positions;
+          ctx.fillStyle = isAuthorized ? "rgba(34, 197, 94, 0.9)" : "rgba(239, 68, 68, 0.9)";
+          for (const pt of pts) {
+            ctx.beginPath();
+            ctx.arc(pt.x * scaleX, pt.y * scaleY, 1.2, 0, 2 * Math.PI);
+            ctx.fill();
+          }
+
+          // Draw facial mesh connections
+          ctx.strokeStyle = isAuthorized ? "rgba(34, 197, 94, 0.2)" : "rgba(239, 68, 68, 0.2)";
+          ctx.lineWidth = 1;
+          const mappedPts = pts.map((p: any) => ({ x: p.x * scaleX, y: p.y * scaleY }));
+          drawMesh(ctx, mappedPts);
+
+          // Scanning laser inside face box
+          ctx.strokeStyle = isAuthorized ? "rgba(34, 197, 94, 0.6)" : "rgba(239, 68, 68, 0.6)";
+          ctx.beginPath();
+          const laserFaceY = y + (laserY % h);
+          ctx.moveTo(x, laserFaceY);
+          ctx.lineTo(x + w, laserFaceY);
+          ctx.stroke();
+
+          // Draw HUD text overlays
+          ctx.fillStyle = isAuthorized ? "#22c55e" : "#ef4444";
+          ctx.font = "bold 9px monospace";
+          const statusText = isAuthorized ? `AUTHORIZED: ${recState.name!.toUpperCase()}` : "UNAUTHORIZED SUBJECT DETECTED";
+          ctx.fillText(statusText, x, y - 6);
+
+          ctx.font = "8px monospace";
+          ctx.fillStyle = "rgba(255, 255, 255, 0.7)";
+          const confVal = isAuthorized && recState.confidence !== null ? (100 * recState.confidence).toFixed(1) + "%" : "N/A";
+          ctx.fillText(`CONF: ${confVal}`, x, y + h + 10);
+          ctx.fillText(`LOC: ${Math.round(x)}, ${Math.round(y)}`, x, y + h + 18);
+        } else {
+          // Sweeping laser lines
+          ctx.strokeStyle = "rgba(6, 182, 212, 0.35)";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(0, laserY);
+          ctx.lineTo(canvas.width, laserY);
+          ctx.stroke();
+
+          // Targeting reticle
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.1)";
+          ctx.beginPath();
+          ctx.arc(canvas.width / 2, canvas.height / 2, 20, 0, 2 * Math.PI);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(canvas.width / 2 - 28, canvas.height / 2);
+          ctx.lineTo(canvas.width / 2 + 28, canvas.height / 2);
+          ctx.moveTo(canvas.width / 2, canvas.height / 2 - 28);
+          ctx.lineTo(canvas.width / 2, canvas.height / 2 + 28);
+          ctx.stroke();
+        }
+
+        animationFrameId = requestAnimationFrame(drawHUD);
+      };
+
+      drawHUD();
+    };
+
+    startDetectionLoop();
+    startDrawingLoop();
+
+    return () => {
+      active = false;
+      cancelAnimationFrame(animationFrameId);
+      clearTimeout(detectionTimeoutId);
+      if (unknownFaceTimerRef.current) {
+        clearTimeout(unknownFaceTimerRef.current);
+      }
+    };
+  }, [showCamera, faceReady, settings.strictMode, matchAgainstStored]);
 
   const fetchSecurityData = async () => {
     try {
@@ -414,6 +803,28 @@ export default function SecurityPanel({
                   muted
                   className="w-full h-48 object-cover"
                 />
+                <canvas
+                  ref={canvasRef}
+                  className="absolute top-0 left-0 w-full h-full pointer-events-none"
+                />
+                {/* Sleek hologram info bar */}
+                <div className="absolute bottom-0 left-0 w-full bg-gradient-to-t from-black/85 to-black/0 p-2 flex justify-between items-end text-[10px] font-mono pointer-events-none text-cyan-400">
+                  <div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-ping" />
+                      <span>HUD: ACTIVE</span>
+                    </div>
+                    <div className="text-white/60">STATUS: {detectedStatus}</div>
+                  </div>
+                  {matchName && (
+                    <div className="text-right">
+                      <div className="text-green-400 font-bold">MATCH: {matchName}</div>
+                      {confidence !== null && (
+                        <div className="text-white/60">CONFIDENCE: {(confidence * 100).toFixed(1)}%</div>
+                      )}
+                    </div>
+                  )}
+                </div>
                 <div className="absolute top-2 left-2 flex items-center gap-2">
                   <span className="px-2 py-1 bg-red-500 text-white text-xs rounded flex items-center gap-1">
                     <span className="w-2 h-2 bg-white rounded-full animate-pulse" />

@@ -241,7 +241,7 @@ let cachedAllowedChatIds: { raw: string; set: Set<number> } | null = null;
  * Returns an empty set if unset. Cached per-token to keep hot paths cheap.
  */
 export function getAllowedChatIds(): Set<number> {
-  const raw = process.env.TELEGRAM_ALLOWED_CHAT_IDS ?? "";
+  const raw = process.env.TELEGRAM_ALLOWED_CHAT_IDS ?? process.env.TELEGRAM_ALLOWED_CHAT_Ids ?? "";
   if (cachedAllowedChatIds && cachedAllowedChatIds.raw === raw) {
     return cachedAllowedChatIds.set;
   }

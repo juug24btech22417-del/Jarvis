@@ -1,5 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 
+function getAllowedChats(): number[] {
+  const raw = process.env.TELEGRAM_ALLOWED_CHAT_IDS ?? process.env.TELEGRAM_ALLOWED_CHAT_Ids ?? "";
+  return raw
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map(Number)
+    .filter((n) => Number.isFinite(n) && n !== 0);
+}
+
 // Security settings
 interface SecuritySettings {
   enabled: boolean;
@@ -249,7 +259,7 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      const threshold = securitySettings.strictMode ? 0.5 : 0.6;
+      const threshold = securitySettings.strictMode ? 0.5 : 0.55;
       const match = findMatchingFace(descriptor, threshold);
 
       if (match) {
@@ -302,6 +312,94 @@ export async function POST(req: NextRequest) {
         faces: authorizedFaces.map((f) => ({ id: f.id, name: f.name })),
         enabled: true,
       });
+    }
+
+    // Telegram Threat Alert
+    if (action === "alert") {
+      const { imageData, message } = data;
+      const token = process.env.TELEGRAM_BOT_TOKEN;
+      const allowedChats = getAllowedChats();
+      const target = allowedChats[0];
+
+      if (!token || !target) {
+        console.error("[Security API] Telegram not configured or no allowed chat ID", { token: !!token, target });
+        return NextResponse.json({ success: false, error: "Telegram bot not configured" });
+      }
+
+      try {
+        const buttons = [
+          [
+            { text: "🔒 Lock Laptop", callback_data: "security:lock" },
+            { text: "🔔 Trigger Alarm", callback_data: "security:alarm" },
+          ],
+          [
+            { text: "✅ Dismiss", callback_data: "security:dismiss" }
+          ]
+        ];
+
+        if (imageData) {
+          const FormData = (await import("form-data")).default;
+          const form = new FormData();
+          form.append("chat_id", String(target));
+          form.append("caption", message);
+          form.append("reply_markup", JSON.stringify({ inline_keyboard: buttons }));
+
+          // Convert base64 image data to buffer
+          const base64Data = imageData.replace(/^data:image\/\w+;base64,/, "");
+          const buffer = Buffer.from(base64Data, "base64");
+          
+          form.append("photo", buffer, {
+            filename: "security_alert.jpg",
+            contentType: "image/jpeg",
+          });
+
+          // Send multipart post to Telegram API
+          const response = await new Promise<any>((resolve, reject) => {
+            form.submit(`https://api.telegram.org/bot${token}/sendPhoto`, (err, res) => {
+              if (err) return reject(err);
+              let body = "";
+              res.on("data", (chunk) => body += chunk.toString("utf8"));
+              res.on("end", () => {
+                try {
+                  resolve(JSON.parse(body));
+                } catch (e) {
+                  reject(e);
+                }
+              });
+            });
+          });
+
+          if (response.ok) {
+            logEvent("access_denied", `Telegram alert sent with snapshot: ${message}`);
+            return NextResponse.json({ success: true, messageId: response.result.message_id });
+          } else {
+            console.error("[Security API] Telegram sendPhoto failed:", response);
+            throw new Error(response.description || "Telegram API error");
+          }
+        } else {
+          // Fallback to text message if no image is present
+          const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: target,
+              text: message,
+              reply_markup: { inline_keyboard: buttons },
+            }),
+          });
+          const resData = await response.json();
+          if (resData.ok) {
+            logEvent("access_denied", `Telegram alert sent: ${message}`);
+            return NextResponse.json({ success: true, messageId: resData.result.message_id });
+          } else {
+            console.error("[Security API] Telegram sendMessage failed:", resData);
+            throw new Error(resData.description || "Telegram API error");
+          }
+        }
+      } catch (err: any) {
+        console.error("[Security API] Alert sending failed:", err);
+        return NextResponse.json({ success: false, error: err.message });
+      }
     }
 
     return NextResponse.json({ error: "Invalid action" }, { status: 400 });

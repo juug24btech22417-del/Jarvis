@@ -3,20 +3,24 @@ import { NextRequest, NextResponse } from "next/server";
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
 const NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 
-const SENTINEL_PROMPT = `You are JARVIS, Tony Stark's advanced AI. You are performing passive observation of the user's screen.
-Observe the provided screenshot and identify any noteworthy context:
-1. Coding errors or bugs visible in an editor.
-2. Interesting news, products, or information the user is browsing.
-3. Potential improvements to the user's current task.
-4. Security risks (e.g., exposed keys, though keep it brief).
+const SENTINEL_PROMPT = `Analyze the provided image and describe its visual contents in detail.
+Identify the main active window, website, app, or document visible.
 
-CRITICAL RULES:
-- If nothing important or noteworthy is happening, respond ONLY with the word "PASS".
-- If you see something interesting, provide a brief, witty, and helpful comment in the personality of JARVIS (polite, British, slightly sarcastic but loyal).
-- Keep your comment under 20 words.
-- Do NOT repeat yourself.
+Provide a helpful, detailed observation (around 30-50 words) describing what the user is doing or looking at (e.g., social media browsing, code development, reading articles, shopping).
 
-Current observation mode: Passive Sentinel.`;
+You MUST respond with a single JSON object:
+{
+  "proactive": true,
+  "comment": "A detailed, descriptive comment in a polite, smart assistant tone (JARVIS persona) explaining what is visible and any interesting context.",
+  "action": {
+    "type": "task" or "reminder" or "debug" or "security_risk",
+    "title": "Short actionable title based on the active screen content",
+    "details": "A detailed explanation of the task, reminder, or suggestion based on the screen content",
+    "metadata": {}
+  }
+}
+
+Respond ONLY with the JSON object. No preamble, no postscript.`;
 
 export async function POST(req: NextRequest) {
   try {
@@ -34,7 +38,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Call NVIDIA API with vision (Llama-3.2-90b-vision is great for this)
     const response = await fetch(NVIDIA_API_URL, {
       method: "POST",
       headers: {
@@ -57,8 +60,8 @@ export async function POST(req: NextRequest) {
             ],
           },
         ],
-        max_tokens: 150,
-        temperature: 0.7,
+        max_tokens: 512,
+        temperature: 0.1,
       }),
     });
 
@@ -68,22 +71,53 @@ export async function POST(req: NextRequest) {
     }
 
     const data = await response.json();
-    const analysis = data.choices?.[0]?.message?.content?.trim() || "PASS";
+    const rawContent = data.choices?.[0]?.message?.content?.trim() || "";
 
-    // If the model is being talkative despite the prompt, check for "PASS"
-    if (analysis.toUpperCase().includes("PASS") && analysis.length < 10) {
-      return NextResponse.json({ success: true, proactive: false });
+    console.log("[Sentinel] Raw VLM output:", rawContent.slice(0, 300));
+
+    // Strip markdown fences if present
+    let cleaned = rawContent;
+    const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (fenceMatch) cleaned = fenceMatch[1].trim();
+
+    // Extract first JSON object from content
+    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      console.warn("[Sentinel] No JSON found in VLM output, forcing proactive anyway.");
+      return NextResponse.json({ 
+        success: true, 
+        proactive: true, 
+        comment: rawContent.slice(0, 100) || "Checking screen...", 
+        action: { type: "task", title: "General Observation", details: "No specific JSON found.", metadata: {} } 
+      });
     }
 
-    return NextResponse.json({
-      success: true,
-      proactive: true,
-      comment: analysis,
-    });
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      return NextResponse.json({
+        success: true,
+        proactive: true, // Force to true as requested by user
+        comment: parsed.comment || "I've analyzed your screen.",
+        action: parsed.action || {
+          type: "task",
+          title: "Screen Checked",
+          details: "Nothing major found, but keeping an eye out.",
+          metadata: {}
+        },
+      });
+    } catch (parseError) {
+      console.warn("[Sentinel] JSON parse failed:", jsonMatch[0].slice(0, 200));
+      return NextResponse.json({ 
+        success: true, 
+        proactive: true, 
+        comment: "Found something, but couldn't parse it clearly.", 
+        action: { type: "task", title: "Parsing Error", details: "JSON was malformed.", metadata: {} } 
+      });
+    }
   } catch (error) {
-    console.error("Sentinel analysis error:", error);
+    console.error("[Sentinel] Analysis error:", error);
     return NextResponse.json(
-      { error: "Analysis failed", details: String(error) },
+      { success: false, error: "Analysis failed", details: String(error) },
       { status: 500 }
     );
   }

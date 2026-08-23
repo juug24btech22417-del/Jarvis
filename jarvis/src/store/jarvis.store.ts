@@ -17,6 +17,15 @@ export interface Message {
   timestamp: Date;
 }
 
+export interface SentinelSuggestion {
+  id: string;
+  type: "debug" | "security_risk" | "task" | "reminder";
+  title: string;
+  details: string;
+  comment: string;
+  metadata?: Record<string, any>;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -146,6 +155,11 @@ interface JarvisStore {
   firecrawlLogs: string[];
   setFirecrawlLogs: (logs: string[]) => void;
   addFirecrawlLog: (log: string) => void;
+
+  // Sentinel Suggestion
+  activeSuggestion: SentinelSuggestion | null;
+  setActiveSuggestion: (suggestion: SentinelSuggestion | null) => void;
+  clearActiveSuggestion: () => void;
 }
 
 export const useJarvisStore = create<JarvisStore>((set) => ({
@@ -296,4 +310,9 @@ export const useJarvisStore = create<JarvisStore>((set) => ({
   firecrawlLogs: [],
   setFirecrawlLogs: (firecrawlLogs) => set({ firecrawlLogs }),
   addFirecrawlLog: (log) => set((state) => ({ firecrawlLogs: [...state.firecrawlLogs, log] })),
+
+  // Sentinel Suggestion
+  activeSuggestion: null,
+  setActiveSuggestion: (activeSuggestion) => set({ activeSuggestion }),
+  clearActiveSuggestion: () => set({ activeSuggestion: null }),
 }));

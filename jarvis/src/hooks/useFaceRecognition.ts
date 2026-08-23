@@ -8,6 +8,15 @@ import {
   descriptorToArray,
 } from '@/lib/security/face-recognition';
 
+const STORAGE_KEY = 'jarvis_faces';
+
+export interface StoredFace {
+  id: string;
+  name: string;
+  descriptor: number[];
+  createdAt: string;
+}
+
 export interface DetectedFace {
   descriptor: number[];
   confidence: number;
@@ -23,6 +32,8 @@ export interface UseFaceRecognitionReturn {
   captureAndExtract: () => Promise<DetectedFace | null>;
   registerFace: (name: string) => Promise<{ success: boolean; error?: string; face?: any }>;
   verifyFace: (descriptor: number[]) => Promise<{ match: boolean; person?: string; distance?: number }>;
+  getStoredFaces: () => StoredFace[];
+  matchAgainstStored: (descriptor: number[], threshold?: number) => { name: string; distance: number } | null;
   videoRef: React.RefObject<HTMLVideoElement | null>;
   stream: MediaStream | null;
   isCameraActive: boolean;
@@ -149,6 +160,43 @@ export function useFaceRecognition(): UseFaceRecognitionReturn {
     }
   }, [isReady, captureFrame]);
 
+  // ─────────────────────────────────────────────────────────
+  // localStorage helpers — faces persist across server restarts
+  // ─────────────────────────────────────────────────────────
+
+  const getStoredFaces = useCallback((): StoredFace[] => {
+    try {
+      return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+    } catch {
+      return [];
+    }
+  }, []);
+
+  const euclideanDistance = (a: number[], b: number[]) => {
+    if (a.length !== b.length) return Infinity;
+    let sum = 0;
+    for (let i = 0; i < a.length; i++) {
+      sum += (a[i] - b[i]) ** 2;
+    }
+    return Math.sqrt(sum);
+  };
+
+  /** Client-side FaceMatcher — no server needed */
+  const matchAgainstStored = useCallback(
+    (descriptor: number[], threshold = 0.55): { name: string; distance: number } | null => {
+      const faces = getStoredFaces();
+      let best: { name: string; distance: number } | null = null;
+      for (const face of faces) {
+        const dist = euclideanDistance(descriptor, face.descriptor);
+        if (dist < threshold && (!best || dist < best.distance)) {
+          best = { name: face.name, distance: dist };
+        }
+      }
+      return best;
+    },
+    [getStoredFaces]
+  );
+
   const registerFace = useCallback(
     async (name: string) => {
       const result = await captureAndExtract();
@@ -162,16 +210,23 @@ export function useFaceRecognition(): UseFaceRecognitionReturn {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             action: 'register',
-            data: {
-              name,
-              descriptor: result.descriptor,
-            },
+            data: { name, descriptor: result.descriptor },
           }),
         });
 
         const data = await response.json();
 
         if (data.success) {
+          // ✅ Save to localStorage → survives server restarts
+          const stored = getStoredFaces();
+          const filtered = stored.filter((f) => f.name.toLowerCase() !== name.toLowerCase());
+          filtered.push({
+            id: data.face.id,
+            name,
+            descriptor: result.descriptor,
+            createdAt: data.face.createdAt,
+          });
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(filtered));
           return { success: true, face: data.face };
         } else {
           return { success: false, error: data.error };
@@ -180,11 +235,18 @@ export function useFaceRecognition(): UseFaceRecognitionReturn {
         return { success: false, error: 'Failed to register face' };
       }
     },
-    [captureAndExtract]
+    [captureAndExtract, getStoredFaces]
   );
 
   const verifyFace = useCallback(
     async (descriptor: number[]) => {
+      // ✅ Try client-side first (works even when server restarted)
+      const localMatch = matchAgainstStored(descriptor);
+      if (localMatch) {
+        return { match: true, person: localMatch.name, distance: localMatch.distance };
+      }
+
+      // Fallback: try server-side
       try {
         const response = await fetch('/api/security', {
           method: 'POST',
@@ -197,7 +259,7 @@ export function useFaceRecognition(): UseFaceRecognitionReturn {
 
         const data = await response.json();
 
-        if (data.success && data.access === 'granted') {
+        if (data.success && data.access === 'granted' && data.person) {
           return {
             match: true,
             person: data.person,
@@ -211,7 +273,7 @@ export function useFaceRecognition(): UseFaceRecognitionReturn {
         return { match: false };
       }
     },
-    []
+    [matchAgainstStored]
   );
 
   return {
@@ -223,6 +285,8 @@ export function useFaceRecognition(): UseFaceRecognitionReturn {
     captureAndExtract,
     registerFace,
     verifyFace,
+    getStoredFaces,
+    matchAgainstStored,
     videoRef: videoRef as React.RefObject<HTMLVideoElement | null>,
     stream,
     isCameraActive,

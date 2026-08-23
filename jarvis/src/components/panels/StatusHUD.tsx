@@ -66,7 +66,7 @@ export default function StatusHUD() {
   const [showDetails, setShowDetails] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [patterns, setPatterns] = useState<Pattern[]>([]);
-  const { isMuted, setIsMuted, state, sentinelActive, biometricActive } = useJarvisStore();
+  const { isMuted, setIsMuted, state, sentinelActive, setSentinelActive, biometricActive } = useJarvisStore();
 
   // Fetch PC stats from API
   const fetchPCStats = useCallback(async () => {
@@ -319,25 +319,42 @@ export default function StatusHUD() {
           
           {/* Autonomous Status Indicators */}
           <div className="flex items-center gap-3 border-l border-panel-border pl-4">
-            <AnimatePresence>
-              {sentinelActive && (
-                <motion.div
-                  initial={{ opacity: 0, scale: 0.5 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.5 }}
-                  className="flex items-center gap-1 group"
-                  title="Sentinel Eyes: Passively observing screen"
-                >
+            <button
+              onClick={() => setSentinelActive(!sentinelActive)}
+              title={sentinelActive ? "Sentinel Eyes: ACTIVE — click to disable" : "Sentinel Eyes: OFFLINE — click to enable"}
+              className="flex items-center gap-1 group cursor-pointer px-1.5 py-0.5 rounded transition-all hover:bg-panel-glass/60"
+            >
+              <AnimatePresence mode="wait">
+                {sentinelActive ? (
                   <motion.div
-                    animate={{ opacity: [0.4, 1, 0.4] }}
-                    transition={{ duration: 2, repeat: Infinity }}
+                    key="on"
+                    initial={{ opacity: 0, scale: 0.5 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.5 }}
+                    className="flex items-center gap-1"
                   >
-                    <Eye className="w-4 h-4 text-reactor-core glow-icon" />
+                    <motion.div
+                      animate={{ opacity: [0.4, 1, 0.4] }}
+                      transition={{ duration: 2, repeat: Infinity }}
+                    >
+                      <Eye className="w-4 h-4 text-reactor-core glow-icon" />
+                    </motion.div>
+                    <span className="font-rajdhani text-[10px] text-reactor-core hidden lg:block uppercase tracking-tighter">Sentinel</span>
                   </motion.div>
-                  <span className="font-rajdhani text-[10px] text-reactor-core hidden lg:block uppercase tracking-tighter">Sentinel</span>
-                </motion.div>
-              )}
-            </AnimatePresence>
+                ) : (
+                  <motion.div
+                    key="off"
+                    initial={{ opacity: 0, scale: 0.5 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.5 }}
+                    className="flex items-center gap-1"
+                  >
+                    <Eye className="w-4 h-4 text-text-secondary/30" />
+                    <span className="font-rajdhani text-[10px] text-text-secondary/30 hidden lg:block uppercase tracking-tighter">Sentinel</span>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </button>
 
             <AnimatePresence>
               {biometricActive && (
@@ -588,9 +605,21 @@ export default function StatusHUD() {
                     <span className="text-xs text-text-secondary/70 flex items-center gap-2">
                       <Eye className="w-3 h-3" /> Sentinel Vision
                     </span>
-                    <span className={`text-[10px] font-orbitron ${sentinelActive ? "text-reactor-core" : "text-text-secondary/30"}`}>
-                      {sentinelActive ? "ACTIVE" : "OFFLINE"}
-                    </span>
+                    <button
+                      onClick={() => setSentinelActive(!sentinelActive)}
+                      className={`relative inline-flex items-center h-4 w-8 rounded-full transition-colors duration-300 focus:outline-none ${
+                        sentinelActive ? "bg-reactor-core/80" : "bg-panel-border/50"
+                      }`}
+                      title={sentinelActive ? "Click to disable Sentinel Eyes" : "Click to enable Sentinel Eyes"}
+                    >
+                      <motion.span
+                        layout
+                        transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                        className={`inline-block w-3 h-3 rounded-full bg-white shadow ${
+                          sentinelActive ? "translate-x-4" : "translate-x-0.5"
+                        }`}
+                      />
+                    </button>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-xs text-text-secondary/70 flex items-center gap-2">
