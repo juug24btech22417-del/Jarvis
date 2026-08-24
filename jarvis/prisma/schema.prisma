@@ -279,3 +279,55 @@ model PendingOsAction {
   @@index([chatId, status])
   @@index([expiresAt])
 }
+
+// Composio connected-app registry. One row per (userId, toolkitSlug).
+// We re-fetch from composio on every /api/composio/connections call,
+// but cache the authConfigId + connectedAccountId here so the listener
+// can resume triggers without re-doing OAuth.
+model ComposioConnection {
+  id                  String   @id @default(cuid())
+  userId              String   // COMPOSIO_USER_ID (defaults to "jarvis-local")
+  toolkitSlug         String   // "gmail" | "gcal" | "github" | ...
+  connectedAccountId  String   // composio's nano id for the linked account
+  authConfigId        String   // composio's auth config id
+  status              String   // "ACTIVE" | "INACTIVE" | "INITIATED"
+  connectedAt         DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@unique([userId, toolkitSlug])
+  @@index([status])
+}
+
+// Composio event dedupe + delivery log.
+// `seenKey` is the composio trigger id (or "<source>:<id>" for synthetic
+// events). It is the dedupe key — if a row exists, the listener drops
+// the duplicate. Rows older than `retentionUntil` are GC'd by a daily
+// sweep (TODO: phase 2).
+model ComposioEventLog {
+  id            String   @id @default(cuid())
+  seenKey       String   @unique
+  source        String   // JarvisEvent.source
+  type          String   // JarvisEvent.type
+  title         String
+  body          String
+  url           String?
+  priority      String   // "low" | "normal" | "high"
+  rawPayload    String?  // JSON
+  telegramSent  Boolean  @default(false)
+  desktopPushed Boolean  @default(false)
+  error         String?
+  receivedAt    DateTime @default(now())
+  retentionUntil DateTime
+
+  @@index([source, receivedAt])
+  @@index([retentionUntil])
+}
+
+// Per-day event counter for the composio free-tier ceiling (20k/mo).
+// One row per UTC day. `count` increments on every real event delivered;
+// the panel shows today/total.
+model ComposioUsage {
+  day       String   @id // "YYYY-MM-DD" (UTC)
+  count     Int      @default(0)
+  updatedAt DateTime @updatedAt
+}

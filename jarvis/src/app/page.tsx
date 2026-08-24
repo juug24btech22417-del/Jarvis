@@ -15,6 +15,7 @@ import CodePanel from "@/components/panels/CodePanel";
 import WhatsAppPanel from "@/components/panels/WhatsAppPanel";
 import InstagramPanel from "@/components/panels/InstagramPanel";
 import TelegramPanel from "@/components/panels/TelegramPanel";
+import ConnectedPanel from "@/components/panels/ConnectedPanel";
 import CommunicationHub from "@/components/panels/CommunicationHub";
 import SecurityPanel from "@/components/panels/SecurityPanel";
 import VaultPanel from "@/components/panels/VaultPanel";
@@ -420,6 +421,71 @@ export default function Home() {
   useJarvisSentinel();
   useJarvisBiometrics();
 
+  // Strip basic markdown for desktop notification bodies (they don't
+  // render markdown). Local helper to avoid pulling a dep.
+  const stripMd = (s: string): string =>
+    s
+      .replace(/^>+\s?/gm, "")
+      .replace(/[*_`~]/g, "")
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      .replace(/\n+/g, " ")
+      .trim();
+
+  // Tier 3: composio event stream → desktop system notifications.
+  // One EventSource per app load. Auto-reconnects on close. Fires
+  // a system Notification for every composio event, regardless of
+  // whether the Connected panel is open.
+  useEffect(() => {
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+    if (Notification.permission === "default") {
+      Notification.requestPermission().catch(() => {});
+    }
+    let es: EventSource | null = null;
+    let cancelled = false;
+    const connect = () => {
+      if (cancelled) return;
+      es = new EventSource("/api/events/stream");
+      es.addEventListener("jarvis:event", (e: MessageEvent<string>) => {
+        if (Notification.permission !== "granted") return;
+        try {
+          const data = JSON.parse(e.data) as {
+            title: string;
+            body: string;
+            url?: string;
+            source: string;
+            id: string;
+          };
+          const n = new Notification(data.title, {
+            body: stripMd(data.body).slice(0, 240),
+            tag: `composio:${data.source}:${data.id}`,
+            icon: "/favicon.ico",
+          });
+          n.onclick = () => {
+            window.focus();
+            if (data.url) window.open(data.url, "_blank", "noopener");
+            n.close();
+          };
+        } catch {
+          // malformed event — skip
+        }
+      });
+      es.onerror = () => {
+        // Browser will auto-reconnect. We just close to avoid
+        // duplicate storms if the SSE endpoint went away.
+        if (es) {
+          es.close();
+          es = null;
+        }
+        if (!cancelled) setTimeout(connect, 5_000);
+      };
+    };
+    connect();
+    return () => {
+      cancelled = true;
+      if (es) es.close();
+    };
+  }, []);
+
   const { isSpeaking, state, setState } = useJarvisStore();
 
   // Sync global speaking state to JARVIS state
@@ -435,6 +501,7 @@ export default function Home() {
   const [whatsappOpen, setWhatsappOpen] = useState(false);
   const [instagramOpen, setInstagramOpen] = useState(false);
   const [telegramOpen, setTelegramOpen] = useState(false);
+  const [connectedOpen, setConnectedOpen] = useState(false);
   const [commHubOpen, setCommHubOpen] = useState(false);
   const [securityOpen, setSecurityOpen] = useState(false);
   const [vaultOpen, setVaultOpen] = useState(false);
@@ -752,6 +819,15 @@ export default function Home() {
             )}
           </AnimatePresence>
 
+          {/* Connected Apps Panel */}
+          <AnimatePresence>
+            {connectedOpen && (
+              <ConnectedPanel
+                onClose={() => setConnectedOpen(false)}
+              />
+            )}
+          </AnimatePresence>
+
           {/* Telegram quick-launch button (floating) so the user can
               open the panel without knowing the "open telegram" voice
               command. Hidden when the panel is already open. */}
@@ -786,6 +862,47 @@ export default function Home() {
                   aria-hidden="true"
                 >
                   <path d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 13.3 3.64 12c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.73 12.86c-.19.91-.74 1.13-1.5.71L12.6 16.3l-1.99 1.93c-.23.23-.42.42-.83.42z" />
+                </svg>
+              </motion.button>
+            )}
+          </AnimatePresence>
+
+          {/* Connected Apps launcher (small, top-right area) */}
+          <AnimatePresence>
+            {!connectedOpen && (
+              <motion.button
+                key="connected-launcher"
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.8 }}
+                whileHover={{ scale: 1.08 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={() => {
+                  recordPanelOpen("connected");
+                  setConnectedOpen(true);
+                }}
+                title="Open Connected Apps"
+                aria-label="Open Connected Apps"
+                className="fixed top-20 right-4 z-[70] w-11 h-11 rounded-full shadow-lg flex items-center justify-center"
+                style={{
+                  background:
+                    "linear-gradient(135deg, #0891b2 0%, #06b6d4 100%)",
+                  boxShadow:
+                    "0 6px 24px rgba(8, 145, 178, 0.4), 0 0 0 1px rgba(255,255,255,0.08)",
+                }}
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="white"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="w-5 h-5"
+                  aria-hidden="true"
+                >
+                  <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
                 </svg>
               </motion.button>
             )}

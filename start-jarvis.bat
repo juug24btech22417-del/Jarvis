@@ -36,6 +36,14 @@ echo.
 
 start /b cmd /c "timeout /t 8 >nul && start chrome http://localhost:3000"
 
+REM ── Composio trigger listener (sibling process). ────────────────────
+REM Runs scripts/composio-listener.ts via tsx (Next.js ships with it as
+REM a dev dep). Opens in a new window so logs are visible separately
+REM from the next dev server. Set COMPOSIO_API_KEY in jarvis/.env.local
+REM before starting. If the key is missing, the listener prints an
+REM error and exits; the test-fire route still works without it.
+start "JARVIS-Composio" cmd /k "title JARVIS-Composio-Listener && echo. && echo ========================================== && echo   JARVIS \x96 Composio Trigger Listener && echo ========================================== && echo. && npx --yes tsx scripts/composio-listener.ts"
+
 npm run dev
 
 pause

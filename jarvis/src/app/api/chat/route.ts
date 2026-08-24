@@ -850,7 +850,7 @@ export async function POST(request: Request) {
     // SOCIAL MEDIA AUTOMATION
     const socialMediaPattern = /(?:post to|tweet on|update)\s+(twitter|linkedin)(?:\s+(?:saying|that)?\s+)?(.+)/i;
     const socialMatch = lastMessage.match(socialMediaPattern);
-    
+
     if (socialMatch) {
       const platform = socialMatch[1].toLowerCase() as 'twitter' | 'linkedin';
       const message = socialMatch[2].trim();
@@ -868,6 +868,102 @@ export async function POST(request: Request) {
         });
       } catch (error) {
         console.error("Social media trigger error:", error);
+      }
+    }
+
+    // COMPOSIO EVENT LOG QUERY
+    // Triggers when user asks about recent emails / calendar events / notifications
+    // that came in via composio (gmail, googlecalendar, github, notion, ...).
+    // Short-circuits to /api/composio/events and returns a synthesized summary
+    // without an LLM round-trip — same pattern as the email/flight/spotify
+    // shortcuts above. Source filter is inferred from keywords when possible.
+    const composioQueryPatterns = [
+      /\b(any|what|show|list|did i (?:get|receive)|have i (?:got|received))\b[^?]*\b(emails?|mail|gmail|inbox)\b/i,
+      /\b(check|what'?s|read|show)\b[^?]*\b(inbox|mail|incoming)\b/i,
+      /\bany\s+(?:important|new)\s+(?:emails?|calendar\s+events?|meetings?|notifications?)\b/i,
+      /\b(composio|connected\s+apps?|triggers?)\b[^?]*\b(today|recently|this (?:morning|week|hour)|yesterday|lately)\b/i,
+      /\bwhat\s+came\s+(?:in|today|recently|this\s+(?:morning|hour))\b/i,
+      /\bsummar(?:y|ize)\s+(?:my\s+)?(?:inbox|notifications?|today'?s?\s+(?:emails?|events?))\b/i,
+    ];
+    const composioQueryMatch = composioQueryPatterns.some((p) => p.test(lastMessage));
+
+    if (composioQueryMatch) {
+      try {
+        console.log("[Chat] Composio event log query shortcut");
+        // Infer time window + source from the question.
+        const lower = lastMessage.toLowerCase();
+        let sinceHours = 24;
+        const sinceMatch = lower.match(/\b(today|this\s+morning|this\s+hour|tonight)\b/);
+        if (sinceMatch) sinceHours = 24;
+        else if (/\byesterday\b/.test(lower)) sinceHours = 48;
+        else if (/\bthis\s+week\b/.test(lower)) sinceHours = 24 * 7;
+
+        let source: string | undefined;
+        if (/\b(gmail|email|mail|inbox)\b/.test(lower)) source = "gmail";
+        else if (/\b(calendar|gcal|google\s+calendar|event|meeting)\b/.test(lower)) source = "gcal";
+        else if (/\b(github|pr|pull\s+request|issue)\b/.test(lower)) source = "github";
+        else if (/\b(notion)\b/.test(lower)) source = "notion";
+
+        const since = new Date(Date.now() - sinceHours * 3600 * 1000).toISOString();
+        const params = new URLSearchParams({ since, limit: "30" });
+        if (source) params.set("source", source);
+
+        const r = await fetchWithTimeout(
+          `${API_BASE}/api/composio/events?${params.toString()}`,
+          { method: "GET" },
+          2500
+        );
+        if (!r.ok) throw new Error(`events route ${r.status}`);
+        const data = (await r.json()) as {
+          ok: boolean;
+          count: number;
+          events: Array<{
+            source: string;
+            type: string;
+            title: string;
+            body: string;
+            url: string | null;
+            priority: string;
+            receivedAt: string;
+          }>;
+        };
+        if (!data.ok) throw new Error("events route not ok");
+
+        if (data.count === 0) {
+          const window = sinceHours <= 24 ? "in the last 24 hours" : `in the last ${sinceHours} hours`;
+          const where = source ? ` for ${source}` : "";
+          return NextResponse.json({
+            content: `Nothing new${where} ${window}, Boss. The composio event log is empty for that window.`,
+          });
+        }
+
+        const lines: string[] = [];
+        lines.push(
+          `Boss, ${data.count} ${source ?? "composio"} event${data.count === 1 ? "" : "s"} since ${new Date(since).toLocaleString()}:\n`
+        );
+        const iconFor: Record<string, string> = {
+          gmail: "📧",
+          gcal: "📅",
+          github: "🔔",
+          notion: "📝",
+        };
+        for (const ev of data.events.slice(0, 15)) {
+          const icon = iconFor[ev.source] ?? "⚡";
+          // Strip leading "From X" prefix already in title to avoid double-decoration.
+          const title = ev.title.length > 120 ? ev.title.slice(0, 117) + "…" : ev.title;
+          const when = new Date(ev.receivedAt).toLocaleString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+            month: "short",
+            day: "numeric",
+          });
+          lines.push(`${icon} ${title}  _(${when})_`);
+        }
+        if (data.count > 15) lines.push(`\n…and ${data.count - 15} more.`);
+        return NextResponse.json({ content: lines.join("\n") });
+      } catch (e) {
+        console.error("[Chat] composio query shortcut failed:", e);
+        // Fall through to the normal LLM path.
       }
     }
 
@@ -1377,6 +1473,7 @@ export async function POST(request: Request) {
     // BOOKMYSHOW MOVIES
     const moviePattern = /(?:search|find|book|show)\s+(?:movie|movies|film|tickets?\s+for)\s+(.+?)(?:\s+in\s+(.+))?$/i;
     const movieMatch = lastMessage.match(moviePattern);
+
     if (movieMatch) {
       const query = movieMatch[1].trim();
       const city = movieMatch[2]?.trim() || 'mumbai';

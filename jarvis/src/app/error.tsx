@@ -10,20 +10,49 @@ export default function Error({
   reset: () => void;
 }) {
   useEffect(() => {
-    console.error(error);
+    console.error("[jarvis/error.tsx] caught:", error);
   }, [error]);
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center bg-deep-space text-text-primary p-8">
-      <h2 className="text-2xl font-orbitron mb-4 text-red-500">SYSTEM ERROR</h2>
-      <p className="text-text-secondary mb-6 font-rajdhani">
-        {error.message || "Something went wrong with JARVIS."}
-      </p>
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(10, 10, 10, 0.95)",
+        color: "#fca5a5",
+        padding: 32,
+        fontFamily: "monospace",
+        zIndex: 9999,
+        overflow: "auto",
+      }}
+    >
+      <h2 style={{ margin: 0, color: "#fff" }}>JARVIS crashed during render</h2>
+      <pre
+        style={{
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          marginTop: 16,
+          fontSize: 12,
+          lineHeight: 1.5,
+        }}
+      >
+        {error.message}
+        {"\n\n"}
+        {error.stack}
+      </pre>
       <button
         onClick={reset}
-        className="px-6 py-3 bg-reactor-core text-white font-rajdhani font-semibold rounded hover:bg-reactor-core/80 transition-colors"
+        style={{
+          marginTop: 16,
+          padding: "8px 16px",
+          background: "#0891b2",
+          color: "white",
+          border: "none",
+          borderRadius: 6,
+          cursor: "pointer",
+        }}
       >
-        Retry
+        Try again
       </button>
     </div>
   );
