@@ -43,7 +43,7 @@ export async function POST(req: Request) {
     const connectionRequest = await composio.connectedAccounts.link(
       userId,
       authConfigId,
-      { callbackUrl }
+      { callbackUrl, allowMultiple: true }
     );
 
     return NextResponse.json({

@@ -480,6 +480,65 @@ async function tick() {
         continue;
       }
 
+      // 2a-bis. Email cancel button (the 30-second cancel window from
+      // /api/composio/email/send). Hits the cancel route, which
+      // atomically flips the PendingEmail row to "cancelled" and edits
+      // the original "Sending in 30s" Telegram message to reflect the
+      // cancellation. The dispatcher may have already claimed the row
+      // (status="sending") in a race — the cancel route reports that
+      // and the message edit still lands.
+      if (data.startsWith("email:cancel:")) {
+        const pendingId = data.slice("email:cancel:".length).trim();
+        if (!pendingId) {
+          await sendReply(POLL_TOKEN, chatId, "Malformed email cancel button, Boss.").catch(() => {});
+          continue;
+        }
+        try {
+          const API_BASE = process.env.INTERNAL_API_URL || "http://localhost:3000";
+          const res = await fetch(`${API_BASE}/api/composio/email/cancel`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ pendingId }),
+          });
+          const out = await res.json().catch(() => ({} as any));
+          if (out?.ok && out?.racedWithDispatcher) {
+            await sendReply(
+              POLL_TOKEN,
+              chatId,
+              "⚠️ The email was already being sent, Boss — couldn't cancel it."
+            ).catch(() => {});
+          } else if (out?.ok && out?.alreadySent) {
+            await sendReply(
+              POLL_TOKEN,
+              chatId,
+              "That email was already sent, Boss."
+            ).catch(() => {});
+          } else if (out?.ok && out?.alreadyFailed) {
+            await sendReply(
+              POLL_TOKEN,
+              chatId,
+              "That email had already failed, Boss — nothing to cancel."
+            ).catch(() => {});
+          } else if (!out?.ok) {
+            await sendReply(
+              POLL_TOKEN,
+              chatId,
+              `❌ Couldn't cancel: ${out?.error ?? "unknown error"}`
+            ).catch(() => {});
+          }
+          // On a fresh cancel (out.ok && out.status === "cancelled"),
+          // the cancel route has already edited the original Telegram
+          // message — no follow-up reply needed to avoid noise.
+        } catch (err: any) {
+          await sendReply(
+            POLL_TOKEN,
+            chatId,
+            `❌ Cancel failed: ${err?.message ?? "unknown error"}`
+          ).catch(() => {});
+        }
+        continue;
+      }
+
       // 2b. Anything else — treat the button data as a new prompt unless it is ignore_suggestion.
       if (data === "ignore_suggestion") {
         continue;

@@ -1450,6 +1450,107 @@ export async function POST(request: Request) {
       }
     }
 
+    // GMAIL COMPOSE — programmatic (composio). When the user provides
+    // an email address in the request, this short-circuits to the
+    // composio email dispatcher, which composes the body in the
+    // requested tone and schedules it with a 30-second cancel window.
+    // When only a name is given ("email Bob about the project"), we
+    // also try this path; the dispatch route will tell the user to
+    // connect Gmail if no connection is active, rather than silently
+    // falling through to Playwright.
+    const emailAddressRe = /[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/;
+    // Extract an explicit tone ("in urgent tone" / "in a friendly way")
+    // off the END of the request so it doesn't get folded into `about`
+    // and pollute the LLM's understanding of what the email is about.
+    // The dispatcher also infers tone, but an explicit user-provided
+    // tone must always win.
+    const tonePhraseMatch = lastMessage.match(
+      /\b(?:in|with(?:\s+a)?)\s+(?:a\s+)?(professional|friendly|polite|formal|urgent|casual)\s+(?:tone|way|manner)(?:\s+please)?\s*[\.\!]?\s*$/i
+    );
+    const chatTone = tonePhraseMatch ? tonePhraseMatch[1].toLowerCase() : null;
+    const strippedMessage = chatTone
+      ? lastMessage.replace(tonePhraseMatch[0], "").trim()
+      : lastMessage;
+    // Two regexes for the email shortcut:
+//   A) Recipient has a real email address → "send email to a@b.com (to|about|on) <topic> [in TONE]"
+//      Anchoring on the email (not the word "to") lets the topic
+//      preposition itself be "to" — e.g. "send email to bob@x.com to come
+//      play cricket in friendly tone".
+//   B) Recipient is just a name (no @) → fall back to "send email to NAME
+//      (about|on|regarding|...) <topic> [in TONE]".
+const emailProgrammaticMatch =
+      strippedMessage.match(
+        /(?:send|compose|write|draft|email|mail)\s+(?:an?\s+)?(?:email|mail|message)\s+(?:to\s+)?([^\s]+@[^\s]+?)(?:\s+(?:to|about|on|regarding|re|with\s+subject|subject)\s+(.+?))?(?:\s+(?:in|with(?:\s+a)?)\s+(?:a\s+)?(professional|friendly|polite|formal|urgent|casual)\s+(?:tone|way|manner)(?:\s+please)?)?\s*[\.\!]?\s*$/i
+      ) ||
+      strippedMessage.match(
+        /(?:send|compose|write|draft|email|mail)\s+(?:an?\s+)?(?:email|mail|message)\s+to\s+(.+?)(?:\s+(?:about|on|regarding|re|with\s+subject|subject)\s+(.+?))?(?:\s+(?:in|with(?:\s+a)?)\s+(?:a\s+)?(professional|friendly|polite|formal|urgent|casual)\s+(?:tone|way|manner)(?:\s+please)?)?\s*[\.\!]?\s*$/i
+      );
+    if (emailProgrammaticMatch) {
+      const rawRecipient = emailProgrammaticMatch[1].trim().replace(/[.,;]+$/, "");
+      const about = (emailProgrammaticMatch[2] || "").trim();
+      // Pull the actual email out of the recipient string if present;
+      // otherwise treat the whole token as a name and let the dispatch
+      // route's connection-check ask the user for an address.
+      const addrMatch = rawRecipient.match(emailAddressRe);
+      const toField = addrMatch ? addrMatch[0] : rawRecipient;
+      // Skip if the user just said "email someone" with no about — let
+      // the LLM handle that conversationally. We require either a real
+      // email address in the recipient or a non-empty `about` so we
+      // don't fire on stray matches like "send a quick email" alone.
+      if (addrMatch || about) {
+        try {
+          console.log(`[Chat] Triggering composio email send to=${toField} about="${about}" tone=${chatTone ?? "(infer)"}`);
+          const res = await fetchWithTimeout(
+            `${API_BASE}/api/composio/email/send`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                to: toField,
+                about: about || "Quick note",
+                tone: chatTone ?? undefined, // explicit > inferred
+                hint: lastMessage,
+              }),
+            },
+            45_000
+          );
+          const data = await res.json().catch(() => ({} as any));
+          if (data?.ok) {
+            const tone = data.tone ?? "professional";
+            return NextResponse.json({
+              content: `📧 Composed and queued (${tone} tone), Boss. The email to ${data?.to?.email ?? toField} will send in ~30 seconds unless you cancel from Telegram. Subject: "${data.subject}".`,
+            });
+          }
+          // Common failure: no active Gmail connection. Fall through to
+          // the Playwright path so the user still gets a result.
+          if (data?.error?.includes("no active Gmail connection")) {
+            return NextResponse.json({
+              content: `Gmail isn't connected yet, Boss. Open the Connected Apps panel and link Gmail, then ask me to send the email again.`,
+            });
+          }
+          return NextResponse.json({
+            content: `❌ Couldn't queue the email: ${data?.error ?? "unknown error"}`,
+          });
+        } catch (e: any) {
+          if (e?.name === "AbortError") {
+            return NextResponse.json({
+              content: `⏱️ The email composer is taking too long, Boss. Try again in a moment.`,
+            });
+          }
+          console.error("[Chat] composio email send error:", e);
+          // Return instead of falling through — we've already identified
+          // this as an email send intent, so opening a Playwright Gmail
+          // tab is the wrong recovery path. The dispatch route already
+          // returns a structured error in `data?.error` for the success
+          // branch above; a thrown fetch / network error is the only
+          // case that lands here.
+          return NextResponse.json({
+            content: `❌ Couldn't queue the email: ${e?.message || "unknown error"}`,
+          });
+        }
+      }
+    }
+
     // GMAIL COMPOSE
     const emailPattern = /(?:send|compose|write|draft)\s+(?:an?\s+)?email\s+to\s+(\S+)\s+(?:about|subject|with subject)\s+(.+?)(?:\s+(?:saying|body|message)\s+(.+))?$/i;
     const emailMatch = lastMessage.match(emailPattern);

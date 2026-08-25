@@ -15,6 +15,15 @@ loadEnv({ path: envPath });
 
 async function main() {
   const { runListener, requestStop } = await import("../src/lib/composio/listener");
+  const { startEmailDispatcher, requestEmailDispatcherStop } = await import(
+    "../src/lib/composio/emailDispatcher"
+  );
+
+  // Start the outbound email dispatcher ticker alongside the trigger
+  // listener. Shares the same Prisma client + lifecycle. Started
+  // before runListener() so a 30-second fireAt set by the API route
+  // immediately after server boot is picked up by the next tick.
+  startEmailDispatcher();
 
   // Graceful shutdown — wait up to 5s for in-flight delivery to finish.
   let stopping = false;
@@ -23,6 +32,7 @@ async function main() {
     stopping = true;
     console.log(`[composio-listener] received ${signal}, shutting down...`);
     requestStop();
+    requestEmailDispatcherStop();
     setTimeout(() => {
       console.log("[composio-listener] forced exit after 5s timeout");
       process.exit(1);

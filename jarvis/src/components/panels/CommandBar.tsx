@@ -710,101 +710,81 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
         return `Saved "${title.substring(0, 50)}" to your Notion database. Check your Notion workspace to view it, Boss.`;
       }
 
-      // Direct Email - fixed regex for spoken email addresses with spaces in names
-      // "send email to Dhruv Bijapur 67 at gmail dot com saying good morning"
-      // Speech recognition: "Dhruv Bijapur 67 at gmail dot com"
-      const emailPatterns = [
-        // Standard: "send email to name at domain saying message"
-        /(?:send|email)\s+(?:an?\s+)?(?:email\s+)?(?:to\s+)?(.+?)(?:\s+(?:saying|with subject|about|that|message|body)\s+)(.+)/i,
-        // Simple: "send email to name at domain"
-        /(?:send|email)\s+(?:an?\s+)?(?:email\s+)?(?:to\s+)?(.+?)$/i,
+      // Direct Email — route to the new composio /api/composio/email/send
+      // endpoint, which composes the body via the LLM in the requested
+      // tone and gives the user a 30-second cancel window. The old
+      // /api/send-email path was SMTP-only (no tone, no cancel, regex
+      // was broken for real emails followed by prose). If the user
+      // typed a spoken-style address like "Dhruv Bijapur 67 at gmail
+      // dot com", we still parse that into a real address first.
+      const emailSpokenPatterns = [
+        // "send email to NAME at DOMAIN [about|on|re|saying] BODY [in TONE tone]"
+        /(?:send|email)\s+(?:an?\s+)?(?:email\s+)?(?:to\s+)?(.+?)\s+(?:at|@)\s+(.+?)(?:\s+(?:about|on|regarding|re|saying|with\s+subject|with\s+message|with\s+body|body|message)\s+(.+?))?(?:\s+(?:in|with(?:\s+a)?)\s+(?:a\s+)?(professional|friendly|polite|formal|urgent|casual)\s+(?:tone|way|manner)(?:\s+please)?)?\s*[\.\!]?\s*$/i,
+        // "send email to real@addr.com [about|on|re|saying] BODY [in TONE tone]"
+        /(?:send|email)\s+(?:an?\s+)?(?:email\s+)?(?:to\s+)?([^\s]+@[^\s]+?)(?:\s+(?:about|on|regarding|re|saying|with\s+subject|with\s+message|with\s+body|body|message)\s+(.+?))?(?:\s+(?:in|with(?:\s+a)?)\s+(?:a\s+)?(professional|friendly|polite|formal|urgent|casual)\s+(?:tone|way|manner)(?:\s+please)?)?\s*[\.\!]?\s*$/i,
       ];
 
-      let emailCommandMatch = null;
-      for (const pattern of emailPatterns) {
-        const match = text.match(pattern);
-        if (match) {
-          emailCommandMatch = match;
-          break;
-        }
+      let emailMatch = null;
+      for (const pattern of emailSpokenPatterns) {
+        const m = text.match(pattern);
+        if (m) { emailMatch = m; break; }
       }
 
-      if (emailCommandMatch) {
-        let recipientPart = emailCommandMatch[1]?.trim() || "";
-        let messageContent = emailCommandMatch[2]?.trim() || "Hello from JARVIS";
-
-        // STEP 1: Extract the email portion before any message keywords
-        // Split on common message-starting phrases
-        const messageSplit = recipientPart.split(/\s+(?:saying|with subject|about|that|message|body)\s+/i);
-        recipientPart = messageSplit[0].trim();
-
-        // STEP 2: Parse the email address
-        // Input: "Dhruv Bijapur 67 at gmail dot com"
-        // Strategy: Find "at" separator, everything before is local part, after is domain
-
+      if (emailMatch) {
+        // Pattern 1: "Dhruv Bijapur 67 at gmail dot com" → m[1] + m[2]
+        // Pattern 2: "real@addr.com" → m[1] is the address, m[2]/m[3] are undefined
         let emailAddress = "";
-
-        // Find the "at" separator (spoken as "at")
-        const atMatch = recipientPart.match(/\s+at\s+/i);
-        if (atMatch) {
-          const atIndex = recipientPart.search(/\s+at\s+/i);
-          const localPart = recipientPart.substring(0, atIndex).trim();
-          const domainPart = recipientPart.substring(atIndex + atMatch[0].length).trim();
-
-          // Process local part: remove all spaces, keep alphanumeric and dots
-          const cleanLocal = localPart.toLowerCase().replace(/\s+/g, "");
-
-          // Process domain part: replace "dot" with ".", then remove spaces
-          const cleanDomain = domainPart
+        let about = "";
+        let explicitTone: string | null = null;
+        if (emailMatch[2] && /dot/i.test(emailMatch[2])) {
+          // Spoken pattern.
+          const localPart = emailMatch[1].toLowerCase().replace(/\s+/g, "");
+          const domainPart = emailMatch[2]
             .toLowerCase()
             .replace(/\s+dot\s*/gi, ".")
-            .replace(/\s+/g, "");
-
-          emailAddress = `${cleanLocal}@${cleanDomain}`;
+            .replace(/\s+/g, "")
+            .replace(/\.+$/, "");
+          emailAddress = `${localPart}@${domainPart}`;
+          about = (emailMatch[3] || "").trim();
+          explicitTone = emailMatch[4] ? emailMatch[4].toLowerCase() : null;
         } else {
-          // No "at" found - try to detect if it's already an email-like string
-          emailAddress = recipientPart.toLowerCase().replace(/\s+/g, "");
+          // Real email pattern.
+          emailAddress = emailMatch[1];
+          about = (emailMatch[2] || "").trim();
+          explicitTone = emailMatch[3] ? emailMatch[3].toLowerCase() : null;
         }
 
-        // STEP 3: Validate
-        // Remove any trailing dots
-        emailAddress = emailAddress.replace(/\.+$/, "");
-
-        // Must have exactly one @ and a valid domain
+        // Must have exactly one @ and a valid domain.
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
         if (emailRegex.test(emailAddress)) {
-          const subject = messageContent.substring(0, 50) + (messageContent.length > 50 ? "..." : "");
-
-          // Send the email and await response
           try {
-            const res = await fetch("/api/send-email", {
+            const res = await fetch("/api/composio/email/send", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 to: emailAddress,
-                subject: subject,
-                text: messageContent,
+                about: about || "Quick note",
+                tone: explicitTone || undefined,
+                hint: text,
               }),
             });
-
             const data = await res.json();
 
-            if (data.success) {
-              return `Email sent to ${emailAddress}, Boss.`;
-            } else if (data.error?.includes("not configured")) {
-              setActivePanel("automation");
-              return `Email is not configured. Opening the automation panel so you can set it up, Boss.`;
-            } else {
-              return `Failed to send email: ${data.error || "Unknown error"}, Boss.`;
+            if (data?.ok) {
+              const tone = data.tone ?? "professional";
+              return `📧 Composed and queued (${tone} tone), Boss. The email to ${data?.to?.email ?? emailAddress} will send in ~30 seconds unless you cancel from Telegram. Subject: "${data.subject}".`;
             }
+            if (data?.error?.includes("no active Gmail connection")) {
+              return `Gmail isn't connected yet, Boss. Open the Connected Apps panel and link Gmail, then ask me to send the email again.`;
+            }
+            return `Failed to queue the email: ${data?.error ?? "Unknown error"}, Boss.`;
           } catch (err: any) {
             console.error("[Email] Error:", err);
             return `Failed to send email: ${err.message || "Network error"}, Boss.`;
           }
         } else {
-          // Invalid email format - open automation panel instead
-          setActivePanel("automation");
-          return `I couldn't parse that email address. Opening the email panel where you can enter it manually, Boss.`;
+          // Couldn't parse a real address.
+          return `I couldn't parse that email address, Boss. Try "send an email to NAME at DOMAIN dot COM about TOPIC".`;
         }
       }
     }

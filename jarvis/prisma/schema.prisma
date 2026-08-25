@@ -331,3 +331,35 @@ model ComposioUsage {
   count     Int      @default(0)
   updatedAt DateTime @updatedAt
 }
+
+// Pending outbound email — used for the "auto-send + 30s cancel window"
+// flow. When the user asks JARVIS to send an email, the dispatcher:
+//   1. Composes subject + body via the LLM in the requested tone.
+//   2. Persists a row here with status="pending" and fireAt=now+30s.
+//   3. Posts a Telegram "Sending in 30s. [Cancel]" message.
+//   4. A ticker (in the composio-listener process) flips status to
+//      "sent" once fireAt has passed and calls GMAIL_SEND_EMAIL via
+//      composio. If the user taps the Cancel inline button before
+//      fireAt, the ticker skips the row and posts a "cancelled" ack.
+model PendingEmail {
+  id              String    @id @default(cuid())
+  toEmail         String    // recipient_email
+  toName          String?   // optional display name parsed from "Name <a@b.com>"
+  body            String    // composed body (plain text, no HTML)
+  subject         String
+  tone            String    // "professional" | "friendly" | "polite" | "formal" | "urgent" | "casual"
+  requestRaw      String    // original user request, for audit
+  chatId          BigInt?   // telegram chat that triggered it (for cancel/edit UIs)
+  callbackMessageId BigInt? // telegram msg_id of the "Sending in 30s" message (so we can edit it on send/cancel)
+  fireAt          DateTime  // when the dispatcher should send
+  status          String    @default("pending") // pending | sending | sent | cancelled | failed
+  connectedAccountId String // composio gmail connection id
+  sentMessageId   String?   // composio / gmail message id of the sent email
+  error           String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  sentAt          DateTime?
+
+  @@index([status, fireAt])
+  @@index([chatId, status])
+}

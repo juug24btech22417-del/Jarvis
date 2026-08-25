@@ -12,27 +12,36 @@
 
 import { NextResponse } from "next/server";
 
-const OPENROUTER_FALLBACK_MODELS = [
-  "meta/llama-3.1-8b-instruct",
-  "nvidia/nemotron-3-ultra-550b-a55b:free",
-  "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-  "google/gemma-3-27b-it:free",
-  "mistralai/mistral-small-3.1-24b-instruct:free",
+const OPENROUTER_FALLBACK_MODELS: string[] = [
+  // Aug 2026: every public :free slug we tested returned either
+  // "unavailable for free" (404) or daily-quota-exceeded (429). The
+  // OpenRouter free tier is effectively unavailable for this account.
+  // Kept empty so the chain skips directly to Groq instead of burning
+  // 5 × 5s on dead slugs. Re-populate if the user upgrades.
 ];
 
+// Groq free tier — verified live Aug 2026.
+//   openai/gpt-oss-120b     → 200 but wraps output in <think> blocks
+//                              (would break parseComposed's regex).
+//   openai/gpt-oss-20b      → 200 but content="" (routes to reasoning).
+//   qwen/qwen3.6-27b        → 200 but always adds <think> prefix.
+//   allam-2-7b              → 200, raw SUBJECT:/BODY: output. ✓
+//   groq/compound-mini      → 200, raw SUBJECT:/BODY: output. ✓
+//   llama-3.x, gemma2-9b,
+//   mixtral-8x7b            → 404 / decommissioned (Aug 2026).
 const GROQ_FALLBACK_MODELS = [
-  "llama-3.3-70b-versatile",
-  "llama-3.1-8b-instant",
-  "gemma2-9b-it",
-  "mixtral-8x7b-32768",
+  "allam-2-7b",
+  "groq/compound-mini",
+  "openai/gpt-oss-120b",
 ];
 
 // NVIDIA's current free-tier catalogue — kept narrow on purpose. We
 // spent the budget on a single model that exists; if it's down we
 // drop to OpenRouter / Groq immediately rather than burning 8s on
 // five dead models.
-const NVIDIA_MODELS = [
-  "meta/llama-3.1-8b-instruct",
+const NVIDIA_MODELS: string[] = [
+  // "meta/llama-3.1-8b-instruct" — removed Aug 2026: not in current
+  // NVIDIA NIM free catalogue. OpenRouter/Groq pick up the slack.
 ];
 
 /**
@@ -131,7 +140,10 @@ export async function runLlmChain(prompt: string, opts?: {
         } else {
           const errText = await res.text().catch(() => "");
           console.warn(`[LLM chain] OpenRouter ${model} → HTTP ${res.status}: ${errText.slice(0, 120)}`);
-          if (res.status === 429 || res.status === 404) continue; // try next
+          // 400 = "model not found / deprecated slug", 404 = same family,
+          // 429 = rate-limited. All three mean "try the next model" rather
+          // than burning the full 5s timeout on a dead slug.
+          if (res.status === 400 || res.status === 404 || res.status === 429) continue;
         }
       } catch (e: any) {
         console.warn(`[LLM chain] OpenRouter ${model} failed: ${e?.name || e?.message}`);
