@@ -10,7 +10,7 @@ const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { image, query } = body;
+    const { image, query, mode = "analyze" } = body;
 
     if (!image) {
       return NextResponse.json({ error: "Base64 image is required" }, { status: 400 });
@@ -19,9 +19,14 @@ export async function POST(req: NextRequest) {
     // Strip prefix if present in the base64 string
     const base64Data = image.replace(/^data:image\/\w+;base64,/, "");
 
-    const systemPrompt = query
-      ? `You are JARVIS, a highly intelligent AI assistant. Analyze this screenshot of the user's active screen and answer their query: "${query}". Provide a direct, smart, and helpful response. Keep it concise (around 40-70 words) in your signature sophisticated assistant style.`
-      : `You are JARVIS, a highly intelligent AI assistant. Analyze this screenshot of the user's active screen and describe what you observe. Be conversational, polite, and highlight any notable code, website, document, or active task. Keep it around 40-60 words in your signature sophisticated assistant style.`;
+    let systemPrompt = "";
+    if (mode === "ocr") {
+      systemPrompt = "Extract all readable text from this image. Do not add any conversational text, description, explanation, or greeting. Output ONLY the raw extracted text as is, preserving line structure.";
+    } else if (query) {
+      systemPrompt = `You are JARVIS, a highly intelligent AI assistant. Analyze this screenshot of the user's active screen and answer their query: "${query}". Provide a direct, smart, and helpful response. Keep it concise (around 40-70 words) in your signature sophisticated assistant style.`;
+    } else {
+      systemPrompt = `You are JARVIS, a highly intelligent AI assistant. Analyze this screenshot of the user's active screen and describe what you observe. Be conversational, polite, and highlight any notable code, website, document, or active task. Keep it around 40-60 words in your signature sophisticated assistant style. If you see a terminal command execution error, crash log, compilation error, or system warning, determine the exact shell/terminal command needed to fix it and append 'FIX_COMMAND: <command>' on a new line at the very end of your response (e.g., FIX_COMMAND: npm install lodash).`;
+    }
 
     let responseText = "";
     let provider = "";
@@ -126,6 +131,7 @@ export async function POST(req: NextRequest) {
     // Record the analysis event in Jarvis Memory database
     await recordEvent("screenshot_analysis", {
       provider,
+      mode,
       query: query || null,
       analysis: responseText,
       timestamp: new Date().toISOString(),

@@ -1,5 +1,7 @@
 # JARVIS System-wide Screen Capture & Vision Analysis Daemon
-# Listens globally for Ctrl+Shift+S, captures the screen, POSTs to Next.js API, and speaks the analysis.
+# Listens globally for:
+#   - Ctrl + Shift + S: Region Capture Snipping & VLM Analysis (with Auto-Error Fix Clipboard Copy)
+#   - Ctrl + Shift + T: Region Capture OCR & Clean Text Clipboard Copy
 
 # Ensure we clean up previous window handles if re-run in same terminal session
 if ($global:window) {
@@ -26,17 +28,21 @@ public class HotkeyWindow : NativeWindow, IDisposable
     private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
     private const int WM_HOTKEY = 0x0312;
-    private int _id = 999;
-    public bool Triggered = false;
+    public int TriggeredId = 0;
 
     public HotkeyWindow()
     {
         CreateHandle(new CreateParams());
     }
 
-    public void Register(uint modifiers, uint key)
+    public void Register(int id, uint modifiers, uint key)
     {
-        RegisterHotKey(Handle, _id, modifiers, key);
+        RegisterHotKey(Handle, id, modifiers, key);
+    }
+
+    public void Unregister(int id)
+    {
+        UnregisterHotKey(Handle, id);
     }
 
     protected override void WndProc(ref Message m)
@@ -44,13 +50,14 @@ public class HotkeyWindow : NativeWindow, IDisposable
         base.WndProc(ref m);
         if (m.Msg == WM_HOTKEY)
         {
-            Triggered = true;
+            TriggeredId = (int)m.WParam;
         }
     }
 
     public void Dispose()
     {
-        UnregisterHotKey(Handle, _id);
+        UnregisterHotKey(Handle, 999);
+        UnregisterHotKey(Handle, 888);
         DestroyHandle();
     }
 }
@@ -80,27 +87,57 @@ function Show-Notification ($title, $text) {
 }
 
 # 4. Screenshot and POST processing function
-function Handle-Screenshot {
-    Write-Host "[JARVIS] Processing hotkey trigger..."
-    $Speak.Speak("Screen captured, analyzing.", 1)
-    Show-Notification "JARVIS Screen Capture" "Analyzing screen content..."
+function Handle-Trigger ($triggerId) {
+    $mode = "analyze"
+    if ($triggerId -eq 888) {
+        $mode = "ocr"
+        Write-Host "[JARVIS] Processing OCR capture..."
+        $Speak.Speak("Select text region to extract.", 1)
+        Show-Notification "JARVIS OCR" "Draw a rectangle over the text you wish to copy..."
+    } else {
+        Write-Host "[JARVIS] Processing analysis capture..."
+        $Speak.Speak("Select screen region to analyze.", 1)
+        Show-Notification "JARVIS Screen Analysis" "Draw a rectangle over the target screen area..."
+    }
 
     try {
-        # Capture Primary Screen Bounds
-        Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-        $Screen   = [System.Windows.Forms.Screen]::PrimaryScreen
-        $Bitmap   = New-Object System.Drawing.Bitmap $Screen.Bounds.Width, $Screen.Bounds.Height
-        $Graphics = [System.Drawing.Graphics]::FromImage($Bitmap)
-        $Graphics.CopyFromScreen($Screen.Bounds.Left, $Screen.Bounds.Top, 0, 0, $Bitmap.Size)
+        # Clear clipboard to detect new snip
+        Add-Type -AssemblyName System.Windows.Forms
+        [System.Windows.Forms.Clipboard]::Clear()
+
+        # Trigger Windows Snipping Tool (dimmed overlay for custom region selection)
+        Start-Process "ms-screenclip:"
         
+        # Wait up to 15 seconds for user to draw the snippet
+        $timeout = 15
+        $elapsed = 0.0
+        $img = $null
+        while ($elapsed -lt $timeout) {
+            if ([System.Windows.Forms.Clipboard]::ContainsImage()) {
+                $img = [System.Windows.Forms.Clipboard]::GetImage()
+                break
+            }
+            Start-Sleep -Milliseconds 200
+            $elapsed += 0.2
+        }
+
+        if (-not $img) {
+            Write-Host "[JARVIS] Capture cancelled or timed out."
+            $Speak.Speak("Capture cancelled.", 1)
+            Show-Notification "JARVIS" "Capture timed out or cancelled."
+            return
+        }
+
+        Write-Host "[JARVIS] Image grabbed from clipboard. Uploading..."
+        $Speak.Speak("Analyzing.", 1)
+
         # Save to memory stream as PNG base64
-        $MS       = New-Object System.IO.MemoryStream
-        $Bitmap.Save($MS, [System.Drawing.Imaging.ImageFormat]::Png)
-        $Base64   = [Convert]::ToBase64String($MS.ToArray())
+        $MS = New-Object System.IO.MemoryStream
+        $img.Save($MS, [System.Drawing.Imaging.ImageFormat]::Png)
+        $Base64 = [Convert]::ToBase64String($MS.ToArray())
         
-        # Dispose objects immediately
-        $Bitmap.Dispose()
-        $Graphics.Dispose()
+        # Clean up GDI handles immediately
+        $img.Dispose()
         $MS.Dispose()
         
         # Determine port from .env.local dynamically
@@ -118,48 +155,73 @@ function Handle-Screenshot {
         Write-Host "[JARVIS] Sending screen payload to $uri..."
         
         # Send HTTP POST payload
-        $Body = @{ image = $Base64 } | ConvertTo-Json -Compress
+        $Body = @{ image = $Base64; mode = $mode } | ConvertTo-Json -Compress
         $Response = Invoke-RestMethod -Uri $uri -Method Post -ContentType "application/json" -Body $Body -TimeoutSec 20
         
         if ($Response.success) {
             $analysis = $Response.analysis
-            Write-Host "[JARVIS] Analysis response: $analysis"
-            Show-Notification "JARVIS Observation" $analysis
-            $Speak.Speak($analysis, 1)
+            Write-Host "[JARVIS] Response: $analysis"
+
+            if ($mode -eq "ocr") {
+                # Copy raw extracted text directly to clipboard
+                [System.Windows.Forms.Clipboard]::SetText($analysis)
+                Show-Notification "JARVIS OCR Success" "Text copied to clipboard."
+                $Speak.Speak("Text copied to clipboard.", 1)
+            } else {
+                # Look for fix command patterns (Option 5)
+                # Matches: FIX_COMMAND: <command>
+                if ($analysis -match "(?i)FIX_COMMAND:\s*(.+)") {
+                    $fixCommand = $Matches[1].Trim()
+                    Write-Host "[JARVIS] Extracted Fix Command: $fixCommand"
+                    
+                    # Copy fix command directly to clipboard
+                    [System.Windows.Forms.Clipboard]::SetText($fixCommand)
+                    Show-Notification "JARVIS Error Fixer" "Suggested fix command copied to clipboard: $fixCommand"
+                    $Speak.Speak("Issue detected. I have placed the suggested fix command on your clipboard.", 1)
+                } else {
+                    # Standard analysis mode - copy general response to clipboard for convenience
+                    [System.Windows.Forms.Clipboard]::SetText($analysis)
+                    Show-Notification "JARVIS Observation" $analysis
+                    $Speak.Speak($analysis, 1)
+                }
+            }
         } else {
-            $Speak.Speak("I encountered an issue analyzing your screen.", 1)
-            Show-Notification "JARVIS Error" "Screen analysis API failed."
+            $Speak.Speak("I encountered an issue analyzing your selection.", 1)
+            Show-Notification "JARVIS Error" "VLM analysis API failed."
         }
     } catch {
         Write-Error $_
-        $Speak.Speak("Apologies, I failed to capture your screen.", 1)
-        Show-Notification "JARVIS Error" "Failed to capture or analyze screen."
+        $Speak.Speak("Apologies, I failed to process your selection.", 1)
+        Show-Notification "JARVIS Error" "Failed to process screenshot."
     }
 }
 
 # 5. Initialize global listener
 $global:window = New-Object HotkeyWindow
-# Register modifier keys: Control (0x0002) + Shift (0x0004) = 6
-# Virtual key code for 'S' key is 83 (0x53)
-$global:window.Register(6, 83)
+# Register Hotkeys:
+# 999: Ctrl + Shift + S (Modifiers: Control (0x0002) + Shift (0x0004) = 6, VK: 'S' = 83)
+$global:window.Register(999, 6, 83)
+# 888: Ctrl + Shift + T (Modifiers: Control (0x0002) + Shift (0x0004) = 6, VK: 'T' = 84)
+$global:window.Register(888, 6, 84)
 
 Write-Host "=========================================================="
-Write-Host "JARVIS Global Screen Analysis Daemon Active"
-Write-Host "Press Ctrl + Shift + S on any screen/application to trigger."
-Write-Host "Press Ctrl + C in this terminal to exit."
+Write-Host "JARVIS Screen Capture Upgrades Active:"
+Write-Host " - Ctrl + Shift + S : Region Snip & Analyze (Fix Auto-Copy)"
+Write-Host " - Ctrl + Shift + T : Region Snip & OCR Text Extraction"
 Write-Host "=========================================================="
 
 # Speak greeting
-$Speak.Speak("System screen analysis active. Press Control Shift S at any time.", 1)
-Show-Notification "JARVIS Screen Agent" "Screen analysis system is running. Press Ctrl+Shift+S to analyze your active screen."
+$Speak.Speak("System screen analysis active.", 1)
+Show-Notification "JARVIS Upgraded Screen Agent" "Press Ctrl+Shift+S to analyze selection or Ctrl+Shift+T to extract text."
 
 # 6. Infinite message pumping loop
 try {
     while ($true) {
         [System.Windows.Forms.Application]::DoEvents()
-        if ($global:window.Triggered) {
-            $global:window.Triggered = $false
-            Handle-Screenshot
+        if ($global:window.TriggeredId -ne 0) {
+            $id = $global:window.TriggeredId
+            $global:window.TriggeredId = 0
+            Handle-Trigger $id
         }
         Start-Sleep -Milliseconds 100
     }
@@ -173,5 +235,5 @@ try {
         $global:balloon.Dispose()
         $global:balloon = $null
     }
-    Write-Host "[JARVIS] Screen Analysis Listener stopped cleanly."
+    Write-Host "[JARVIS] Screen Agent stopped cleanly."
 }
