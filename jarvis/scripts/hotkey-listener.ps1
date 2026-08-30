@@ -128,17 +128,43 @@ function Handle-Trigger ($triggerId) {
             return
         }
 
-        Write-Host "[JARVIS] Image grabbed from clipboard. Uploading..."
+        Write-Host "[JARVIS] Image grabbed from clipboard. Resizing and compressing..."
         $Speak.Speak("Analyzing.", 1)
 
-        # Save to memory stream as PNG base64
-        $MS = New-Object System.IO.MemoryStream
-        $img.Save($MS, [System.Drawing.Imaging.ImageFormat]::Png)
-        $Base64 = [Convert]::ToBase64String($MS.ToArray())
-        
-        # Clean up GDI handles immediately
+        # Resize image to max 1280px wide (keeps aspect ratio) to dramatically reduce payload size
+        Add-Type -AssemblyName System.Drawing
+        $maxWidth = 1280
+        $origW = $img.Width
+        $origH = $img.Height
+        if ($origW -gt $maxWidth) {
+            $scale   = $maxWidth / $origW
+            $newW    = $maxWidth
+            $newH    = [int]($origH * $scale)
+        } else {
+            $newW = $origW
+            $newH = $origH
+        }
+        $resized = New-Object System.Drawing.Bitmap $newW, $newH
+        $g = [System.Drawing.Graphics]::FromImage($resized)
+        $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $g.DrawImage($img, 0, 0, $newW, $newH)
+        $g.Dispose()
         $img.Dispose()
+
+        # Encode as JPEG at 70% quality — far smaller than PNG, well within API limits
+        $jpegCodec    = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq "image/jpeg" }
+        $encoderParams = New-Object System.Drawing.Imaging.EncoderParameters(1)
+        $encoderParams.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter(
+            [System.Drawing.Imaging.Encoder]::Quality, [long]70
+        )
+        $MS = New-Object System.IO.MemoryStream
+        $resized.Save($MS, $jpegCodec, $encoderParams)
+        $Base64 = [Convert]::ToBase64String($MS.ToArray())
+        $resized.Dispose()
         $MS.Dispose()
+
+        $payloadKB = [math]::Round($Base64.Length / 1024, 1)
+        Write-Host "[JARVIS] Payload size: ${payloadKB} KB (${newW}x${newH} JPEG)"
         
         # Determine port from .env.local dynamically
         $port = 3000
@@ -152,11 +178,11 @@ function Handle-Trigger ($triggerId) {
         }
         
         $uri = "http://localhost:$port/api/screenshot/analyze"
-        Write-Host "[JARVIS] Sending screen payload to $uri..."
+        Write-Host "[JARVIS] Sending payload to $uri..."
         
-        # Send HTTP POST payload
+        # Send HTTP POST — 90s timeout to comfortably handle vision model latency
         $Body = @{ image = $Base64; mode = $mode } | ConvertTo-Json -Compress
-        $Response = Invoke-RestMethod -Uri $uri -Method Post -ContentType "application/json" -Body $Body -TimeoutSec 20
+        $Response = Invoke-RestMethod -Uri $uri -Method Post -ContentType "application/json" -Body $Body -TimeoutSec 90
         
         if ($Response.success) {
             $analysis = $Response.analysis

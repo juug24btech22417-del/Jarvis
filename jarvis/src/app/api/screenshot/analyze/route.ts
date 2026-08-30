@@ -7,6 +7,9 @@ const NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 
+// Allow this route up to 90 seconds — vision models on large images can be slow
+export const maxDuration = 90;
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -31,12 +34,13 @@ export async function POST(req: NextRequest) {
     let responseText = "";
     let provider = "";
 
-    // 1. Try NVIDIA API (llama-3.2-90b-vision-instruct)
+    // 1. Try NVIDIA API (llama-3.2-90b-vision-instruct) — 60s timeout
     if (NVIDIA_API_KEY) {
       try {
         console.log("[Screenshot API] Sending request to NVIDIA...");
         const response = await fetch(NVIDIA_API_URL, {
           method: "POST",
+          signal: AbortSignal.timeout(60000),
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${NVIDIA_API_KEY}`,
@@ -51,7 +55,7 @@ export async function POST(req: NextRequest) {
                   {
                     type: "image_url",
                     image_url: {
-                      url: `data:image/png;base64,${base64Data}`,
+                      url: `data:image/jpeg;base64,${base64Data}`,
                     },
                   },
                 ],
@@ -71,16 +75,17 @@ export async function POST(req: NextRequest) {
           console.warn("[Screenshot API] NVIDIA failed with status:", response.status, errorMsg);
         }
       } catch (nvidiaErr) {
-        console.warn("[Screenshot API] NVIDIA error:", nvidiaErr);
+        console.warn("[Screenshot API] NVIDIA error (will try GROQ):", nvidiaErr);
       }
     }
 
-    // 2. Try GROQ API (llama-3.2-11b-vision-preview) as fallback
+    // 2. Try GROQ API (llama-3.2-11b-vision-preview) as fallback — 60s timeout
     if (!responseText && GROQ_API_KEY) {
       try {
-        console.log("[Screenshot API] Falling back/Sending request to GROQ...");
+        console.log("[Screenshot API] Falling back to GROQ...");
         const response = await fetch(GROQ_API_URL, {
           method: "POST",
+          signal: AbortSignal.timeout(60000),
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${GROQ_API_KEY}`,
@@ -95,7 +100,7 @@ export async function POST(req: NextRequest) {
                   {
                     type: "image_url",
                     image_url: {
-                      url: `data:image/png;base64,${base64Data}`,
+                      url: `data:image/jpeg;base64,${base64Data}`,
                     },
                   },
                 ],
