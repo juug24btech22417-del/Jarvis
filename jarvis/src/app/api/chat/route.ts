@@ -596,8 +596,11 @@ function generateOfflineResponse(lastMessage: string, reason: "no_llm" | "rate_l
     return "I can't fetch the latest news while offline, Boss. Please check a news website or connect me to the internet for updates.";
   }
 
-  // Email check
-  if (lastMessage.match(/email|mail|inbox|gmail/)) {
+  // Email check. Don't trap queries that the composio shortcut will
+  // handle (check / summarise / what's in / any new …) — those reach
+  // the live Gmail fetch below at the composioQueryMatch branch.
+  const isComposioEmailQuery = /\b(check|summari[sz]e|summary|read|what'?s in|any new|unread|latest)\b[^?]*\b(emails?|mail|inbox|gmail)\b/i.test(lastMessage);
+  if (!isComposioEmailQuery && lastMessage.match(/email|mail|inbox|gmail/)) {
     return "I can't access your emails while offline, Boss. Once connected with Gmail integration, I can check your inbox and summarize messages.";
   }
 
@@ -634,6 +637,72 @@ function generateOfflineResponse(lastMessage: string, reason: "no_llm" | "rate_l
 
   // Default response
   return `Understood, Boss.${rateLimitedNote} Right now I can only handle tasks, reminders, calculations, time queries, and a few other local commands. For full AI responses, wait a minute and try again, or check your API keys in .env.local.`;
+}
+
+/**
+ * Live Gmail inbox shortcut. Hits /api/composio/inbox and returns a
+ * formatted text response. Returns null when the user didn't ask for
+ * Gmail OR the inbox fetch failed (so callers can fall through to the
+ * event-log query or the offline handler). Used by:
+ *   - the main composio shortcut (LLM path) to short-circuit LLM calls
+ *   - the offline-fallback path so "summarise my inbox" still works
+ *     when the LLM chain is dead.
+ */
+async function tryLiveInboxShortcut(
+  lastMessage: string
+): Promise<NextResponse | null> {
+  const lower = lastMessage.toLowerCase();
+  if (!/\b(gmail|email|mail|inbox)\b/.test(lower)) return null;
+  try {
+    const unreadOnly = /\b(unread|new)\b/.test(lower);
+    const numMatch = lower.match(/\b(\d{1,2})\b/);
+    const limit = Math.min(15, Math.max(5, numMatch ? parseInt(numMatch[1], 10) || 10 : 10));
+    const ir = await fetchWithTimeout(
+      `${API_BASE}/api/composio/inbox?${new URLSearchParams({
+        unread: unreadOnly ? "true" : "false",
+        limit: String(limit),
+      }).toString()}`,
+      { method: "GET" },
+      6000
+    );
+    if (!ir.ok) return null;
+    const inbox = (await ir.json()) as {
+      ok: boolean;
+      count: number;
+      messages: Array<{
+        subject: string;
+        from: string;
+        fromEmail: string;
+        date: string | null;
+        snippet: string;
+        link: string | null;
+        isUnread: boolean;
+      }>;
+    };
+    if (!inbox.ok || inbox.count === 0) {
+      return NextResponse.json({
+        content: `No${unreadOnly ? " unread" : ""} emails in your inbox right now, Boss.`,
+      });
+    }
+    const lines: string[] = [];
+    lines.push(
+      `📧 ${inbox.count} email${inbox.count === 1 ? "" : "s"} in your inbox (${unreadOnly ? "unread only" : "latest"}, live):\n`
+    );
+    for (const m of inbox.messages.slice(0, 12)) {
+      const subj = m.subject.length > 90 ? m.subject.slice(0, 87) + "…" : m.subject;
+      const star = m.isUnread ? "● " : "  ";
+      const dateBit = m.date
+        ? new Date(m.date).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+        : "";
+      const who = m.from && m.from !== m.fromEmail ? m.from : (m.fromEmail || "Unknown");
+      lines.push(`${star}${subj}  — ${who}${dateBit ? "  _(" + dateBit + ")_" : ""}`);
+    }
+    if (inbox.count > 12) lines.push(`\n…and ${inbox.count - 12} more.`);
+    return NextResponse.json({ content: lines.join("\n") });
+  } catch (e) {
+    console.warn("[Chat] tryLiveInboxShortcut failed:", e);
+    return null;
+  }
 }
 
 export async function POST(request: Request) {
@@ -892,6 +961,18 @@ export async function POST(request: Request) {
         console.log("[Chat] Composio event log query shortcut");
         // Infer time window + source from the question.
         const lower = lastMessage.toLowerCase();
+
+        // Gmail-specific shortcut: prefer a live fetch over the cached
+        // event log so the user always sees their actual current inbox
+        // (the listener log can lag when Pusher reconnects or the
+        // listener process has been restarted). Same helper is called
+        // again later from the offline-fallback path so LLM outages
+        // don't make "summarise my inbox" useless.
+        if (/\b(gmail|email|mail|inbox)\b/.test(lower)) {
+          const liveResp = await tryLiveInboxShortcut(lastMessage);
+          if (liveResp) return liveResp;
+        }
+
         let sinceHours = 24;
         const sinceMatch = lower.match(/\b(today|this\s+morning|this\s+hour|tonight)\b/);
         if (sinceMatch) sinceHours = 24;
@@ -905,6 +986,7 @@ export async function POST(request: Request) {
         else if (/\b(notion)\b/.test(lower)) source = "notion";
 
         const since = new Date(Date.now() - sinceHours * 3600 * 1000).toISOString();
+
         const params = new URLSearchParams({ since, limit: "30" });
         if (source) params.set("source", source);
 
@@ -1709,6 +1791,12 @@ const emailProgrammaticMatch =
     }
 
     if (!useNvidia && !useAnthropic) {
+      // LLM is dead — before falling back to a canned offline response,
+      // try the live Gmail inbox shortcut so "summarise my inbox" still
+      // works even when every provider is down.
+      const inboxResp = await tryLiveInboxShortcut(lastMessage);
+      if (inboxResp) return inboxResp;
+
       const rawResponse = generateOfflineResponse(lastMessage, "no_llm", stats);
       const wrappedResponse = await applyPersonalityWrapper(rawResponse, nvidiaApiKey || "");
       return NextResponse.json({

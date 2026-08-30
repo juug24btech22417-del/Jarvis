@@ -37,8 +37,12 @@ export async function GET(req: Request) {
     MAX_LIMIT
   );
 
-  const where: { receivedAt: { gte: Date }; source?: string } = { receivedAt: { gte: since } };
+  const where: { receivedAt: { gte: Date }; source?: string; NOT?: { source: string } } = { receivedAt: { gte: since } };
   if (source) where.source = source;
+  // Filter out dev/test noise — those rows were written by
+  // /api/composio/test for diagnostics and shouldn't appear in
+  // user-facing summaries.
+  if (!source) where.NOT = { source: "test" };
 
   const rows = await prisma.composioEventLog.findMany({
     where,

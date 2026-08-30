@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "hotkey": "powershell -ExecutionPolicy Bypass -File scripts/hotkey-listener.ps1"
   },
   "dependencies": {
     "@composio/core": "^0.17.0",
