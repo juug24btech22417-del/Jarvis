@@ -1,14 +1,10 @@
 // Telegram image description.
 //
-// Single working free-tier vision model on OpenRouter (verified
-// 2026-08-13): `nvidia/nemotron-nano-12b-v2-vl:free`. The previous
-// chain of paid Gemini / Llama-VL models returned 404 for this user —
-// their OpenRouter key has no credits. We try the free model first
-// and only fall back to the paid Gemini if the user opts in by
-// setting `TELEGRAM_VISION_MODEL` in env.
+// Single working free-tier vision model on OpenRouter: `google/gemma-4-31b-it:free`.
+// We try the free models first.
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const DEFAULT_VISION_MODEL = "nvidia/nemotron-nano-12b-v2-vl:free";
+const DEFAULT_VISION_MODEL = "google/gemma-4-31b-it:free";
 
 export async function describeImage(
   buff: Buffer,
@@ -29,8 +25,8 @@ export async function describeImage(
 
   const modelsToTry = [
     preferredModel,
-    "google/gemma-4-31b-it:free",
-    "google/gemini-2.5-flash"
+    "google/gemma-4-26b-a4b-it:free",
+    "deepseek/deepseek-v4-flash-vision-exp",
   ];
 
   let lastError: any = null;
@@ -63,7 +59,7 @@ async function tryOpenRouter(
 
   const dataUrl = `data:${mime};base64,${buff.toString("base64")}`;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 25_000); // 25s cap per attempt since we have fallbacks
+  const timer = setTimeout(() => controller.abort(), 7_000); // 7s cap per attempt since we have fallbacks
 
   try {
     const res = await fetch(OPENROUTER_URL, {

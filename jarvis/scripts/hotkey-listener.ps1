@@ -131,9 +131,9 @@ function Handle-Trigger ($triggerId) {
         Write-Host "[JARVIS] Image grabbed from clipboard. Resizing and compressing..."
         $Speak.Speak("Analyzing.", 1)
 
-        # Resize image to max 1280px wide (keeps aspect ratio) to dramatically reduce payload size
+        # Resize image to max 960px wide (keeps aspect ratio) to speed up upload & VLM reasoning
         Add-Type -AssemblyName System.Drawing
-        $maxWidth = 1280
+        $maxWidth = 960
         $origW = $img.Width
         $origH = $img.Height
         if ($origW -gt $maxWidth) {
@@ -151,11 +151,11 @@ function Handle-Trigger ($triggerId) {
         $g.Dispose()
         $img.Dispose()
 
-        # Encode as JPEG at 70% quality — far smaller than PNG, well within API limits
+        # Encode as JPEG at 55% quality — fast to transfer, highly readable for VLM
         $jpegCodec    = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq "image/jpeg" }
         $encoderParams = New-Object System.Drawing.Imaging.EncoderParameters(1)
         $encoderParams.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter(
-            [System.Drawing.Imaging.Encoder]::Quality, [long]70
+            [System.Drawing.Imaging.Encoder]::Quality, [long]55
         )
         $MS = New-Object System.IO.MemoryStream
         $resized.Save($MS, $jpegCodec, $encoderParams)
@@ -182,8 +182,26 @@ function Handle-Trigger ($triggerId) {
         
         # Send HTTP POST — 90s timeout to comfortably handle vision model latency
         $Body = @{ image = $Base64; mode = $mode } | ConvertTo-Json -Compress
-        $Response = Invoke-RestMethod -Uri $uri -Method Post -ContentType "application/json" -Body $Body -TimeoutSec 90
-        
+        try {
+            $RawResponse = Invoke-WebRequest -Uri $uri -Method Post -ContentType "application/json" -Body $Body -TimeoutSec 90 -UseBasicParsing
+        } catch {
+            # Read the actual error body from the WebException
+            $errStream = $_.Exception.Response.GetResponseStream()
+            $errBody   = ""
+            if ($errStream) {
+                $reader  = New-Object System.IO.StreamReader($errStream)
+                $errBody = $reader.ReadToEnd()
+                $reader.Close()
+            }
+            Write-Host "[JARVIS] Server returned error: $($_.Exception.Message)"
+            Write-Host "[JARVIS] Error details: $errBody"
+            $Speak.Speak("Server error. Check the terminal for details.", 1)
+            Show-Notification "JARVIS Error" "API returned an error. Check terminal."
+            return
+        }
+
+        $Response = $RawResponse.Content | ConvertFrom-Json
+
         if ($Response.success) {
             $analysis = $Response.analysis
             Write-Host "[JARVIS] Response: $analysis"
