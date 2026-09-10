@@ -403,6 +403,59 @@ model Milestone {
   @@index([happenedAt])
 }
 
+// Browser watchers — recurring automations with a trigger condition.
+// "Watch this product, ping me under 1000" — a workflow that runs on a
+// schedule, extracts a value, and fires a Telegram alert when the
+// condition is met.
+model WatchJob {
+  id            String   @id @default(cuid())
+  name          String
+  workflow      String   // workflow id OR "custom" with actionsJson
+  actionsJson   String?  // custom action list when workflow == "custom"
+  variablesJson String   @default("{}")
+  selector      String?  // where to read the value (for custom checks)
+  extract       String   @default("price") // price | text | contains
+  condition     String   @default("lt")    // lt | gt | eq | changed | contains
+  threshold     Float?   // numeric target for lt/gt/eq
+  expectedText  String?  // target text for contains
+  intervalMin   Int      @default(60)      // how often to check
+  active        Boolean  @default(true)
+  lastValue     String?
+  lastCheckedAt DateTime?
+  lastAlertAt   DateTime?
+  checkCount    Int      @default(0)
+  createdAt     DateTime @default(now())
+
+  @@index([active, lastCheckedAt])
+}
+
+// Watcher price/value history — powers sparklines and "down from Tuesday".
+model WatchSample {
+  id        String   @id @default(cuid())
+  watchId   String
+  value     Float?
+  text      String?
+  takenAt   DateTime @default(now())
+
+  @@index([watchId, takenAt])
+}
+
+// Browser run history — every automation run, replayable and searchable.
+model BrowserRun {
+  id          String   @id @default(cuid())
+  workflow    String   // workflow id, "custom", or "agent"
+  goal        String?  // for agent runs
+  variables   String   @default("{}")
+  success     Boolean
+  summary     String?
+  errorCount  Int      @default(0)
+  durationMs  Int
+  screenshotPath String? // written to public/automation/<id>.jpg
+  createdAt   DateTime @default(now())
+
+  @@index([createdAt])
+}
+
 // Per-day event counter for the composio free-tier ceiling (20k/mo).
 // One row per UTC day. `count` increments on every real event delivered;
 // the panel shows today/total.

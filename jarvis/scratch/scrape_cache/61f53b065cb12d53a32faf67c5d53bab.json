@@ -1,0 +1,26 @@
+{
+  "success": true,
+  "url": "https://dashboard.composio.dev/juug24btech22417_workspace/Jarvis/toolkits",
+  "title": "Sign in",
+  "markdown": "![Logo](https://workos.imgix.net/app-branding/environment_01JY0ZDGGWMS5E8216ZVC6ADPQ/01KSEEH10ARJM6SMNNMSK8EPPE)![Logo](https://workos.imgix.net/app-branding/environment_01JY0ZDGGWMS5E8216ZVC6ADPQ/01KSEEH10H8ZPRQRRH10RNGW62)\n\n# Sign in\n\nEmail\n\nContinue with email\n\nOR\n\n[Continue with Google](https://login.composio.dev/api/login?provider=GoogleOAuth&state=Fe26.2%2A1%2Ad0ed110bb8522a9e5e77d1976a453051f854d4430f1a84ce70902bd302d872ca%2Ay2g5snDza5_UdM62EZu9KA%2Aq9GsOy4c5DrxCp3VWsMNVYIGrMD3W_4HueZew3X-TTbsjSpLnCBlKQVERnbZWfoftYebIQaY3buc6yFp-WlSABZBA6H30WKggp9nbOH3UJLKR9-1FzDadeP7GIhJxYUhox9JPQW348deO5S0aT_l2JufPQYeGbAqRJSLJY8Vzp8BTZCyOLafADCZrU9RjsG00L5aaie9Zjd_gvpL1VYTtYbgZIpGGd9MawhxZqlD_6nPx2Sfe6U2mcxuhbK2CTcjaLOSEFuFwnCsV26es_6Kmd__7LrP6Ay8IvDbQrUf1IqfZkmnQfbnn-LHdfdf_gvc%2A1787663454775%2A50bb056a15d9cee0a6e2ca0348ada94623f77222585a47a86c43f519cee1b7d1%2AdsMDo-rmrnLTs8kD9syRtQlsNX7TjEz_XeuzVEip5Fo~2&redirect_uri=https%3A%2F%2Fdashboard.composio.dev%2Fauth%2Fcallback&client_id=client_01JY0ZDGPXMB4R2FBRVZAK1TKP&source=signin&authorization_session_id=01M0WG4TZ2FG2768X0434Y39W2)\n\n[Continue with GitHub](https://login.composio.dev/api/login?provider=GitHubOAuth&state=Fe26.2%2A1%2Ad0ed110bb8522a9e5e77d1976a453051f854d4430f1a84ce70902bd302d872ca%2Ay2g5snDza5_UdM62EZu9KA%2Aq9GsOy4c5DrxCp3VWsMNVYIGrMD3W_4HueZew3X-TTbsjSpLnCBlKQVERnbZWfoftYebIQaY3buc6yFp-WlSABZBA6H30WKggp9nbOH3UJLKR9-1FzDadeP7GIhJxYUhox9JPQW348deO5S0aT_l2JufPQYeGbAqRJSLJY8Vzp8BTZCyOLafADCZrU9RjsG00L5aaie9Zjd_gvpL1VYTtYbgZIpGGd9MawhxZqlD_6nPx2Sfe6U2mcxuhbK2CTcjaLOSEFuFwnCsV26es_6Kmd__7LrP6Ay8IvDbQrUf1IqfZkmnQfbnn-LHdfdf_gvc%2A1787663454775%2A50bb056a15d9cee0a6e2ca0348ada94623f77222585a47a86c43f519cee1b7d1%2AdsMDo-rmrnLTs8kD9syRtQlsNX7TjEz_XeuzVEip5Fo~2&redirect_uri=https%3A%2F%2Fdashboard.composio.dev%2Fauth%2Fcallback&client_id=client_01JY0ZDGPXMB4R2FBRVZAK1TKP&source=signin&authorization_session_id=01M0WG4TZ2FG2768X0434Y39W2)\n\nDon't have an account? [Sign up](https://login.composio.dev/sign-up?state=Fe26.2%2A1%2Ad0ed110bb8522a9e5e77d1976a453051f854d4430f1a84ce70902bd302d872ca%2Ay2g5snDza5_UdM62EZu9KA%2Aq9GsOy4c5DrxCp3VWsMNVYIGrMD3W_4HueZew3X-TTbsjSpLnCBlKQVERnbZWfoftYebIQaY3buc6yFp-WlSABZBA6H30WKggp9nbOH3UJLKR9-1FzDadeP7GIhJxYUhox9JPQW348deO5S0aT_l2JufPQYeGbAqRJSLJY8Vzp8BTZCyOLafADCZrU9RjsG00L5aaie9Zjd_gvpL1VYTtYbgZIpGGd9MawhxZqlD_6nPx2Sfe6U2mcxuhbK2CTcjaLOSEFuFwnCsV26es_6Kmd__7LrP6Ay8IvDbQrUf1IqfZkmnQfbnn-LHdfdf_gvc%2A1787663454775%2A50bb056a15d9cee0a6e2ca0348ada94623f77222585a47a86c43f519cee1b7d1%2AdsMDo-rmrnLTs8kD9syRtQlsNX7TjEz_XeuzVEip5Fo~2&redirect_uri=https%3A%2F%2Fdashboard.composio.dev%2Fauth%2Fcallback&authorization_session_id=01M0WG4TZ2FG2768X0434Y39W2)",
+  "metadata": {
+    "language": "en-US",
+    "viewport": "width=device-width, initial-scale=1",
+    "title": "Sign in",
+    "sentry-trace": "4d20a57eedea01d6419ef5c28d363442-b9d6073c4b802199",
+    "baggage": "sentry-environment=production,sentry-release=28001d41c9851ae4624f5f50e2d10c9d08a6f03c,sentry-public_key=2a215ef4e0e312bcc7c2c9dd67763aac,sentry-trace_id=4d20a57eedea01d6419ef5c28d363442,sentry-org_id=207216",
+    "next-size-adjust": "",
+    "favicon": "https://workos.imgix.net/app-branding/environment_01JY0ZDGGWMS5E8216ZVC6ADPQ/01KSEEH1027V24WYC9RF1AZC8M",
+    "scrapeId": "01a03902-66d1-779f-84f8-d578a8dacd46",
+    "sourceURL": "https://dashboard.composio.dev/juug24btech22417_workspace/Jarvis/toolkits",
+    "url": "https://login.composio.dev/?client_id=client_01JY0ZDGPXMB4R2FBRVZAK1TKP&redirect_uri=https%3A%2F%2Fdashboard.composio.dev%2Fauth%2Fcallback&state=Fe26.2*1*d0ed110bb8522a9e5e77d1976a453051f854d4430f1a84ce70902bd302d872ca*y2g5snDza5_UdM62EZu9KA*q9GsOy4c5DrxCp3VWsMNVYIGrMD3W_4HueZew3X-TTbsjSpLnCBlKQVERnbZWfoftYebIQaY3buc6yFp-WlSABZBA6H30WKggp9nbOH3UJLKR9-1FzDadeP7GIhJxYUhox9JPQW348deO5S0aT_l2JufPQYeGbAqRJSLJY8Vzp8BTZCyOLafADCZrU9RjsG00L5aaie9Zjd_gvpL1VYTtYbgZIpGGd9MawhxZqlD_6nPx2Sfe6U2mcxuhbK2CTcjaLOSEFuFwnCsV26es_6Kmd__7LrP6Ay8IvDbQrUf1IqfZkmnQfbnn-LHdfdf_gvc*1787663454775*50bb056a15d9cee0a6e2ca0348ada94623f77222585a47a86c43f519cee1b7d1*dsMDo-rmrnLTs8kD9syRtQlsNX7TjEz_XeuzVEip5Fo%7E2&authorization_session_id=01M0WG4TZ2FG2768X0434Y39W2",
+    "statusCode": 200,
+    "contentType": "text/html; charset=utf-8",
+    "timezone": "America/New_York",
+    "proxyUsed": "basic",
+    "cacheState": "miss",
+    "indexId": "a16c935b-03c9-49a0-b4a6-ae4baca5572d",
+    "creditsUsed": 1,
+    "concurrencyLimited": false
+  }
+}
