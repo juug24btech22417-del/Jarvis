@@ -47,7 +47,7 @@ async function applyPersonalityWrapper(factualResponse: string, apiKey: string):
         "Authorization": `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: "deepseek-ai/deepseek-v4-flash",
+        model: "deepseek-ai/deepseek-v4-flash-0731",
         messages: [
           { role: "system", content: PERSONALITY_WRAPPER_PROMPT },
           { role: "user", content: factualResponse },
