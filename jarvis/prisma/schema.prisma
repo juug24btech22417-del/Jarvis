@@ -323,6 +323,73 @@ model ComposioEventLog {
   @@index([retentionUntil])
 }
 
+// Companion care — emotional follow-up threads.
+// When the user mentions something personal (an exam, a deadline, feeling
+// stressed, a big event), JARVIS logs a thread here and proactively asks
+// about it in a later greeting, like a friend who was actually listening.
+model FollowUpThread {
+  id          String    @id @default(cuid())
+  topic       String    // short label, e.g. "DSA exam"
+  detail      String?   // fuller context, e.g. "Dhruv has a DSA exam on Sep 12"
+  kind        String    // event | stressor | goal | person | health | celebration
+  dueAt       DateTime? // when the event is expected to have happened
+  status      String    @default("open") // open | asked | resolved | expired
+  askedCount  Int       @default(0)
+  resolvedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([status, dueAt])
+  @@index([kind, status])
+}
+
+// Companion care — mood samples.
+// Lightweight mood/energy readings inferred from chats (LLM) or stated
+// directly ("I'm exhausted"). Powers tone adaptation and check-ins.
+model MoodSample {
+  id        String   @id @default(cuid())
+  mood      String   // great | good | neutral | low | stressed | tired
+  score     Int      // 1-5 (5 = great), quick numeric sorting
+  energy    String?  // high | normal | low
+  source    String   // inferred | stated
+  note      String?  // what was actually said, for later reflection
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+// Companion care — presence log.
+// One row per session so JARVIS knows how long you were away and can say
+// "Two days, Sir. I was starting to wonder." Also enables late-night
+// streak awareness.
+// Companion care — people threads.
+// JARVIS notices who matters to you ("my dad", "my friend Rahul") and
+// quietly tracks how long it's been since you last mentioned them, so he
+// can ask about them like a friend would.
+model PersonThread {
+  id           String    @id @default(cuid())
+  name         String    // how the user refers to them: "dad", "Rahul"
+  relation     String?   // dad | friend | roommate | boss | ... (best-effort)
+  mentionCount Int       @default(1)
+  lastMention  DateTime  @default(now())
+  context      String?   // last thing said about them
+  status       String    @default("active") // active | quiet | resolved
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([name])
+  @@index([lastMention])
+}
+
+model PresenceLog {
+  id         String   @id @default(cuid())
+  sessionKey String   @unique // YYYY-MM-DD-sessionid
+  gapHours   Float    // hours since previous session (0 for the first)
+  lastSeenAt DateTime
+
+  @@index([lastSeenAt])
+}
+
 // Per-day event counter for the composio free-tier ceiling (20k/mo).
 // One row per UTC day. `count` increments on every real event delivered;
 // the panel shows today/total.

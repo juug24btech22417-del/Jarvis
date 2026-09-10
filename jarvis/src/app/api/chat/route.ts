@@ -11,6 +11,7 @@ import { retrieveRelevantMemories, formatMemoryContextAsPrompt } from "@/lib/mem
 import { extractAndStoreMemories } from "@/lib/memory/extractor";
 import { bumpUsage } from "@/lib/memory/graph";
 import { recordEvent } from "@/lib/memory/patterns";
+import { getCareContext, recordCareSignals, getPastWin } from "@/lib/companion/care";
 
 // Use environment variable or default to port 3000 for the API base URL
 const API_BASE = process.env.INTERNAL_API_URL || 'http://localhost:3000';
@@ -708,10 +709,19 @@ async function tryLiveInboxShortcut(
 export async function POST(request: Request) {
   try {
     const { messages, systemPrompt } = await request.json();
+    if (!Array.isArray(messages)) {
+      return NextResponse.json({ error: "messages must be an array" }, { status: 400 });
+    }
 
     const lastUserMessage = messages.find((m: { role: string }) => m.role === "user")?.content || "";
     extractAndStoreMemories(lastUserMessage).catch(err => {
       console.error("[Chat] Memory extraction failed:", err);
+    });
+
+    // Companion care: detect emotional signals (exams, stress, moods, wins)
+    // and persist them as follow-up threads / mood samples. Fire-and-forget.
+    recordCareSignals(lastUserMessage).catch(err => {
+      console.warn("[Chat] Care signal recording failed (non-fatal):", err?.message);
     });
 
     // Tier 1C: observe that the user is searching/asking — feeds pattern detection.
@@ -753,7 +763,37 @@ export async function POST(request: Request) {
     const isStatusQuery = /(?:system\s+)?status|diagnostics|system\s+health|battery\s+(?:level|status|percent)|cpu\s+(?:load|usage|temp)|ram\s+(?:usage|free|status)|storage\s+(?:space|free|status)/i.test(lastMessage);
     const stats = isStatusQuery ? await getSystemStatus() : null;
 
+    // Companion care context: presence gap, open follow-up threads, recent
+    // mood — the stuff that makes JARVIS feel like he actually knows you.
+    let carePromptBlock = "";
+    try {
+      const care = await getCareContext();
+      carePromptBlock = care.promptBlock;
+    } catch (err) {
+      console.warn("[Chat] Care context failed (non-fatal):", err);
+    }
+
     let enhancedSystemPrompt = memoryContext ? `${systemPrompt}\n\n${memoryContext}` : systemPrompt;
+    if (carePromptBlock) enhancedSystemPrompt += carePromptBlock;
+
+    // Vent mode: when he says he just needs to talk, JARVIS stops being
+    // an assistant entirely. No tasks, no solutions, no silver linings —
+    // just presence. If there's a past win on record, he may gently
+    // recall it, but only if the moment is right.
+    const ventMode = /\b(just need to (talk|vent)|let me vent|no solutions|just listen|don'?t fix)\b/i.test(lastUserMessage);
+    if (ventMode) {
+      const pastWin = await getPastWin().catch(() => null);
+      enhancedSystemPrompt += `\n\n── VENT MODE ─────────────────────────────────────\n` +
+        `Boss needs to vent. For this conversation:\n` +
+        `- DO NOT offer solutions, action plans, or advice unless he explicitly asks for it.\n` +
+        `- DO NOT silver-line this ("at least..."). Just acknowledge and stay present.\n` +
+        `- Short, warm responses. It's a conversation, not a briefing.\n` +
+        `- Ask one small follow-up question at most, then mostly listen.\n` +
+        (pastWin
+          ? `- If the moment genuinely fits, you may gently recall this past moment of his: "${pastWin.slice(0, 160)}" — but only once, and only if it lands naturally.\n`
+          : "") +
+        `──────────────────────────────────────────────────`;
+    }
     if (stats) {
       const statsCtx = `\n\n── CURRENT SYSTEM STATUS ────────────────────────\n` +
         `Use this real-time system status data to answer any questions about status/diagnostics:\n` +

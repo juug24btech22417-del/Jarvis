@@ -1,5 +1,6 @@
 // AES-256-GCM Encryption for Message Vault
-// Uses Web Crypto API for browser-based encryption
+// Uses the Web Crypto API (available in browsers AND Node 18+ as a global,
+// so these functions are safe to call from both client and server code).
 
 const ALGORITHM = 'AES-GCM';
 const KEY_LENGTH = 256;
@@ -7,7 +8,7 @@ const KEY_LENGTH = 256;
 // Generate a key from a password using PBKDF2
 export async function deriveKey(password: string, salt: Uint8Array | ArrayBuffer): Promise<CryptoKey> {
   const encoder = new TextEncoder();
-  const keyMaterial = await window.crypto.subtle.importKey(
+  const keyMaterial = await crypto.subtle.importKey(
     'raw',
     encoder.encode(password),
     { name: 'PBKDF2' },
@@ -17,7 +18,7 @@ export async function deriveKey(password: string, salt: Uint8Array | ArrayBuffer
 
   const saltBuffer = salt instanceof Uint8Array ? salt.buffer : salt;
 
-  return window.crypto.subtle.deriveKey(
+  return crypto.subtle.deriveKey(
     {
       name: 'PBKDF2',
       salt: saltBuffer as ArrayBuffer,
@@ -33,12 +34,12 @@ export async function deriveKey(password: string, salt: Uint8Array | ArrayBuffer
 
 // Generate random salt
 export function generateSalt(): Uint8Array {
-  return window.crypto.getRandomValues(new Uint8Array(16));
+  return crypto.getRandomValues(new Uint8Array(16));
 }
 
 // Generate random IV
 export function generateIV(): Uint8Array {
-  return window.crypto.getRandomValues(new Uint8Array(12));
+  return crypto.getRandomValues(new Uint8Array(12));
 }
 
 // Encrypt data
@@ -52,7 +53,7 @@ export async function encrypt(
   const key = await deriveKey(password, salt);
   const encoder = new TextEncoder();
 
-  const encryptedData = await window.crypto.subtle.encrypt(
+  const encryptedData = await crypto.subtle.encrypt(
     {
       name: ALGORITHM,
       iv: iv.buffer as ArrayBuffer,
@@ -86,7 +87,7 @@ export async function decrypt(
 
   const key = await deriveKey(password, saltArray);
 
-  const decryptedData = await window.crypto.subtle.decrypt(
+  const decryptedData = await crypto.subtle.decrypt(
     {
       name: ALGORITHM,
       iv: ivArray,
@@ -106,12 +107,12 @@ function arrayBufferToBase64(buffer: ArrayBuffer | Uint8Array): string {
   for (let i = 0; i < bytes.byteLength; i++) {
     binary += String.fromCharCode(bytes[i]);
   }
-  return window.btoa(binary);
+  return btoa(binary);
 }
 
 // Utility: Base64 to ArrayBuffer
 function base64ToArrayBuffer(base64: string): ArrayBuffer {
-  const binary = window.atob(base64);
+  const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) {
     bytes[i] = binary.charCodeAt(i);
@@ -122,7 +123,7 @@ function base64ToArrayBuffer(base64: string): ArrayBuffer {
 // Hash password for verification (not for key derivation)
 export async function hashPassword(password: string): Promise<string> {
   const encoder = new TextEncoder();
-  const hashBuffer = await window.crypto.subtle.digest(
+  const hashBuffer = await crypto.subtle.digest(
     'SHA-256',
     encoder.encode(password)
   );
@@ -132,7 +133,7 @@ export async function hashPassword(password: string): Promise<string> {
 
 // Generate a master key for the vault
 export async function generateMasterKey(): Promise<string> {
-  const key = window.crypto.getRandomValues(new Uint8Array(32));
+  const key = crypto.getRandomValues(new Uint8Array(32));
   return arrayBufferToBase64(key.buffer);
 }
 
@@ -143,7 +144,7 @@ export async function encryptWithKey(
 ): Promise<{ encrypted: string; iv: string }> {
   const keyArray = base64ToArrayBuffer(masterKey);
 
-  const key = await window.crypto.subtle.importKey(
+  const key = await crypto.subtle.importKey(
     'raw',
     keyArray,
     { name: ALGORITHM },
@@ -154,7 +155,7 @@ export async function encryptWithKey(
   const iv = generateIV();
 
   const encoder = new TextEncoder();
-  const encryptedData = await window.crypto.subtle.encrypt(
+  const encryptedData = await crypto.subtle.encrypt(
     {
       name: ALGORITHM,
       iv: iv.buffer as ArrayBuffer,
@@ -178,7 +179,7 @@ export async function decryptWithKey(
   const keyArray = base64ToArrayBuffer(masterKey);
   const ivArray = base64ToArrayBuffer(iv);
 
-  const key = await window.crypto.subtle.importKey(
+  const key = await crypto.subtle.importKey(
     'raw',
     keyArray,
     { name: ALGORITHM },
@@ -186,7 +187,7 @@ export async function decryptWithKey(
     ['decrypt']
   );
 
-  const decryptedData = await window.crypto.subtle.decrypt(
+  const decryptedData = await crypto.subtle.decrypt(
     {
       name: ALGORITHM,
       iv: ivArray,

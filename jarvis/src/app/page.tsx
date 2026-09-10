@@ -229,6 +229,34 @@ function getGreeting() {
   return "evening";
 }
 
+// ─── Companion greeting (personal JARVIS) ───────────────────────────
+// Replaces the random canned greeting pool with a greeting built from
+// real context: how long you were away, your recent mood, open
+// follow-up threads (exams, deadlines), and late-night awareness.
+
+type CompanionGreeting = {
+  ok: boolean;
+  greeting: string;
+  careNotes: string[];
+  threads: Array<{ id: string; topic: string; dueLabel: string }>;
+};
+
+async function fetchCompanionGreeting(): Promise<CompanionGreeting | null> {
+  try {
+    const res = await fetch("/api/companion");
+    if (!res.ok) return null;
+    return (await res.json()) as CompanionGreeting;
+  } catch {
+    return null;
+  }
+}
+
+function fallbackGreeting(): string {
+  // Delegates to the legacy greeting pool so it stays as a graceful
+  // fallback when the companion API is unreachable.
+  return resolveGreeting();
+}
+
 const GREETING_POOL = [
   "Welcome back, Boss. Systems are operational and the core is stable.",
   "Good {timeOfDay}, Boss. I've been refining the protocols while you were away.",
@@ -291,6 +319,7 @@ import { useAutoPersona } from "@/hooks/useAutoPersona";
 import { useReactorDrive } from "@/hooks/useReactorDrive";
 import { useAmbientContext } from "@/hooks/useAmbientContext";
 import { composeLocalBriefing, polishBriefing } from "@/services/BriefingService";
+import OnboardingModal from "@/components/panels/OnboardingModal";
 import SentinelSuggestionWidget from "@/components/ui/SentinelSuggestionWidget";
 
 export default function Home() {
@@ -301,8 +330,13 @@ export default function Home() {
   const tasks = useJarvisStore((s) => s.tasks);
   const userInteracted = useJarvisStore((s) => s.userInteracted);
   const memories = useJarvisStore((s) => s.memories);
+  const addMessage = useJarvisStore((s) => s.addMessage);
   const { speak } = useJarvisVoice();
   const hasGreetedRef = useRef(false);
+
+  // Companion: first-boot onboarding + weekly reflection state.
+  const [needsOnboarding, setNeedsOnboarding] = useState(false);
+  const [weeklyReflection, setWeeklyReflection] = useState<string | null>(null);
 
   // Tier 3B: auto-switch persona on time/alerts/panel/chat context.
   useAutoPersona();
@@ -369,15 +403,25 @@ export default function Home() {
       hasGreetedRef.current = true;
       
       const triggerGreeting = async () => {
-        let healthData = null;
-        try {
-          const res = await fetch("/api/system-health");
-          if (res.ok) healthData = await res.json();
-        } catch (e) {
-          console.warn("Could not fetch real health data, using fallback.");
+        // Personal companion greeting — built from real context: how long
+        // you were away, your recent mood, open follow-up threads, and
+        // late-night awareness. Falls back to the legacy pool on failure.
+        const companion = await fetchCompanionGreeting();
+        let greeting = companion?.greeting || fallbackGreeting();
+
+        // Keep the old critical-task awareness — JARVIS still notices
+        // what's urgent, he just leads with warmth now.
+        const criticalTasks = tasks.filter((t) => t.priority === "critical" && !t.completed);
+        if (criticalTasks.length > 0) {
+          greeting += ` You have ${criticalTasks.length} critical ${criticalTasks.length === 1 ? "task" : "tasks"} waiting, Boss — we should probably start there.`;
         }
 
-        const greeting = resolveGreeting(healthData, tasks);
+        // Chat bubble: JARVIS's first words when you walk into the lab.
+        addMessage({
+          role: "assistant",
+          content: greeting,
+        });
+
         // Short delay to allow boot sequence fade out
         setTimeout(() => speak(greeting), 1000);
 
@@ -418,8 +462,65 @@ export default function Home() {
       triggerGreeting();
     }
   }, [bootComplete, speak, userName, tasks, userInteracted, memories, ambient, setActivePanel]);
+
+  // Companion: check once per session whether onboarding is needed and
+  // whether a weekly reflection is due (shown as a chat message).
+  useEffect(() => {
+    if (!bootComplete) return;
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const res = await fetch("/api/companion/onboard");
+        if (res.ok) {
+          const data = await res.json();
+          if (!cancelled && data?.onboarded === false) setNeedsOnboarding(true);
+        }
+      } catch {
+        // non-fatal
+      }
+      try {
+        const today = new Date().toDateString();
+        const last = typeof window !== "undefined" ? window.localStorage.getItem("jarvis:last-reflection-week") : null;
+        // Show at most once a week. New users get nothing (hasData=false).
+        const lastDate = last ? new Date(last) : null;
+        const weekPassed = !lastDate || Date.now() - lastDate.getTime() > 6.5 * 864e5;
+        if (!cancelled && weekPassed) {
+          const r = await fetch("/api/companion/reflection");
+          if (r.ok) {
+            const data = await r.json();
+            if (!cancelled && data?.ok && data?.rendered && data?.hasData) {
+              setWeeklyReflection(data.rendered as string);
+              try {
+                window.localStorage.setItem("jarvis:last-reflection-week", today);
+              } catch {
+                // ignore
+              }
+            }
+          }
+        }
+      } catch {
+        // non-fatal
+      }
+    };
+    check();
+    return () => {
+      cancelled = true;
+    };
+  }, [bootComplete]);
+
   useJarvisSentinel();
   useJarvisBiometrics();
+
+  // Companion: deliver the weekly reflection as a chat bubble + voice
+  // once it has been fetched.
+  const reflectionSpokenRef = useRef(false);
+  useEffect(() => {
+    if (weeklyReflection && !reflectionSpokenRef.current) {
+      reflectionSpokenRef.current = true;
+      addMessage({ role: "assistant", content: weeklyReflection });
+      setTimeout(() => speak(weeklyReflection.replace(/\*\*/g, "")), 4000);
+    }
+  }, [weeklyReflection, addMessage, speak]);
 
   // Strip basic markdown for desktop notification bodies (they don't
   // render markdown). Local helper to avoid pulling a dep.
@@ -723,6 +824,13 @@ export default function Home() {
 
       {/* 3D Arc Reactor */}
       <ArcReactor />
+
+      {/* Companion: first-boot onboarding interview */}
+      {bootComplete && needsOnboarding && (
+        <OnboardingModal
+          onDone={() => setNeedsOnboarding(false)}
+        />
+      )}
 
       {/* UI Panels (only show after boot) */}
       {bootComplete && (
