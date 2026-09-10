@@ -480,7 +480,8 @@ class OracleResearchService {
 
   private async scrapePage(url: string): Promise<string> {
     try {
-      const firecrawlKey = process.env.FIRAWL_API_KEY || process.env.FIRECRAWL_API_KEY;
+      // (typo'd FIRAWL_ fallback removed — FIRECRAWL_API_KEY is the real name)
+      const firecrawlKey = process.env.FIRECRAWL_API_KEY;
       if (firecrawlKey) {
         const { firecrawlService } = await import('./FirecrawlService');
         const result = await firecrawlService.scrapeUrl(url);
