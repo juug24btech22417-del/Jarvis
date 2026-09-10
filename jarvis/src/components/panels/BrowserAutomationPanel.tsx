@@ -23,6 +23,11 @@ interface WorkflowResult {
   action: string;
   success: boolean;
   data?: string;
+  error?: string;
+  text?: string | null;
+  texts?: string[];
+  selector?: string;
+  url?: string;
 }
 
 const WORKFLOWS = [
@@ -58,9 +63,13 @@ export default function BrowserAutomationPanel() {
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<WorkflowResult[] | null>(null);
   const [screenshot, setScreenshot] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [summary, setSummary] = useState<string | null>(null);
 
   const handleRun = async () => {
     setLoading(true);
+    setError(null);
+    setSummary(null);
     try {
       const res = await fetch("/api/browser", {
         method: "POST",
@@ -73,16 +82,14 @@ export default function BrowserAutomationPanel() {
       const data = await res.json();
       if (data.success) {
         setResults(data.results);
-        // Find screenshot in results
-        const screenshotResult = data.results.find(
-          (r: WorkflowResult) => r.action === "screenshot"
-        );
-        if (screenshotResult?.data) {
-          setScreenshot(screenshotResult.data);
-        }
+        setScreenshot(data.screenshot || null);
+        setSummary(data.summary || null);
+      } else {
+        setError(data.error || `Request failed (${res.status})`);
       }
     } catch (err) {
       console.error("Browser automation error:", err);
+      setError(err instanceof Error ? err.message : "Network error");
     } finally {
       setLoading(false);
     }
@@ -118,6 +125,8 @@ export default function BrowserAutomationPanel() {
                   setSelectedWorkflow(workflow.id);
                   setResults(null);
                   setScreenshot(null);
+                  setError(null);
+                  setSummary(null);
                   // Reset variables
                   const newVars: Record<string, string> = {};
                   workflow.variables.forEach((v) => {
@@ -184,6 +193,17 @@ export default function BrowserAutomationPanel() {
           </div>
         )}
 
+        {/* Error */}
+        {error && (
+          <div className="bg-red-500/10 rounded-xl p-4 border border-red-500/30 flex items-start gap-3">
+            <AlertCircle className="w-4 h-4 text-red-400 mt-0.5 shrink-0" />
+            <div>
+              <p className="text-sm text-red-300 font-medium">Workflow failed</p>
+              <p className="text-xs text-red-300/70 mt-1 break-words">{error}</p>
+            </div>
+          </div>
+        )}
+
         {/* Results */}
         {results && (
           <motion.div
@@ -215,23 +235,30 @@ export default function BrowserAutomationPanel() {
 
             {/* Action Results */}
             <div className="bg-violet-500/5 rounded-xl p-4 border border-violet-500/20">
-              <h5 className="text-sm font-medium text-violet-400 mb-3">
-                Action Log
-              </h5>
+              <div className="flex items-center justify-between mb-3">
+                <h5 className="text-sm font-medium text-violet-400">Action Log</h5>
+                {summary && <span className="text-xs text-violet-300/60">{summary}</span>}
+              </div>
               <div className="space-y-2">
                 {results.map((result, idx) => (
                   <div
                     key={idx}
-                    className="flex items-center gap-3 p-2 bg-violet-500/10 rounded-lg"
+                    className="flex items-start gap-3 p-2 bg-violet-500/10 rounded-lg"
                   >
                     {result.success ? (
-                      <CheckCircle className="w-4 h-4 text-green-400" />
+                      <CheckCircle className="w-4 h-4 text-green-400 mt-0.5 shrink-0" />
                     ) : (
-                      <AlertCircle className="w-4 h-4 text-red-400" />
+                      <AlertCircle className="w-4 h-4 text-red-400 mt-0.5 shrink-0" />
                     )}
-                    <span className="text-sm text-violet-100 capitalize">
-                      {result.action}
-                    </span>
+                    <div className="min-w-0">
+                      <span className="text-sm text-violet-100 capitalize">{result.action}</span>
+                      {!result.success && result.error && (
+                        <p className="text-xs text-red-300/70 mt-0.5 break-words">{result.error}</p>
+                      )}
+                      {result.action === "getText" && result.text && (
+                        <p className="text-xs text-violet-300/70 mt-0.5 break-words">{String(result.text).slice(0, 120)}</p>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
