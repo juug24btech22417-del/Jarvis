@@ -12,6 +12,7 @@
 // greeting. A companion that crashes the app is not a caring companion.
 
 import { prisma } from "@/lib/db/queries";
+import { getAnniversary, getThrowback } from "./journey";
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -884,6 +885,18 @@ export async function buildCompanionGreeting(
       ])
     );
     careNotes.push(`late-night nudge`);
+  }
+
+  // 7) Throwbacks & anniversaries — the long-memory moment. "100 days of
+  // us" or "two months ago today we shipped X" — computed, not canned.
+  try {
+    const memoryMoment = (await getAnniversary(now)) ?? (await getThrowback(now));
+    if (memoryMoment) {
+      parts.push(memoryMoment);
+      careNotes.push(memoryMoment.includes("ago today") ? "throwback" : "journey anniversary");
+    }
+  } catch {
+    // non-fatal
   }
 
   return {

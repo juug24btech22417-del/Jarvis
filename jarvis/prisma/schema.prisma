@@ -390,6 +390,19 @@ model PresenceLog {
   @@index([lastSeenAt])
 }
 
+// Journey milestones — the story of us. Logged as they happen, referenced
+// forever. Powers "how far have we come", throwbacks ("two months ago today
+// we built the vision engine"), and anniversaries ("100 days of us, Boss").
+model Milestone {
+  id          String   @id @default(cuid())
+  title       String   // short label, e.g. "Vision capture engine"
+  description String?  // optional detail in JARVIS's voice
+  category    String   @default("custom") // auto | custom | release | personal
+  happenedAt  DateTime @default(now())
+
+  @@index([happenedAt])
+}
+
 // Per-day event counter for the composio free-tier ceiling (20k/mo).
 // One row per UTC day. `count` increments on every real event delivered;
 // the panel shows today/total.

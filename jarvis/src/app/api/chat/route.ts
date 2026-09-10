@@ -12,6 +12,14 @@ import { extractAndStoreMemories } from "@/lib/memory/extractor";
 import { bumpUsage } from "@/lib/memory/graph";
 import { recordEvent } from "@/lib/memory/patterns";
 import { getCareContext, recordCareSignals, getPastWin } from "@/lib/companion/care";
+import {
+  isJourneyQuestion,
+  answerJourneyQuestion,
+  isTimeTravelQuestion,
+  parseTimeWindow,
+  answerTimeTravelQuestion,
+  maybeAutoMilestone,
+} from "@/lib/companion/journey";
 
 // Use environment variable or default to port 3000 for the API base URL
 const API_BASE = process.env.INTERNAL_API_URL || 'http://localhost:3000';
@@ -723,6 +731,37 @@ export async function POST(request: Request) {
     recordCareSignals(lastUserMessage).catch(err => {
       console.warn("[Chat] Care signal recording failed (non-fatal):", err?.message);
     });
+
+    // Journey log: "we shipped vision capture" / "remember this: first mood
+    // sync" become milestones, so "how far have we come" stays truthful.
+    maybeAutoMilestone(lastUserMessage).catch(err => {
+      console.warn("[Chat] Milestone auto-detect failed (non-fatal):", err?.message);
+    });
+
+    // Journey questions ("how far have we come?") get live-computed answers
+    // straight from the data — git history, presence, memory, milestones.
+    if (isJourneyQuestion(lastUserMessage)) {
+      try {
+        const journeyAnswer = await answerJourneyQuestion();
+        return NextResponse.json({ content: journeyAnswer, journey: true });
+      } catch (err) {
+        console.warn("[Chat] Journey answer failed (falling through to LLM):", err);
+      }
+    }
+
+    // Time-travel questions ("what did we do last week?") query the real
+    // event/mood/milestone logs over a parsed date range.
+    if (isTimeTravelQuestion(lastUserMessage)) {
+      const win = parseTimeWindow(lastUserMessage);
+      if (win) {
+        try {
+          const digest = await answerTimeTravelQuestion(win);
+          return NextResponse.json({ content: digest, timetravel: true });
+        } catch (err) {
+          console.warn("[Chat] Time-travel digest failed (falling through to LLM):", err);
+        }
+      }
+    }
 
     // Tier 1C: observe that the user is searching/asking — feeds pattern detection.
     recordEvent("chat", {
