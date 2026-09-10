@@ -18,8 +18,31 @@ import path from "path";
 
 chromiumExtra.use(StealthPlugin());
 
+// Must match the ACTUAL Chromium version Playwright drives. A UA claiming
+// 131 while the binary is 143 is one of the strongest bot tells there is —
+// Amazon's wall keys on it. Keep in sync with the installed playwright pkg.
 export const BROWSER_UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
+
+// Exact brand/version list Chrome 143 sends. Mismatched or missing
+// sec-ch-ua brands make the client hints disagree with the UA string —
+// another easy bot fingerprint.
+const CHROME_BRANDS = "\"Chromium\";v=\"143\", \"Google Chrome\";v=\"143\", \"Not:A-Brand\";v=\"24\"";
+
+// Warm, non-headless-shaped viewport. Amazon/Swiggy/Zomato walls flag the
+// classic 1280x720 (and identical-across-runs) viewports.
+const VIEWPORT_POOL = [
+  { width: 1536, height: 864 },
+  { width: 1440, height: 900 },
+  { width: 1366, height: 768 },
+  { width: 1600, height: 900 },
+  { width: 1512, height: 982 },
+];
+
+function pickViewport() {
+  const v = VIEWPORT_POOL[Math.floor(Math.random() * VIEWPORT_POOL.length)];
+  return { width: v.width, height: v.height };
+}
 
 // ─── Launch mutex + singleton ───────────────────────────────────────
 
@@ -39,7 +62,16 @@ export async function getBrowser(headed = false): Promise<Browser> {
           // The #1 tell headless Chrome leaks. navigator.webdriver must be
           // undefined, not true, or Flipkart/Amazon walls the session.
           "--disable-blink-features=AutomationControlled",
+          // Playwright injects --enable-automation by default; it flips
+          // navigator.webdriver and shows the "browser is being controlled"
+          // infobar. Amazon's captcha farm detects it instantly.
+          "--no-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-infobars",
+          "--window-size=1536,864",
+          "--lang=en-IN",
         ],
+        ignoreDefaultArgs: ["--enable-automation"],
       })
       .then((b) => {
         browserInstance = b;
@@ -62,12 +94,18 @@ export interface SessionOptions {
 export async function newContext(browser: Browser, opts: SessionOptions = {}): Promise<BrowserContext> {
   const stealthContext = {
     userAgent: BROWSER_UA,
-    viewport: { width: 1440, height: 900 },
+    // Randomized per context: identical viewports across runs are a
+    // fingerprint; a stable pool of real desktop sizes looks human.
+    viewport: pickViewport(),
     locale: "en-IN",
     timezoneId: "Asia/Kolkata",
     deviceScaleFactor: 1,
     extraHTTPHeaders: {
       "Accept-Language": "en-IN,en-GB;q=0.9,en;q=0.8",
+      // Client hints must agree with the UA string or walls flag the session.
+      "sec-ch-ua": CHROME_BRANDS,
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": "\"Windows\"",
     },
   };
   if (opts.sessionName) {
@@ -78,7 +116,45 @@ export async function newContext(browser: Browser, opts: SessionOptions = {}): P
       ...stealthContext,
     });
   }
-  return browser.newContext({ ...stealthContext, ignoreHTTPSErrors: true });
+  const ctx = browser.newContext({ ...stealthContext, ignoreHTTPSErrors: true });
+  return ctx.then(async (c) => {
+    await applyStealthInitScript(c);
+    return c;
+  });
+}
+
+// Patch the leakiest JS fingerprints BEFORE any page script runs. The
+// stealth plugin only fixes the launch binary — per-context JS patches
+// still need doing by hand.
+async function applyStealthInitScript(context: BrowserContext): Promise<void> {
+  await context.addInitScript(() => {
+    // navigator.webdriver must be undefined, never true.
+    Object.defineProperty(Navigator.prototype, "webdriver", { get: () => undefined });
+    // A chrome object with a plausible runtime (headless omits it).
+    if (!(window as unknown as { chrome?: unknown }).chrome) {
+      (window as unknown as { chrome: unknown }).chrome = { runtime: {}, loadTimes: () => ({}), csi: () => ({}) };
+    }
+    // Permissions.query must not contradict itself for notifications.
+    const origQuery = window.Notification && navigator.permissions?.query?.bind(navigator.permissions);
+    if (origQuery) {
+      navigator.permissions.query = (p: PermissionDescriptor) =>
+        p.name === "notifications" ? Promise.resolve({ state: Notification.permission } as PermissionStatus) : origQuery(p);
+    }
+    // Consistent plugins/mimeTypes lengths (headless reports 0).
+    Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3, 4, 5] });
+    Object.defineProperty(navigator, "languages", { get: () => ["en-IN", "en-GB", "en"] });
+    // WebGL vendor/renderer: real GPU strings, not SwiftShader.
+    const getParameter = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function (p: number) {
+      if (p === 37445) return "Google Inc. (NVIDIA)";
+      if (p === 37446) return "ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)";
+      return getParameter.call(this, p);
+    };
+    // hardwareConcurrency: 4+ looks like a real machine.
+    if (navigator.hardwareConcurrency < 4) {
+      Object.defineProperty(navigator, "hardwareConcurrency", { get: () => 8 });
+    }
+  });
 }
 
 function headed(opts: SessionOptions): boolean {
@@ -365,6 +441,28 @@ export async function runActions(actions: BrowserAction[], opts: RunOptions = {}
 
 // ─── Helpers for watchers / agent ───────────────────────────────────
 
+// ─── Product-page detection (shared by agent + workflows) ───────────
+
+/** True when `url` looks like a product/restaurant detail page. */
+export function looksLikeProductPage(url: string): boolean {
+  // Amazon: /dp/ or /gp/product; Flipkart: /<slug>/p/itm<id>; Myntra:
+  // numeric tail; Swiggy/Zomato: restaurant or item slugs.
+  return /amazon\.[\w.]+\/((dp|gp\/product)\/|[^/]+\/dp\/)/.test(url)
+    || /flipkart\.com\/.*\/p\/itm/.test(url)
+    || /myntra\.com\/[^/]+\/\d+/.test(url)
+    || /swiggy\.com\/(restaurants|instamart)\//.test(url)
+    || /zomato\.com\/[^/]+\/restaurants?\//.test(url);
+}
+
+/** Resolve a page-relative href against a base URL. */
+export function absolutize(href: string, base: string): string {
+  try {
+    return new URL(href, base).toString();
+  } catch {
+    return href;
+  }
+}
+
 export async function extractValue(
   actions: BrowserAction[],
   selector: string,
@@ -393,6 +491,7 @@ export interface PageElementRef {
   i: number;
   tag: string;
   txt: string;
+  href: string | null;
   id: string | null;
   nm: string | null;
   ph: string | null;
@@ -404,6 +503,10 @@ export interface AgentSession {
   goto(url: string): Promise<void>;
   /** Stamps interactive elements with data-jv indexes and returns them. */
   snapshot(): Promise<{ url: string; title: string; text: string; els: PageElementRef[] }>;
+  /** Current page URL — used to record product links when the goal completes. */
+  url(): string;
+  /** Fresh context + page with a new fingerprint. Called when a bot wall appears. */
+  freshen(): Promise<void>;
   /** Act on one element by its data-jv index. */
   clickRef(i: number): Promise<void>;
   fillRef(i: number, value: string): Promise<void>;
@@ -419,7 +522,7 @@ const SNAPSHOT_SCRIPT = `
       document.querySelectorAll("a, button, input, textarea, select, [role='button']")
     );
     const out = [];
-    for (let i = 0; i < Math.min(els.length, 120); i++) {
+    for (let i = 0; i < Math.min(els.length, 90); i++) {
       const e = els[i];
       e.setAttribute("data-jv", String(i));
       const txt = ((e.innerText || e.value || "") + "").trim().slice(0, 60);
@@ -427,50 +530,76 @@ const SNAPSHOT_SCRIPT = `
       const nm = e.getAttribute("name");
       const ph = e.getAttribute("placeholder");
       const type = e.getAttribute("type");
+      // Product listings are links first — keep the href so the agent can
+      // hand back a direct product URL when it answers.
+      const href = e.getAttribute("href");
       if (txt || id || nm || ph) {
-        out.push({ i, tag: e.tagName.toLowerCase(), txt, id, nm, ph, type });
+        out.push({ i, tag: e.tagName.toLowerCase(), txt, href, id, nm, ph, type });
       }
     }
     // Readable page text — prices, colors, specs live here, not in
     // interactive elements. The agent must SEE the page to answer from it.
+    // Capped tight: every char here is prompt tokens on every turn.
     const text = (document.body.innerText || "")
       .replace(/\\n{2,}/g, "\\n")
-      .slice(0, 3500);
+      .slice(0, 2000);
     return JSON.stringify({ url: location.href, title: document.title, text, els: out });
   })()
 `;
 
 export async function createAgentSession(opts: SessionOptions = {}): Promise<AgentSession> {
   const browser = await getBrowser(opts.headed);
-  const context = await newContext(browser, opts);
-  const page = await context.newPage();
+  // let (not const): freshen() swaps these when a bot wall appears.
+  let context = await newContext(browser, opts);
+  let page = await context.newPage();
   page.setDefaultTimeout(12_000);
   tagPage(page, context);
 
-  return {
+  const session: AgentSession = {
     page,
     async goto(url) {
       await safeGoto(page, url);
-      // Human-ish settle time — pages lazily load and bot walls sometimes
-      // appear only after the first paint.
-      await page.waitForTimeout(800);
+      // Short settle — 800ms made every turn feel sluggish and bought
+      // nothing: snapshot() re-reads the live DOM anyway.
+      await page.waitForTimeout(300);
     },
     async snapshot() {
       const raw = await page.evaluate((s) => eval(s), SNAPSHOT_SCRIPT);
       return JSON.parse(raw as string) as { url: string; title: string; text: string; els: PageElementRef[] };
     },
+    url() {
+      try {
+        return page.url();
+      } catch {
+        return "";
+      }
+    },
+    // Bot-wall recovery: nuke context + page, open a new one with a fresh
+    // viewport/fingerprint. Cheap because the browser process is reused.
+    async freshen() {
+      try {
+        await context.close();
+      } catch {
+        // already dead
+      }
+      context = await newContext(browser, opts);
+      page = await context.newPage();
+      page.setDefaultTimeout(12_000);
+      tagPage(page, context);
+      this.page = page;
+    },
     async clickRef(i) {
       await page.click(`[data-jv="${i}"]`, { timeout: 8_000 });
-      await page.waitForLoadState("load", { timeout: 8_000 }).catch(() => {});
-      await page.waitForTimeout(600);
+      await page.waitForLoadState("load", { timeout: 6_000 }).catch(() => {});
+      await page.waitForTimeout(250);
     },
     async fillRef(i, value) {
       await page.fill(`[data-jv="${i}"]`, value, { timeout: 8_000 });
     },
     async pressKey(key) {
       await page.keyboard.press(key);
-      await page.waitForLoadState("load", { timeout: 8_000 }).catch(() => {});
-      await page.waitForTimeout(700);
+      await page.waitForLoadState("load", { timeout: 6_000 }).catch(() => {});
+      await page.waitForTimeout(250);
     },
     async screenshotJpeg() {
       const shot = await page.screenshot({ type: "jpeg", quality: 70 });
@@ -483,4 +612,6 @@ export async function createAgentSession(opts: SessionOptions = {}): Promise<Age
       await closePage(page);
     },
   };
+
+  return session;
 }

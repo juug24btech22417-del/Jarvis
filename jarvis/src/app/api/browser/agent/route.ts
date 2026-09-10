@@ -11,77 +11,108 @@ import { createAgentSession, AgentSession } from "@/lib/browser/engine";
 import { prisma } from "@/lib/db/queries";
 
 const MAX_TURNS = 12;
+// Hard ceiling for a whole run — the panel shows a spinner until this
+// returns, so it must always finish in bounded time.
 
-// ─── LLM plumbing (NVIDIA → OpenRouter, same keys as chat) ──────────
+const RUN_BUDGET_MS = 75_000;
 
-async function callLLM(messages: Array<{ role: string; content: string }>): Promise<string> {
+// ─── LLM plumbing — all providers raced in parallel ─────────────────
+// The old code tried NVIDIA → Groq → OpenRouter back-to-back; one slow
+// provider added its full 30s timeout to EVERY turn (3min+ runs). Now
+// every candidate fires at once and the first usable answer wins.
+
+interface LlmCandidate {
+  label: string;
+  url: string;
+  key: string;
+  model: string;
+  extraHeaders?: Record<string, string>;
+}
+
+function llmCandidates(): LlmCandidate[] {
+  const cands: LlmCandidate[] = [];
   const nvidiaKey = process.env.NVIDIA_API_KEY;
+  const groqKey = process.env.GROQ_API_KEY;
   const openrouterKey = process.env.OPENROUTER_API_KEY;
 
-  const attempt = async (url: string, key: string, model: string, extraHeaders: Record<string, string> = {}, timeoutMs = 30_000) => {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}`, ...extraHeaders },
-        body: JSON.stringify({ model, messages, temperature: 0, max_tokens: 2000 }),
-        signal: ctrl.signal,
-      });
-      if (!res.ok) throw new Error(`${url} → ${res.status}`);
-      const data = await res.json();
-      const content = data?.choices?.[0]?.message?.content;
-      if (!content) throw new Error("empty LLM response");
-      return content as string;
-    } finally {
-      clearTimeout(timer);
+  if (nvidiaKey) {
+    // -0731 suffix required: NVIDIA 410s the bare id (same fix as chat).
+    cands.push({ label: "nvidia", url: "https://integrate.api.nvidia.com/v1/chat/completions", key: nvidiaKey, model: "deepseek-ai/deepseek-v4-flash-0731" });
+  }
+  if (groqKey) {
+    for (const model of ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]) {
+      cands.push({ label: `groq/${model}`, url: "https://api.groq.com/openai/v1/chat/completions", key: groqKey, model });
     }
-  };
+  }
+  if (openrouterKey) {
+    for (const model of ["nvidia/nemotron-3.5-lightning:free", "cohere/north-mini-code:free"]) {
+      cands.push({
+        label: `openrouter/${model}`,
+        url: "https://openrouter.ai/api/v1/chat/completions",
+        key: openrouterKey,
+        model,
+        extraHeaders: { "HTTP-Referer": "http://localhost:3000", "X-Title": "JARVIS Browser Agent" },
+      });
+    }
+  }
+  return cands;
+}
+
+async function attemptLLM(c: LlmCandidate, messages: Array<{ role: string; content: string }>, timeoutMs: number): Promise<string> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(c.url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${c.key}`, ...(c.extraHeaders ?? {}) },
+      body: JSON.stringify({ model: c.model, messages, temperature: 0, max_tokens: 700 }),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(`${c.label} → ${res.status}`);
+    const data = await res.json();
+    const content = data?.choices?.[0]?.message?.content;
+    if (!content) throw new Error(`${c.label}: empty response`);
+    return content as string;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function callLLM(messages: Array<{ role: string; content: string }>): Promise<string> {
+  const cands = llmCandidates();
+  if (cands.length === 0) throw new Error("No LLM providers configured (set NVIDIA/GROQ/OPENROUTER key)");
 
   const errors: string[] = [];
-  if (nvidiaKey) {
-    try {
-      return await attempt("https://integrate.api.nvidia.com/v1/chat/completions", nvidiaKey, "deepseek-ai/deepseek-v4-flash");
-    } catch (e) {
-      errors.push((e as Error).message);
-    }
+  const raceOnce = async () =>
+    Promise.all(
+      cands.map(async (c) => {
+        try {
+          const content = await attemptLLM(c, messages, 14_000);
+          // Some providers 200 with a refusal/error string — an answer with
+          // no action JSON loses so a usable candidate can win. (A real
+          // {"action":"fail"} still passes; only no-JSON output is rejected.)
+          const d = parseDecision(content);
+          if (d.kind === "fail" && /No action in LLM output/i.test(d.reason)) {
+            throw new Error("no action JSON in output");
+          }
+          return { ok: true as const, content };
+        } catch (e) {
+          errors.push((e as Error).message.slice(0, 80));
+          return { ok: false as const };
+        }
+      })
+    );
+
+  let results = await raceOnce();
+  if (!results.some((r) => r.ok)) {
+    // Everything rate-limited/errors at once is usually a burst 429 —
+    // one short backoff and re-race recovers most of these in-request.
+    await new Promise((r) => setTimeout(r, 9_000));
+    results = await raceOnce();
   }
-  // Groq — fast and generously rate-limited; try before OpenRouter.
-  // (Model ids verified against Groq's live catalog — llama-3.x ids are 410/404 now.)
-  const groqKey = process.env.GROQ_API_KEY;
-  if (groqKey) {
-    for (const model of ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]) {
-      try {
-        return await attempt("https://api.groq.com/openai/v1/chat/completions", groqKey, model);
-      } catch (e) {
-        errors.push(`groq/${model}: ${(e as Error).message}`);
-      }
-    }
-  }
-  // OpenRouter with the same model cascade the chat route uses.
-  if (openrouterKey) {
-    const models = [
-      "nvidia/nemotron-3.5-lightning:free",
-      "cohere/north-mini-code:free",
-      "poolside/laguna-s-2.1:free",
-      "poolside/laguna-xs-2.1:free",
-      "inclusionai/ling-3.0-tiny:free",
-    ];
-    for (const model of models) {
-      try {
-        return await attempt(
-          "https://openrouter.ai/api/v1/chat/completions",
-          openrouterKey,
-          model,
-          { "HTTP-Referer": "http://localhost:3000", "X-Title": "JARVIS Browser Agent" },
-          30_000
-        );
-      } catch (e) {
-        errors.push(`${model}: ${(e as Error).message}`);
-      }
-    }
-  }
-  throw new Error(`No LLM available: ${errors.join("; ")}`);
+  const winner = results.find((r) => r.ok);
+  if (!winner) throw new Error(`No LLM available: ${errors.slice(0, 4).join("; ")}`);
+  return winner.content;
 }
 
 // ─── Agent decision parsing ─────────────────────────────────────────
@@ -177,18 +208,55 @@ Valid actions:
 {"action":"fail","reason":"..."}        - impossible on this page
 
 Look at page state carefully. Prefer clicking search buttons after filling.
-When the goal's answer is visible in the PAGE TEXT (prices, colors, titles, specs), choose done immediately with that answer — do not keep clicking.`;
+When the goal's answer is visible in the PAGE TEXT (prices, colors, titles, specs), choose done immediately with that answer — do not keep clicking.
+If the page is a homepage, use its search box (fill + press Enter). If no search box exists, goto a search URL directly. Never stop just because you landed somewhere unexpected — adapt.
+When the goal is about a specific product, click into the best-matching result link first, then answer from its product page — the page you end on is given to the user as a clickable link, so it must be the product itself, not a results list.`;
 
-// Flipkart/Amazon wall fresh headless profiles that land directly on them.
-// A warm-up hop through a neutral site builds a referer chain that looks human.
-async function warmUpNavigation(session: AgentSession, targetUrl: string): Promise<void> {
+// Direct search URLs — skipping the homepage dodges most bot walls,
+// because the search results route is served before the strictest
+// fingerprint checks kick in. Query is filled from the goal when the
+// caller didn't pass a startUrl.
+function buildSearchUrl(goal: string): string | null {
+  const g = goal.toLowerCase();
+  const query = encodeURIComponent(goal.replace(/^(search|find|look up|tell me the (cheapest )?price of)\s+(for\s+)?/i, "").replace(/\s+on\s+(amazon|flipkart|swiggy|zomato|myntra|ajio).*$/i, "").trim());
+  if (!query) return null;
+  if (/amazon/.test(g)) return `https://www.amazon.in/s?k=${query}`;
+  if (/flipkart/.test(g)) return `https://www.flipkart.com/search?q=${query}`;
+  if (/myntra/.test(g)) return `https://www.myntra.com/${query.replace(/%20/g, "-")}`;
+  if (/ajio/.test(g)) return `https://www.ajio.com/search/?text=${query}`;
+  if (/swiggy/.test(g)) return `https://www.swiggy.com/search?query=${query}`;
+  // Zomato has no public query-search URL; its /india/search route 404s.
+  // The city listing is the tamest real entry — the agent searches in-page.
+  if (/zomato/.test(g)) return "https://www.zomato.com/ncr/restaurants";
+  return null;
+}
+
+function looksLikeProductPage(url: string): boolean {
+  // Amazon: /dp/ or /gp/product; Flipkart: /<slug>/p/itm<id>; Myntra:
+  // numeric tail; Swiggy/Zomato: restaurant or item slugs.
+  return /amazon\.[\w.]+\/((dp|gp\/product)\/|[^/]+\/dp\/)/.test(url)
+    || /flipkart\.com\/.*\/p\/itm/.test(url)
+    || /myntra\.com\/[^/]+\/\d+/.test(url)
+    || /swiggy\.com\/(restaurants|instamart)\//.test(url)
+    || /zomato\.com\/[^/]+\/restaurants?\//.test(url);
+}
+
+const WALL_RETRIES = 3;
+
+// Snapshot hrefs are page-relative; product checks need absolute URLs.
+function absolutize(href: string, base: string): string {
   try {
-    await session.goto("https://www.google.com");
-    await session.page.waitForTimeout(1200);
+    return new URL(href, base).toString();
   } catch {
-    // Neutral site unreachable — go direct as fallback.
+    return href;
   }
-  await session.goto(targetUrl);
+}
+
+// On a wall retry we go straight to the site's search URL instead of the
+// homepage — homepages run the strictest fingerprint checks, results pages
+// are the tamest route on every shopping site.
+function freshStartUrl(goal: string, startUrl?: string): string {
+  return buildSearchUrl(goal) ?? startUrl ?? "https://www.google.com";
 }
 
 // ─── Route ──────────────────────────────────────────────────────────
@@ -213,81 +281,104 @@ export async function POST(req: NextRequest) {
   const trace: Array<{ turn: number; decision: string; detail?: string }> = [];
   let answer: string | null = null;
   let screenshot: string | null = null;
+  let productUrl: string | null = null;
+  // Newest page snapshot — used to promote a product href into a
+  // clickable link when the LLM answers without navigating to the item.
+  let lastSnapshot: { url: string; els: Array<{ i: number; tag: string; txt: string; href: string | null }> } | null = null;
   const started = Date.now();
 
   try {
-    const target = body.startUrl || "https://www.google.com";
-    await warmUpNavigation(session, target);
-
-    for (let turn = 1; turn <= MAX_TURNS; turn++) {
-      // Per-turn bot-wall check: if a wall appears mid-run, stop honestly
-      // instead of letting the LLM click into a void.
-      if (turn > 1 && (await session.captcha())) {
-        trace.push({ turn, decision: "fail", detail: "Bot wall / captcha appeared mid-run" });
-        answer = `Flipkart (or the site) threw a bot wall mid-run. The stealth settings dodge most, but not all — a headed run (watch-it-work toggle) usually gets through. Want me to retry headed?`;
-        break;
+    // Retry with a fresh fingerprint when a wall appears — each attempt
+    // gets a new viewport/headers/init-script context from freshen().
+    for (let attempt = 1; attempt <= WALL_RETRIES && !answer; attempt++) {
+      if (attempt > 1) {
+        await session.freshen();
+        trace.push({ turn: 0, decision: "retry", detail: `Attempt ${attempt}: fresh browser fingerprint` });
       }
 
-      const snap = await session.snapshot();
-      const elements = snap.els
-        .map((e) => `${e.i}: <${e.tag}${e.id ? ` id=${e.id}` : ""}${e.nm ? ` name=${e.nm}` : ""}${e.type ? ` type=${e.type}` : ""}> ${e.txt || e.ph || ""}`)
-        .join("\n");
-      // The agent answers goals from this text — prices, colors, specs.
-      const pageText = (snap.text || "").slice(0, 3000);
+      const startUrl =
+        attempt === 1 && body.startUrl
+          ? body.startUrl
+          : freshStartUrl(body.goal, body.startUrl);
+      await session.goto(startUrl);
 
-      const recent = trace.slice(-4).map((t) => `t${t.turn}:${t.decision} ${t.detail ?? ""}`).join(" | ");
-      const llmRaw = await callLLM([
-        { role: "system", content: `${SYSTEM_PROMPT}\n\nHuman-behavior tips: after typing into a search box, submit with {"action":"press","key":"Enter"} or click the search button. NEVER repeat an action you already did with the same arguments — if the page looks unchanged, try a different approach (press Enter, click another element, or fail).` },
-        {
-          role: "user",
-          content: `GOAL: ${body.goal}\n\nRECENT ACTIONS (do not repeat): ${recent || "none"}\n\nPAGE: ${snap.title} (${snap.url})\n\nPAGE TEXT (the answer is often here):\n${pageText}\n\nELEMENTS (clickable/typeable, by index):\n${elements}`,
-        },
-      ]);
-
-      const decision = parseDecision(llmRaw);
-      trace.push({ turn, decision: decision.kind, detail: JSON.stringify(decision).slice(0, 160) });
-
-      if (decision.kind === "done") {
-        answer = decision.answer;
-        break;
-      }
-      if (decision.kind === "fail") {
-        answer = `Couldn't complete: ${decision.reason}`;
-        break;
-      }
-      if (decision.kind === "goto") {
-        try {
-          await session.goto(decision.url);
-        } catch (e) {
-          trace.push({ turn, decision: "error", detail: (e as Error).message.slice(0, 100) });
+      for (let turn = 1; turn <= MAX_TURNS; turn++) {
+        // Run-budget guard: bail out of the turn loop once the whole run
+        // is out of time; the outer failure text handles the message.
+        if (Date.now() - started > RUN_BUDGET_MS) {
+          trace.push({ turn, decision: "budget", detail: "Run budget exhausted" });
+          break;
         }
-        continue;
-      }
-      if (decision.kind === "click") {
-        try {
-          await session.clickRef(decision.i);
-        } catch (e) {
-          // Stale element / navigation race — tell the agent so it adapts
-          // (e.g. re-snapshot picks fresh indexes next turn).
-          trace.push({ turn, decision: "error", detail: (e as Error).message.slice(0, 100) });
+        // Bot wall mid-run: retry with a new fingerprint instead of
+        // surrendering with a captcha screenshot.
+        if (turn > 1 && (await session.captcha())) {
+          trace.push({ turn, decision: "wall", detail: "Bot wall detected — retrying with fresh fingerprint" });
+          answer = null;
+          break;
         }
-        continue;
-      }
-      if (decision.kind === "fill") {
-        try {
-          await session.fillRef(decision.i, decision.value);
-        } catch (e) {
-          trace.push({ turn, decision: "error", detail: (e as Error).message.slice(0, 100) });
+
+        const snap = await session.snapshot();
+        lastSnapshot = { url: snap.url, els: snap.els.map((e) => ({ i: e.i, tag: e.tag, txt: e.txt, href: e.href })) };
+        const elements = snap.els
+          .map((e) => `${e.i}: <${e.tag}${e.id ? ` id=${e.id}` : ""}${e.nm ? ` name=${e.nm}` : ""}${e.type ? ` type=${e.type}` : ""}> ${e.txt || e.ph || ""}${e.href ? ` href=${e.href.slice(0, 80)}` : ""}`)
+          .join("\n");
+        // The agent answers goals from this text — prices, colors, specs.
+        const pageText = (snap.text || "").slice(0, 2200);
+
+        const recent = trace.slice(-4).map((t) => `t${t.turn}:${t.decision} ${t.detail ?? ""}`).join(" | ");
+        const llmRaw = await callLLM([
+          { role: "system", content: `${SYSTEM_PROMPT}\n\nHuman-behavior tips: after typing into a search box, submit with {"action":"press","key":"Enter"} or click the search button. NEVER repeat an action you already did with the same arguments — if the page looks unchanged, try a different approach (press Enter, click another element, or fail).` },
+          {
+            role: "user",
+            content: `GOAL: ${body.goal}\n\nRECENT ACTIONS (do not repeat): ${recent || "none"}\n\nPAGE: ${snap.title} (${snap.url})\n\nPAGE TEXT (the answer is often here):\n${pageText}\n\nELEMENTS (clickable/typeable, by index):\n${elements}`,
+          },
+        ]);
+
+        const decision = parseDecision(llmRaw);
+        trace.push({ turn, decision: decision.kind, detail: JSON.stringify(decision).slice(0, 160) });
+
+        if (decision.kind === "done") {
+          answer = decision.answer;
+          break;
         }
-        continue;
-      }
-      if (decision.kind === "press") {
-        try {
-          await session.pressKey(decision.key);
-        } catch (e) {
-          trace.push({ turn, decision: "error", detail: (e as Error).message.slice(0, 100) });
+        if (decision.kind === "fail") {
+          answer = `Couldn't complete: ${decision.reason}`;
+          break;
         }
-        continue;
+        if (decision.kind === "goto") {
+          try {
+            await session.goto(decision.url);
+          } catch (e) {
+            trace.push({ turn, decision: "error", detail: (e as Error).message.slice(0, 100) });
+          }
+          continue;
+        }
+        if (decision.kind === "click") {
+          try {
+            await session.clickRef(decision.i);
+          } catch (e) {
+            // Stale element / navigation race — tell the agent so it adapts
+            // (e.g. re-snapshot picks fresh indexes next turn).
+            trace.push({ turn, decision: "error", detail: (e as Error).message.slice(0, 100) });
+          }
+          continue;
+        }
+        if (decision.kind === "fill") {
+          try {
+            await session.fillRef(decision.i, decision.value);
+          } catch (e) {
+            trace.push({ turn, decision: "error", detail: (e as Error).message.slice(0, 100) });
+          }
+          continue;
+        }
+        if (decision.kind === "press") {
+          try {
+            await session.pressKey(decision.key);
+          } catch (e) {
+            trace.push({ turn, decision: "error", detail: (e as Error).message.slice(0, 100) });
+          }
+          continue;
+        }
       }
     }
 
@@ -299,13 +390,39 @@ export async function POST(req: NextRequest) {
         : `Ran out of turns (${MAX_TURNS}) before confirming the goal.`;
     }
 
+    // Give the user a clickable link. Prefer the final page when it IS a
+    // product; on a results page, promote the best product href from the
+    // last snapshot instead (the LLM often answers without clicking) —
+    // scored by how many answer words the link text shares.
+    const finalPageUrl = session.url();
+    if (finalPageUrl && looksLikeProductPage(finalPageUrl)) {
+      productUrl = finalPageUrl;
+    } else if (lastSnapshot) {
+      const snapBase = lastSnapshot;
+      const answerWords = new Set(
+        answer.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 2)
+      );
+      const best = snapBase.els
+        .filter((e) => e.href && e.tag === "a" && looksLikeProductPage(absolutize(e.href, snapBase.url)))
+        .map((e) => ({
+          href: e.href as string,
+          score: (e.txt || "")
+            .toLowerCase()
+            .split(/[^\p{L}\p{N}]+/u)
+            .reduce((n, w) => n + (answerWords.has(w) ? 1 : 0), 0),
+        }))
+        .sort((a, b) => b.score - a.score)[0];
+      if (best?.href) productUrl = absolutize(best.href, snapBase.url);
+      else if (finalPageUrl && !/^(Couldn't|Bot wall|Ran )/.test(answer)) productUrl = finalPageUrl;
+    }
+
     // Run history (best-effort).
     try {
       await prisma.browserRun.create({
         data: {
           workflow: "agent",
           goal: body.goal.slice(0, 300),
-          success: !answer.startsWith("Couldn't"),
+          success: !/^(Couldn't|Bot wall|Ran )/.test(answer),
           summary: answer.slice(0, 250),
           durationMs: Date.now() - started,
         },
@@ -314,12 +431,14 @@ export async function POST(req: NextRequest) {
       // non-fatal
     }
 
-    return NextResponse.json({ success: !answer.startsWith("Couldn't"), answer, trace, screenshot });
+    return NextResponse.json({ success: !/^(Couldn't|Bot wall|Ran )/.test(answer), answer, productUrl, trace, screenshot });
   } catch (error) {
-    return NextResponse.json(
-      { error: "Agent run failed", details: error instanceof Error ? error.message : String(error), trace },
-      { status: 500 }
-    );
+    const msg = error instanceof Error ? error.message : String(error);
+    // All providers 429ing is a quota blip, not a bug — say so plainly.
+    const friendly = /No LLM available/.test(msg)
+      ? "All AI providers are rate-limited right now. Wait a minute and try again — this recovers on its own."
+      : "Agent run failed";
+    return NextResponse.json({ error: friendly, details: msg, trace }, { status: /No LLM available/.test(msg) ? 503 : 500 });
   } finally {
     await session.close();
   }

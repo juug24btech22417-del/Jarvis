@@ -188,6 +188,8 @@ function WorkflowsTab() {
   const [error, setError] = useState<string | null>(null);
   const [summary, setSummary] = useState<string | null>(null);
   const [finalUrl, setFinalUrl] = useState<string | null>(null);
+  const [productUrl, setProductUrl] = useState<string | null>(null);
+  const [data, setData] = useState<unknown>(null);
   const [captcha, setCaptcha] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [headed, setHeaded] = useState(false);
@@ -200,6 +202,8 @@ function WorkflowsTab() {
     setSummary(null);
     setResults(null);
     setScreenshot(null);
+    setProductUrl(null);
+    setData(null);
     try {
       const res = await fetch("/api/browser", {
         method: "POST",
@@ -212,6 +216,8 @@ function WorkflowsTab() {
         setScreenshot(data.screenshot || null);
         setSummary(data.summary || null);
         setFinalUrl(data.finalUrl || null);
+        setProductUrl(data.productUrl || null);
+        setData(data.data ?? null);
         setCaptcha(!!data.captcha);
       } else {
         setError(data.error || `Request failed (${res.status})`);
@@ -322,6 +328,54 @@ function WorkflowsTab() {
         </div>
       )}
 
+      {/* open-page link — independent of the screenshot so it shows even
+          when the capture fails */}
+      {(productUrl || finalUrl) && (
+        <a
+          href={productUrl || finalUrl || "#"}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded bg-cyan-500/10 border border-cyan-500/30 text-xs text-cyan-300 hover:bg-cyan-500/20 hover:border-cyan-400/50 transition-colors"
+        >
+          <ExternalLink className="w-3.5 h-3.5" />
+          {productUrl ? "Open product page" : "Open result page"}
+        </a>
+      )}
+
+      {/* scraped data (check_price etc.) */}
+      {(() => {
+        if (!data) return null;
+        let rows: Array<{ title?: string; price?: string; link?: string }> | null = null;
+        try {
+          const parsed = typeof data === "string" ? JSON.parse(data) : data;
+          if (Array.isArray(parsed) && parsed.length > 0) rows = parsed;
+        } catch {
+          // not a row list — fall through
+        }
+        if (!rows) return null;
+        return (
+          <HudCard className="p-3">
+            <div className="text-[10px] font-mono uppercase tracking-widest text-cyan-500/70 mb-1.5 flex items-center gap-1.5">
+              <Sparkles className="w-3 h-3 text-cyan-400" /> Scraped Results
+            </div>
+            <div className="space-y-1">
+              {rows.map((row, i) => (
+                <div key={i} className="flex items-center justify-between gap-2 py-1 px-2 rounded bg-white/[0.02] text-xs">
+                  {row.link ? (
+                    <a href={row.link} target="_blank" rel="noopener noreferrer" className="text-cyan-100/90 hover:text-cyan-300 truncate flex-1">
+                      {row.title || row.link}
+                    </a>
+                  ) : (
+                    <span className="text-cyan-100/90 truncate flex-1">{row.title || JSON.stringify(row).slice(0, 80)}</span>
+                  )}
+                  {row.price && <span className="text-emerald-300 font-mono shrink-0">{row.price}</span>}
+                </div>
+              ))}
+            </div>
+          </HudCard>
+        );
+      })()}
+
       {/* screenshot */}
       <AnimatePresence>
         {screenshot && (
@@ -405,6 +459,7 @@ function AgentTab() {
   const [answer, setAnswer] = useState<string | null>(null);
   const [trace, setTrace] = useState<AgentTrace[] | null>(null);
   const [screenshot, setScreenshot] = useState<string | null>(null);
+  const [productUrl, setProductUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const run = async () => {
@@ -414,6 +469,7 @@ function AgentTab() {
     setAnswer(null);
     setTrace(null);
     setScreenshot(null);
+    setProductUrl(null);
     try {
       const res = await fetch("/api/browser/agent", {
         method: "POST",
@@ -425,6 +481,7 @@ function AgentTab() {
         setAnswer(data.answer);
         setTrace(data.trace);
         setScreenshot(data.screenshot || null);
+        setProductUrl(data.productUrl || null);
       } else {
         setError(data.details || data.error || "Agent failed");
         if (data.trace) setTrace(data.trace);
@@ -476,6 +533,17 @@ function AgentTab() {
         <HudCard className="p-3">
           <div className="text-[10px] font-mono uppercase tracking-widest text-cyan-500/70 mb-1.5">Agent Answer</div>
           <p className="text-sm text-cyan-50 whitespace-pre-wrap">{answer}</p>
+          {productUrl && (
+            <a
+              href={productUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-2.5 inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded bg-cyan-500/10 border border-cyan-500/30 text-xs text-cyan-300 hover:bg-cyan-500/20 hover:border-cyan-400/50 transition-colors"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              Open product page
+            </a>
+          )}
         </HudCard>
       )}
 

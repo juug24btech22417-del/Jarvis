@@ -11,7 +11,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { writeFile, mkdir } from "fs/promises";
 import path from "path";
 import { prisma } from "@/lib/db/queries";
-import { runActions, BrowserAction } from "@/lib/browser/engine";
+import { runActions, BrowserAction, looksLikeProductPage } from "@/lib/browser/engine";
 
 // ─── Rate limiting (per process; good enough for a personal app) ────
 
@@ -29,6 +29,27 @@ function rateLimited(key: string): boolean {
 function isLocalhost(req: NextRequest): boolean {
   const host = req.headers.get("host") ?? "";
   return host.startsWith("localhost") || host.startsWith("127.0.0.1");
+}
+
+// Pick a link worth opening: the final page when it IS a product, else
+// the first product URL the workflow scraped (check_price's evaluate
+// step grabs per-result hrefs).
+function extractProductUrl(finalUrl: string | null, results: Array<{ result?: unknown }>): string | null {
+  if (finalUrl && looksLikeProductPage(finalUrl)) return finalUrl;
+  for (const r of results) {
+    const raw = r.result;
+    if (typeof raw !== "string") continue;
+    try {
+      const parsed = JSON.parse(raw) as Array<{ link?: string }>;
+      if (Array.isArray(parsed)) {
+        const link = parsed.find((x) => x?.link && looksLikeProductPage(x.link))?.link;
+        if (link) return link;
+      }
+    } catch {
+      // not JSON — ignore
+    }
+  }
+  return null;
 }
 
 // ─── Workflows ──────────────────────────────────────────────────────
@@ -54,10 +75,10 @@ const WORKFLOWS: Record<
     name: "Check Price",
     description: "Check product price on Amazon",
     actions: [
-      { type: "navigate", url: "https://www.amazon.com" },
-      { type: "fill", selector: "#twotabsearchtextbox", value: "{{product}}" },
-      { type: "click", selector: "#nav-search-submit-button" },
-      { type: "waitForSelector", selector: "div[data-component-type='s-search-result']", timeout: 12_000 },
+      // Direct search URL — faster than homepage → fill → click, and it
+      // dodges the homepage bot-wall checks entirely.
+      { type: "navigate", url: "https://www.amazon.in/s?k={{product}}" },
+      { type: "waitForSelector", selector: "div[data-component-type='s-search-result']", timeout: 8_000 },
       {
         type: "evaluate",
         script: `
@@ -67,6 +88,7 @@ const WORKFLOWS: Record<
               .map((el) => ({
                 title: (el.querySelector("h2 span")?.textContent || "").trim().slice(0, 90),
                 price: (el.querySelector(".a-price .a-offscreen")?.textContent || "").trim(),
+                link: el.querySelector("a.a-link-normal")?.href || null,
               }))
               .filter((r) => r.title)
           )
@@ -193,6 +215,8 @@ export async function POST(req: NextRequest) {
     const succeeded = results.filter((r) => r.success).length;
     const screenshot = results.find((r) => r.action === "screenshot" && r.data)?.data;
     const pdf = results.find((r) => r.action === "pdf" && r.data)?.data;
+    const data = results.find((r) => r.action === "evaluate" && r.result != null)?.result ?? null;
+    const productUrl = extractProductUrl(run.finalUrl, results);
 
     // Persist run history + screenshot to disk (best-effort).
     let runId: string | null = null;
@@ -229,6 +253,8 @@ export async function POST(req: NextRequest) {
       runId,
       workflow: workflow ?? "custom",
       results,
+      data,
+      productUrl,
       screenshot,
       pdf,
       captcha: run.captcha,
