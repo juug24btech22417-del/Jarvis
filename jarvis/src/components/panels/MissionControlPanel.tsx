@@ -155,6 +155,20 @@ export default function MissionControlPanel({ isOpen, onClose }: MissionControlP
             if (prev.some((x) => x.seq === e.seq)) return prev;
             return [...prev, { seq: e.seq, type: e.type, message: e.message, at: e.at }].slice(-120);
           });
+          // Vocalizer: if the event includes speech text (e.g. weather announcements), speak it aloud
+          const speakText = e.data?.speakText;
+          if (typeof window !== "undefined" && window.speechSynthesis && typeof speakText === "string" && speakText) {
+            try {
+              window.speechSynthesis.cancel();
+              const u = new SpeechSynthesisUtterance(speakText);
+              u.rate = 1.0;
+              u.pitch = 1.0;
+              window.speechSynthesis.speak(u);
+            } catch {
+              // speech synthesis blocked or unavailable
+            }
+          }
+
           // Client-side opener: browser_open steps queue URLs in the event
           // payload; window.open them on the gesture chain we still have.
           const openUrls = e.data?.openUrls;
@@ -171,6 +185,7 @@ export default function MissionControlPanel({ isOpen, onClose }: MissionControlP
         } catch {
           // malformed event — skip
         }
+
       });
       es.onerror = () => {
         // EventSource auto-reconnects; nothing to do — the server replays
