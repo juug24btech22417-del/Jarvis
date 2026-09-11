@@ -1,109 +1,162 @@
 import { NextRequest, NextResponse } from "next/server";
 import { exec } from "child_process";
 import { promisify } from "util";
+import os from "os";
 
 const execAsync = promisify(exec);
 
-// Get Windows PC stats using PowerShell and WMIC
-async function getPCStats() {
-  const stats: Record<string, unknown> = {};
+// Cache for slow-changing system metrics (disks, battery)
+interface CachedMetric<T> {
+  data: T;
+  timestamp: number;
+}
+
+let cachedDisks: CachedMetric<Array<{ caption: string; size: number; free: number; usage: number }>> | null = null;
+let cachedBattery: CachedMetric<number | null> | null = null;
+const CACHE_TTL_MS = 25000; // 25 seconds
+
+// CPU measurement using os.cpus()
+interface CpuTickSummary {
+  idle: number;
+  total: number;
+  time: number;
+}
+
+let lastCpuSnapshot: CpuTickSummary | null = null;
+
+function getCpuTickSummary(): CpuTickSummary {
+  const cpus = os.cpus();
+  let idle = 0;
+  let total = 0;
+  for (const cpu of cpus) {
+    for (const type in cpu.times) {
+      total += cpu.times[type as keyof typeof cpu.times];
+    }
+    idle += cpu.times.idle;
+  }
+  return { idle, total, time: Date.now() };
+}
+
+async function getCpuUsage(): Promise<number> {
+  const nowSnapshot = getCpuTickSummary();
+
+  if (!lastCpuSnapshot || (nowSnapshot.time - lastCpuSnapshot.time) > 10000 || (nowSnapshot.time - lastCpuSnapshot.time) < 300) {
+    // Take a short sample if no valid recent baseline exists
+    const baseline = nowSnapshot;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const sample = getCpuTickSummary();
+    lastCpuSnapshot = sample;
+
+    const idleDiff = sample.idle - baseline.idle;
+    const totalDiff = sample.total - baseline.total;
+    if (totalDiff <= 0) return 0;
+    const pct = Math.round(((totalDiff - idleDiff) / totalDiff) * 100);
+    return Math.max(0, Math.min(100, pct));
+  }
+
+  const idleDiff = nowSnapshot.idle - lastCpuSnapshot.idle;
+  const totalDiff = nowSnapshot.total - lastCpuSnapshot.total;
+  lastCpuSnapshot = nowSnapshot;
+
+  if (totalDiff <= 0) return 0;
+  const pct = Math.round(((totalDiff - idleDiff) / totalDiff) * 100);
+  return Math.max(0, Math.min(100, pct));
+}
+
+async function getDisks(): Promise<Array<{ caption: string; size: number; free: number; usage: number }>> {
+  if (cachedDisks && (Date.now() - cachedDisks.timestamp) < CACHE_TTL_MS) {
+    return cachedDisks.data;
+  }
 
   try {
-    // CPU Usage
-    const { stdout: cpuOut } = await execAsync(
-      'wmic cpu get loadpercentage /value'
+    const { stdout } = await execAsync(
+      `powershell -NoProfile -NonInteractive -Command "Get-CimInstance Win32_LogicalDisk -Filter 'DriveType = 3' | Select-Object DeviceID, Size, FreeSpace | ConvertTo-Json"`,
+      { timeout: 5000 }
     );
-    const cpuMatch = cpuOut.match(/LoadPercentage=(\d+)/);
-    stats.cpuUsage = cpuMatch ? parseInt(cpuMatch[1]) : null;
 
-    // Memory
-    const { stdout: memOut } = await execAsync(
-      'wmic OS get TotalVisibleMemorySize,FreePhysicalMemory /value'
-    );
-    const totalMatch = memOut.match(/TotalVisibleMemorySize=(\d+)/);
-    const freeMatch = memOut.match(/FreePhysicalMemory=(\d+)/);
-    if (totalMatch && freeMatch) {
-      const total = parseInt(totalMatch[1]) * 1024; // Convert KB to bytes
-      const free = parseInt(freeMatch[1]) * 1024;
-      stats.memoryTotal = total;
-      stats.memoryUsed = total - free;
-      stats.memoryUsage = Math.round(((total - free) / total) * 100);
+    const trimmed = stdout.trim();
+    if (!trimmed) {
+      return cachedDisks?.data ?? [];
     }
 
-    // Disk
-    const { stdout: diskOut } = await execAsync(
-      'wmic logicaldisk get size,freespace,caption /value'
-    );
-    const disks: Array<{caption: string; size: number; free: number; usage: number}> = [];
-    const diskEntries = diskOut.trim().split(/\r?\n\r?\n/);
-    for (const entry of diskEntries) {
-      const caption = entry.match(/Caption=(.+)/)?.[1];
-      const size = entry.match(/Size=(\d+)/)?.[1];
-      const free = entry.match(/FreeSpace=(\d+)/)?.[1];
-      if (caption && size && free) {
-        const sizeNum = parseInt(size);
-        const freeNum = parseInt(free);
-        disks.push({
-          caption,
-          size: sizeNum,
-          free: freeNum,
-          usage: Math.round(((sizeNum - freeNum) / sizeNum) * 100),
-        });
-      }
-    }
-    stats.disks = disks;
+    const parsed = JSON.parse(trimmed);
+    const diskList = Array.isArray(parsed) ? parsed : [parsed];
 
-    // Battery (laptops)
-    try {
-      const { stdout: batteryOut } = await execAsync(
-        'wmic path Win32_Battery Get EstimatedChargeRemaining /value'
-      );
-      const batteryMatch = batteryOut.match(/EstimatedChargeRemaining=(\d+)/);
-      if (batteryMatch) {
-        stats.battery = parseInt(batteryMatch[1]);
-      }
-    } catch {
-      // No battery (desktop)
-      stats.battery = null;
-    }
+    const result = diskList
+      .filter((d) => d && d.DeviceID && d.Size)
+      .map((d) => {
+        const size = Number(d.Size) || 0;
+        const free = Number(d.FreeSpace) || 0;
+        const usage = size > 0 ? Math.round(((size - free) / size) * 100) : 0;
+        return {
+          caption: String(d.DeviceID),
+          size,
+          free,
+          usage,
+        };
+      });
 
-    // Uptime
-    const { stdout: uptimeOut } = await execAsync(
-      'wmic os get LastBootUpTime /value'
-    );
-    const bootMatch = uptimeOut.match(/LastBootUpTime=(\d{14})/);
-    if (bootMatch) {
-      const bootTime = new Date(
-        bootMatch[1].slice(0, 4) + '-' +
-        bootMatch[1].slice(4, 6) + '-' +
-        bootMatch[1].slice(6, 8) + 'T' +
-        bootMatch[1].slice(8, 10) + ':' +
-        bootMatch[1].slice(10, 12) + ':' +
-        bootMatch[1].slice(12, 14)
-      );
-      const uptime = Date.now() - bootTime.getTime();
-      stats.uptime = Math.floor(uptime / (1000 * 60 * 60)); // Hours
-    }
-
-    // Temperature (if available)
-    try {
-      const { stdout: tempOut } = await execAsync(
-        'wmic /namespace:\\\root\\wmi PATH MSAcpi_ThermalZoneTemperature Get CurrentTemperature /value'
-      );
-      const tempMatch = tempOut.match(/CurrentTemperature=(\d+)/);
-      if (tempMatch) {
-        // Convert from tenths of Kelvin to Celsius
-        stats.temperature = Math.round((parseInt(tempMatch[1]) / 10) - 273.15);
-      }
-    } catch {
-      stats.temperature = null;
-    }
-
-    return stats;
+    cachedDisks = { data: result, timestamp: Date.now() };
+    return result;
   } catch (error) {
-    console.error("PC Stats error:", error);
-    throw error;
+    console.warn("Disks CIM query warning:", error);
+    return cachedDisks?.data ?? [];
   }
+}
+
+async function getBattery(): Promise<number | null> {
+  if (cachedBattery && (Date.now() - cachedBattery.timestamp) < CACHE_TTL_MS) {
+    return cachedBattery.data;
+  }
+
+  try {
+    const { stdout } = await execAsync(
+      `powershell -NoProfile -NonInteractive -Command "Get-CimInstance Win32_Battery | Select-Object EstimatedChargeRemaining | ConvertTo-Json"`,
+      { timeout: 4000 }
+    );
+
+    const trimmed = stdout.trim();
+    if (!trimmed) {
+      cachedBattery = { data: null, timestamp: Date.now() };
+      return null;
+    }
+
+    const parsed = JSON.parse(trimmed);
+    const batteryObj = Array.isArray(parsed) ? parsed[0] : parsed;
+    const charge = batteryObj?.EstimatedChargeRemaining != null ? Number(batteryObj.EstimatedChargeRemaining) : null;
+
+    cachedBattery = { data: charge, timestamp: Date.now() };
+    return charge;
+  } catch {
+    cachedBattery = { data: null, timestamp: Date.now() };
+    return null;
+  }
+}
+
+async function getPCStats() {
+  const totalMem = os.totalmem();
+  const freeMem = os.freemem();
+  const usedMem = totalMem - freeMem;
+  const memUsage = Math.round((usedMem / totalMem) * 100);
+  const uptimeHours = Math.floor(os.uptime() / 3600);
+
+  // Fetch CPU, Disks, and Battery in parallel
+  const [cpuUsage, disks, battery] = await Promise.all([
+    getCpuUsage().catch(() => null),
+    getDisks().catch(() => []),
+    getBattery().catch(() => null),
+  ]);
+
+  return {
+    cpuUsage,
+    memoryTotal: totalMem,
+    memoryUsed: usedMem,
+    memoryUsage: memUsage,
+    uptime: uptimeHours,
+    battery,
+    temperature: null, // MSAcpi_ThermalZoneTemperature requires elevation on Windows
+    disks,
+  };
 }
 
 export async function GET() {
@@ -112,10 +165,20 @@ export async function GET() {
     return NextResponse.json({ success: true, stats });
   } catch (error) {
     console.error("PC Stats API error:", error);
-    return NextResponse.json(
-      { error: "Failed to get PC stats", details: String(error) },
-      { status: 500 }
-    );
+    // Even in an edge-case failure, return a safe fallback instead of throwing 500
+    return NextResponse.json({
+      success: true,
+      stats: {
+        cpuUsage: null,
+        memoryTotal: os.totalmem(),
+        memoryUsed: os.totalmem() - os.freemem(),
+        memoryUsage: Math.round(((os.totalmem() - os.freemem()) / os.totalmem()) * 100),
+        uptime: Math.floor(os.uptime() / 3600),
+        battery: null,
+        temperature: null,
+        disks: [],
+      },
+    });
   }
 }
 
@@ -126,30 +189,33 @@ export async function POST(req: NextRequest) {
 
     switch (action) {
       case "processes": {
-        // Get top processes by CPU
-        const { stdout } = await execAsync(
-          'wmic process get Name,ProcessId,WorkingSetSize /value | findstr /B "Name= ProcessId= WorkingSetSize="'
-        );
-        const lines = stdout.trim().split('\n');
-        const processes: Array<{name: string; pid: number; memory: number}> = [];
+        try {
+          const { stdout } = await execAsync(
+            `powershell -NoProfile -NonInteractive -Command "Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 10 -Property ProcessName, Id, WorkingSet64 | ConvertTo-Json"`,
+            { timeout: 6000 }
+          );
 
-        for (let i = 0; i < lines.length; i += 3) {
-          const nameMatch = lines[i]?.match(/Name=(.+)/);
-          const pidMatch = lines[i + 1]?.match(/ProcessId=(\d+)/);
-          const memMatch = lines[i + 2]?.match(/WorkingSetSize=(\d+)/);
-
-          if (nameMatch && pidMatch && memMatch) {
-            processes.push({
-              name: nameMatch[1],
-              pid: parseInt(pidMatch[1]),
-              memory: Math.round(parseInt(memMatch[1]) / (1024 * 1024)), // MB
-            });
+          const trimmed = stdout.trim();
+          if (!trimmed) {
+            return NextResponse.json({ success: true, processes: [] });
           }
-        }
 
-        // Sort by memory and return top 10
-        processes.sort((a, b) => b.memory - a.memory);
-        return NextResponse.json({ success: true, processes: processes.slice(0, 10) });
+          const parsed = JSON.parse(trimmed);
+          const rawList = Array.isArray(parsed) ? parsed : [parsed];
+
+          const processes = rawList
+            .filter((p) => p && p.ProcessName && p.Id != null)
+            .map((p) => ({
+              name: String(p.ProcessName),
+              pid: Number(p.Id),
+              memory: Math.round((Number(p.WorkingSet64) || 0) / (1024 * 1024)), // MB
+            }));
+
+          return NextResponse.json({ success: true, processes });
+        } catch (procErr) {
+          console.error("Failed to list processes via CIM:", procErr);
+          return NextResponse.json({ success: true, processes: [] });
+        }
       }
 
       case "kill": {
@@ -157,7 +223,7 @@ export async function POST(req: NextRequest) {
         if (!pid) {
           return NextResponse.json({ error: "PID required" }, { status: 400 });
         }
-        await execAsync(`taskkill /PID ${pid} /F`);
+        await execAsync(`taskkill /PID ${Number(pid)} /F`);
         return NextResponse.json({ success: true, message: `Process ${pid} killed` });
       }
 
