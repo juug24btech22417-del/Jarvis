@@ -31,6 +31,11 @@ import {
   ChevronUp,
   Radar,
   Zap,
+  Music,
+  Cloud,
+  MapPin,
+  Video,
+  CheckSquare,
 } from "lucide-react";
 import { STEP_KIND_LABELS, type AgentJob, type JobStatus } from "@/lib/agent/types";
 import type { MissionEvent } from "@/lib/agent/events";
@@ -65,9 +70,11 @@ const STATUS_LABEL: Record<JobStatus, string> = {
 };
 
 const EXAMPLES = [
-  "Find the best free React course and open the best one",
-  "Find the Odoo documentation for module development, find a good tutorial, open both and summarise the important concepts",
-  "Research the top 3 frameworks for building AI agents, open the docs of the winner",
+  "Find the best free movie to watch tonight and open it",
+  "Find the cheapest flight from Bengaluru to Delhi for next weekend",
+  "Find the best rated pizza place near me and open its location",
+  "Find today's weather, play matching music on Spotify, and open tech news on YouTube",
+  "Find butter chicken recipe, extract ingredients, make a shopping list, and open nearby stores",
 ];
 
 // Icon per step kind — gives each step a visual identity in the plan.
@@ -85,6 +92,12 @@ const KIND_ICON: Record<string, React.ReactNode> = {
   playwright_action: <MousePointerClick className="w-3 h-3" />,
   browser_open: <ExternalLink className="w-3 h-3" />,
   checkpoint: <HelpCircle className="w-3 h-3" />,
+  spotify_action: <Music className="w-3 h-3" />,
+  weather_lookup: <Cloud className="w-3 h-3" />,
+  maps_open: <MapPin className="w-3 h-3" />,
+  youtube_open: <Video className="w-3 h-3" />,
+  notes_create: <FileText className="w-3 h-3" />,
+  task_create: <CheckSquare className="w-3 h-3" />,
 };
 
 interface LiveFeedItem {

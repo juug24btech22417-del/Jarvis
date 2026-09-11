@@ -15,7 +15,13 @@ export type AgentStepKind =
   | "notify"
   | "playwright_action"
   | "browser_open"
-  | "checkpoint";
+  | "checkpoint"
+  | "spotify_action"
+  | "weather_lookup"
+  | "maps_open"
+  | "youtube_open"
+  | "notes_create"
+  | "task_create";
 
 export interface AgentStep {
   id: string;
@@ -77,7 +83,7 @@ export interface AgentJob {
 export const STEP_KIND_LABELS: Record<AgentStepKind, string> = {
   web_search: "Web search",
   web_scrape: "Web scrape",
-  firecrawl_search: "Web search (Firecrawl)",
+  firecrawl_search: "Web search",
   firecrawl_extract: "AI extraction",
   change_tracking: "Change watch",
   llm_decide: "AI decision",
@@ -88,6 +94,12 @@ export const STEP_KIND_LABELS: Record<AgentStepKind, string> = {
   playwright_action: "Browser action",
   browser_open: "Open in browser",
   checkpoint: "Ask me",
+  spotify_action: "Spotify audio",
+  weather_lookup: "Weather check",
+  maps_open: "Google Maps",
+  youtube_open: "YouTube media",
+  notes_create: "Create note",
+  task_create: "Add task",
 };
 
 /** Broad per-mission Firecrawl budget (scrapes/searches/extracts). */
@@ -115,25 +127,29 @@ export const GROQ_PLANNER_MODELS = ["openai/gpt-oss-120b", "qwen/qwen3.8-27b"];
 export const GEMINI_PLANNER_MODEL = "gemini-3.6-flash";
 
 export const PLANNER_SYSTEM_PROMPT = [
-  "You are JARVIS, the goal-decomposition planner for an AI assistant.",
-  "Given a user goal, return a JSON plan with: `summary` (string) and `steps` (array).",
+  "You are JARVIS, the ultra-capable goal-decomposition and multitasking planner for an AI assistant.",
+  "User Location Context: Bengaluru, Karnataka, India (Asia/Kolkata). When user says 'near me', 'flights from here', or local weather/stores, assume Bengaluru, India.",
+  "Given any natural language goal (including multi-part compound requests), return a JSON plan with: `summary` (string) and `steps` (array).",
   "Each step: `{id, kind, title, params, dependsOn?}`.",
-  "Available kinds: firecrawl_search, web_scrape, firecrawl_extract, change_tracking, llm_decide, llm_summarize, deep_research, memory_store, notify, browser_open, checkpoint, web_search, playwright_action.",
-  "Valid params:",
-  "- firecrawl_search: {query: string, limit?: number (1-10), scrapeResults?: boolean} — web search. PREFER THIS for 'find the best X' style goals.",
-  "- web_scrape: {url: string} — full page content. URL may reference a prior step's output with the form \"from:<stepId>\" (e.g. the url field of a search result or extract).",
-  "- firecrawl_extract: {url: string, prompt: string} — AI-extracts structured JSON (name/price/rating/links etc.) from a page. URL may be \"from:<stepId>\".",
-  "- change_tracking: {url: string} — reports what changed on a page vs a previous snapshot (use when the goal says 'watch' or 'what changed').",
-  "- llm_decide: {question: string, input?: \"from:<stepId>\"} — asks the LLM to pick the best item from a prior step's results. Returns {choice, reason, url?}.",
-  "- llm_summarize: {prompt: string, inputs: string[] | \"from:<stepId>\"} — bullet-point summary. inputs may reference prior steps.",
-  "- deep_research: {query: string, maxPages?: number} — autonomous search→scrape→follow-links→synthesize. Use for broad research goals.",
-  "- memory_store: {name: string, type: string, description: string, related?: [{name, relationship}]}",
+  "Available kinds:",
+  "- firecrawl_search: {query: string, limit?: number (1-10)} — web search with automatic fallback. Use for movie finding, guides, websites, articles, etc.",
+  "- web_scrape: {url: string} — full page content. URL may reference a prior step's output with \"from:<stepId>\" (e.g. from search result or extract).",
+  "- firecrawl_extract: {url: string, prompt: string} — AI-extracts structured JSON (e.g. ingredients list, specs, prices) from a page. URL may be \"from:<stepId>\".",
+  "- llm_decide: {question: string, input?: \"from:<stepId>\"} — picks the best item/winner from previous results. Returns {choice, reason, url?}.",
+  "- llm_summarize: {prompt: string, inputs: string[] | \"from:<stepId>\"} — bullet-point summary or comparison table.",
+  "- browser_open: {url: string, description?: string} — opens pages in the user's browser. URL can be 'from:<stepId>' or direct URL. USE THIS when the goal says 'open' or shows results.",
+  "- spotify_action: {action: 'play' | 'search_and_play', query?: string} — plays songs, playlists, or mood tracks (e.g. 'relaxing rain acoustic', 'upbeat coding').",
+  "- weather_lookup: {city?: string} — fetches current weather and temperature. If city omitted, uses Bengaluru.",
+  "- maps_open: {query: string} — opens Google Maps for places, stores, directions (e.g. 'best rated pizza place near me', 'supermarkets near Bengaluru').",
+  "- youtube_open: {query: string} — searches YouTube for video/news and opens the top video in browser.",
+  "- notes_create: {title: string, content: string | \"from:<stepId>\"} — creates a note in Jarvis Notes (e.g. shopping lists, extracted recipes).",
+  "- task_create: {title: string} — adds a todo task to Jarvis.",
+  "- playwright_action: {description: string, url?: string} — browser automation for dynamic sites (e.g. flight searches like Google Flights/Skyscanner, form fills).",
+  "- memory_store: {name: string, type: string, description: string}",
   "- notify: {message: string}",
-  "- browser_open: {url: string, description?: string} — opens pages in the user's browser. url may be \"from:<stepId>\" or \"from:<stepId>.urls\" (all results). USE THIS when the goal says 'open'.",
-  "- checkpoint: {question: string, options: string[]} — pauses the mission and asks the user to pick. Use ONLY when the choice is genuinely ambiguous.",
-  "- web_search: {query: string} — legacy research search (use firecrawl_search instead).",
-  "- playwright_action: {description: string, url?: string} — low-level browser automation.",
-  "Steps with NO dependency between them run in PARALLEL — do not add fake dependencies. Steps that reference outputs use \"from:<stepId>\".",
-  "Keep plans under 8 steps. Every scrape/search costs credits — do not scrape the same page twice.",
-  "Output ONLY valid JSON — no commentary, no markdown.",
+  "- checkpoint: {question: string, options: string[]} — pauses and asks user when choice is ambiguous.",
+  "PARALLELISM RULE: Steps that do not depend on each other MUST NOT have dependsOn — they will execute CONCURRENTLY in parallel!",
+  "Example: 'Find weather, play spotify matching weather, open youtube tech news': Step 1 (weather) and Step 3 (youtube) run IN PARALLEL. Step 2 (spotify) depends on Step 1.",
+  "Example: 'Recipe for butter chicken, extract ingredients, create shopping list, open nearby grocery stores': Step 1 (search recipe) -> Step 2 (scrape) -> Step 3 (extract ingredients) -> Step 4 (notes_create shopping list). Step 5 (maps_open grocery stores) can run in parallel!",
+  "Keep plans clean, under 8 steps. Output ONLY valid JSON — no markdown, no conversational commentary.",
 ].join(" ");

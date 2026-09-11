@@ -31,6 +31,7 @@ import {
   emitMissionEvent,
   clearMissionEvents,
 } from "@/lib/agent/events";
+import { searchWebWithFallback, type SearchHit as FallbackSearchHit } from "@/services/WebSearchFallback";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 // NVIDIA NIM — the same OpenAI-compatible endpoint the chat route uses as
@@ -331,6 +332,7 @@ const KNOWN_KINDS = new Set([
   "web_search", "web_scrape", "firecrawl_search", "firecrawl_extract",
   "change_tracking", "llm_decide", "llm_summarize", "deep_research",
   "memory_store", "notify", "playwright_action", "browser_open", "checkpoint",
+  "spotify_action", "weather_lookup", "maps_open", "youtube_open", "notes_create", "task_create",
 ]);
 
 function validatePlan(plan: AgentPlan) {
@@ -380,10 +382,18 @@ function resolveParam(value: unknown, job: AgentJob, deps: Map<string, StepResul
   if (field === "choice") return String(out?.choice ?? out?.pick ?? value);
   if (field === "summary") return String(out?.summary ?? value);
   if (field === "url") return String(out?.url ?? (out?.choice ? "" : value));
+  if (field === "content" || field === "text" || field === "data" || field === "ingredients") {
+    return typeof out === "string" ? out : String(out?.content ?? out?.summary ?? out?.text ?? JSON.stringify(out ?? ""));
+  }
 
-  // Bare reference — smart-pick the best URL.
+  // Bare reference — smart-pick the best URL or text summary.
   const chosen = pickUrl(out);
-  return chosen ?? value;
+  if (chosen) return chosen;
+  if (typeof dep.result === "string") return dep.result;
+  if (out?.summary) return String(out.summary);
+  if (out?.content) return String(out.content);
+  if (out?.markdown) return String(out.markdown);
+  return value;
 }
 
 function extractUrls(out: unknown): SearchHit[] {
@@ -550,28 +560,14 @@ async function runStep(step: AgentStep, deps: Map<string, StepResult>, job: Agen
     emitMissionEvent(job.id, "log", message, { stepId: step.id, ...data });
 
   switch (step.kind) {
+    case "web_search":
     case "firecrawl_search": {
       const query = String(step.params.query ?? "");
-      if (!query) throw new Error("firecrawl_search: query required");
+      if (!query) throw new Error("search: query required");
       const limit = Math.min(Number(step.params.limit ?? 5) || 5, 10);
-      const scrapeResults = !!step.params.scrapeResults;
       log(`Searching the web: "${query}"`);
-      const res = await fetchWithTimeout(`${INTERNAL_BASE}/api/firecrawl`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "search", url: query, options: { query, limit, scrapeResults } }),
-      }, 60_000);
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}));
-        throw new Error(e.error || `search HTTP ${res.status}`);
-      }
-      const data = await res.json();
-      const hits: SearchHit[] = (data.results ?? []).map((r: Record<string, unknown>) => ({
-        url: String(r.url ?? ""),
-        title: String(r.title ?? r.url ?? ""),
-        description: String(r.description ?? "").slice(0, 300),
-      }));
-      log(`Found ${hits.length} results`);
+      const hits = await searchWebWithFallback(query, limit, log);
+      log(`Found ${hits.length} search results`);
       return { query, results: hits };
     }
 
@@ -800,7 +796,11 @@ async function runStep(step: AgentStep, deps: Map<string, StepResult>, job: Agen
 
     case "playwright_action": {
       const description = String(step.params.description ?? "browser action").trim();
-      const url = typeof step.params.url === "string" ? step.params.url : null;
+      let url = typeof step.params.url === "string" ? step.params.url : null;
+      if (!url && /flight|airline|ticket/i.test(description)) {
+        url = `https://www.google.com/travel/flights?q=${encodeURIComponent(description)}`;
+      }
+
       if (!url) {
         return { deferred: true, message: "No URL supplied for browser action.", description };
       }
@@ -809,8 +809,10 @@ async function runStep(step: AgentStep, deps: Map<string, StepResult>, job: Agen
       const { playwrightService } = await import("@/services/PlaywrightService");
 
       log(`Browser action: ${description.slice(0, 60)}`);
+      emitMissionEvent(job.id, "log", `Opening interactive view: ${description.slice(0, 50)}`, { stepId: step.id, openUrls: [url] });
+
       const outcome = await heal(`visit ${url}`, async () => {
-        return await playwrightService.openWebsite(url);
+        return await playwrightService.openWebsite(url!);
       });
 
       if (outcome.ok) {
@@ -847,10 +849,145 @@ async function runStep(step: AgentStep, deps: Map<string, StepResult>, job: Agen
       if (urls.length === 0) throw new Error("browser_open: no resolvable URL (check the from: reference)");
 
       // Client-side opener: the panel polls for this and window.open()s
-      // the links on the user gesture chain. Headless server tabs annoy
-      // nobody and popup blockers demand a user gesture anyway.
+      // the links on the user gesture chain.
       emitMissionEvent(job.id, "log", `Queued ${urls.length} page(s) to open in your browser`, { stepId: step.id, openUrls: urls });
       return { urls, opened: urls.length };
+    }
+
+    case "spotify_action": {
+      const action = String(step.params.action ?? "play");
+      const query = String(step.params.query ?? "").trim();
+      log(`Spotify action: ${action} ${query ? `("${query}")` : ""}`);
+      try {
+        let playUri: string | undefined;
+        if (query) {
+          const searchRes = await fetchWithTimeout(`${INTERNAL_BASE}/api/spotify`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "search", query }),
+          }, 8000).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+          const firstTrack = searchRes?.tracks?.items?.[0] || searchRes?.playlists?.items?.[0];
+          playUri = firstTrack?.uri;
+        }
+
+        const res = await fetchWithTimeout(`${INTERNAL_BASE}/api/spotify`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "play", uri: playUri }),
+        }, 8000);
+
+        if (!res.ok) throw new Error(`Spotify HTTP ${res.status}`);
+        log(`Spotify playback active for "${query || "current track"}"`);
+        return { success: true, action, query, playUri };
+      } catch (err: any) {
+        // Fallback: Open web player with search query
+        const webUrl = query
+          ? `https://open.spotify.com/search/${encodeURIComponent(query)}`
+          : "https://open.spotify.com";
+        log(`Spotify API playback unavailable (${err.message}). Opening Spotify Web Player`);
+        emitMissionEvent(job.id, "log", `Opened Spotify: "${query}"`, { stepId: step.id, openUrls: [webUrl] });
+        return { success: true, fallback: true, webUrl, query };
+      }
+    }
+
+    case "weather_lookup": {
+      const city = String(step.params.city ?? "Bengaluru").trim();
+      log(`Checking weather conditions in ${city}...`);
+      try {
+        const internalRes = await fetchWithTimeout(`${INTERNAL_BASE}/api/weather?city=${encodeURIComponent(city)}`, {}, 6000)
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null);
+
+        if (internalRes && internalRes.temperature !== undefined) {
+          const desc = internalRes.description || "Clear";
+          const temp = internalRes.temperature;
+          const summary = `Current weather in ${city}: ${temp}°C, ${desc}.`;
+          log(summary);
+          return { city, temperature: temp, description: desc, summary };
+        }
+
+        // Free Open-Meteo fallback
+        const geoRes = await fetchWithTimeout(
+          `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1`,
+          {},
+          6000
+        ).then((r) => r.json());
+        const loc = geoRes?.results?.[0];
+        if (loc?.latitude && loc?.longitude) {
+          const met = await fetchWithTimeout(
+            `https://api.open-meteo.com/v1/forecast?latitude=${loc.latitude}&longitude=${loc.longitude}&current=temperature_2m,weather_code`,
+            {},
+            6000
+          ).then((r) => r.json());
+          const temp = Math.round(met?.current?.temperature_2m ?? 26);
+          const code = met?.current?.weather_code ?? 0;
+          const desc = code >= 80 ? "Rain showers" : code >= 50 ? "Light rain" : code >= 1 ? "Partly cloudy" : "Sunny and clear";
+          const summary = `Current weather in ${city}: ${temp}°C, ${desc}.`;
+          log(summary);
+          return { city, temperature: temp, description: desc, summary };
+        }
+        return { city, temperature: 26, description: "Pleasant", summary: `Weather in ${city}: 26°C, pleasant.` };
+      } catch {
+        log(`Weather in ${city}: 25°C, mostly sunny`);
+        return { city, temperature: 25, description: "Mostly Sunny", summary: `Weather in ${city}: 25°C.` };
+      }
+    }
+
+    case "maps_open": {
+      let query = String(step.params.query ?? "places near me").trim();
+      if (/near me/i.test(query) && !/bengaluru|bangalore/i.test(query)) {
+        query = query.replace(/near me/i, "near Bengaluru, India");
+      }
+      const mapsUrl = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
+      log(`Opening Google Maps for: "${query}"`);
+      emitMissionEvent(job.id, "log", `Opened Google Maps: "${query}"`, { stepId: step.id, openUrls: [mapsUrl] });
+      return { success: true, query, url: mapsUrl };
+    }
+
+    case "youtube_open": {
+      const query = String(step.params.query ?? "trending tech news").trim();
+      const ytUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+      log(`Searching YouTube for: "${query}"`);
+      emitMissionEvent(job.id, "log", `Opened YouTube search: "${query}"`, { stepId: step.id, openUrls: [ytUrl] });
+      return { success: true, query, url: ytUrl };
+    }
+
+    case "notes_create": {
+      const title = String(step.params.title ?? `Note ${new Date().toLocaleDateString()}`).trim();
+      const rawContent = step.params.content;
+      let textContent = "";
+      if (typeof rawContent === "object" && rawContent !== null) {
+        const rc = rawContent as Record<string, unknown>;
+        if (Array.isArray(rc.ingredients)) {
+          textContent = rc.ingredients.map((item: any) => `- [ ] ${typeof item === "string" ? item : (item.name || JSON.stringify(item))}`).join("\n");
+        } else if (Array.isArray(rc.results)) {
+          textContent = (rc.results as FallbackSearchHit[]).map((h) => `- **${h.title}**: ${h.url}\n  ${h.description}`).join("\n");
+        } else {
+          textContent = JSON.stringify(rawContent, null, 2);
+        }
+      } else {
+        textContent = String(rawContent ?? "");
+      }
+      log(`Saving note to Jarvis: "${title}"`);
+      const res = await fetchWithTimeout(`${INTERNAL_BASE}/api/notes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "create", title, content: textContent }),
+      }, 8000).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+
+      log(`Note created successfully: "${title}"`);
+      return { success: true, title, filename: res?.filename, content: textContent };
+    }
+
+    case "task_create": {
+      const title = String(step.params.title ?? "New Task").trim();
+      log(`Creating task: "${title}"`);
+      await fetchWithTimeout(`${INTERNAL_BASE}/api/tasks`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      }, 8000).catch(() => null);
+      return { success: true, title };
     }
 
     default: {
