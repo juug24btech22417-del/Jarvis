@@ -132,7 +132,14 @@ export function useJarvisSentinel() {
       }
     };
 
-    const interval = setInterval(runSentinelCheck, 10000); // Check every 10s if it's time
-    return () => clearInterval(interval);
+    const initialTimer = setTimeout(() => {
+      runSentinelCheck();
+    }, 3500);
+
+    const interval = setInterval(runSentinelCheck, 15000); // Check every 15s if it's time
+    return () => {
+      clearTimeout(initialTimer);
+      clearInterval(interval);
+    };
   }, [sentinelActive, isMuted, state, speak]);
 }

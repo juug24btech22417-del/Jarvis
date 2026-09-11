@@ -1,26 +1,178 @@
 import { NextRequest, NextResponse } from "next/server";
 
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
-const NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
+const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+const NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 
-const SENTINEL_PROMPT = `Analyze the provided image and describe its visual contents in detail.
-Identify the main active window, website, app, or document visible.
+const OPENROUTER_VISION_MODELS = [
+  "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+  "google/gemma-4-31b-it:free",
+  "google/gemma-4-26b-a4b-it:free",
+  "inclusionai/ling-3.0-flash-vl:free",
+  "openrouter/free",
+];
 
-Provide a helpful, detailed observation (around 30-50 words) describing what the user is doing or looking at (e.g., social media browsing, code development, reading articles, shopping).
+const SENTINEL_SYSTEM_PROMPT = `You are JARVIS Sentinel Eyes, an AI desktop assistant.
+Analyze the provided screenshot of the user's computer screen.
+Identify the active window, app, code editor, website, or document.
+Provide a sharp, observant 1-2 sentence comment in JARVIS's polite, witty assistant persona (addressing the user as 'Boss').
+Also identify an optional proactive action (task, reminder, debug suggestion, or security risk).
 
-You MUST respond with a single JSON object:
+You MUST reply with ONLY a raw valid JSON object in this exact schema:
 {
   "proactive": true,
-  "comment": "A detailed, descriptive comment in a polite, smart assistant tone (JARVIS persona) explaining what is visible and any interesting context.",
+  "comment": "I see you're working in Antigravity IDE on the Jarvis codebase, Boss. All sub-processes are compiling smoothly.",
   "action": {
-    "type": "task" or "reminder" or "debug" or "security_risk",
-    "title": "Short actionable title based on the active screen content",
-    "details": "A detailed explanation of the task, reminder, or suggestion based on the screen content",
+    "type": "task",
+    "title": "Review active workspace",
+    "details": "Active window observation and workspace verification complete.",
     "metadata": {}
   }
+}`;
+
+async function tryOpenRouterVision(imageBase64: string, model: string): Promise<string> {
+  if (!OPENROUTER_API_KEY || OPENROUTER_API_KEY === "your-api-key-here") {
+    throw new Error("OPENROUTER_API_KEY not configured");
+  }
+
+  const res = await fetch(OPENROUTER_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      "HTTP-Referer": "https://jarvis.local",
+      "X-Title": "JARVIS Sentinel",
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: SENTINEL_SYSTEM_PROMPT },
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:image/png;base64,${imageBase64}`,
+              },
+            },
+          ],
+        },
+      ],
+      max_tokens: 450,
+      temperature: 0.2,
+    }),
+    signal: AbortSignal.timeout(16000),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(`OpenRouter (${model}) status ${res.status}: ${errText.slice(0, 150)}`);
+  }
+
+  const data = await res.json();
+  const content = data.choices?.[0]?.message?.content?.trim();
+  if (!content) {
+    throw new Error(`Empty response from ${model}`);
+  }
+  return content;
 }
 
-Respond ONLY with the JSON object. No preamble, no postscript.`;
+async function tryNvidiaVision(imageBase64: string): Promise<string> {
+  if (!NVIDIA_API_KEY || NVIDIA_API_KEY === "your-api-key-here") {
+    throw new Error("NVIDIA_API_KEY not configured");
+  }
+
+  const res = await fetch(NVIDIA_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${NVIDIA_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "meta/llama-3.2-90b-vision-instruct",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: SENTINEL_SYSTEM_PROMPT },
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:image/png;base64,${imageBase64}`,
+              },
+            },
+          ],
+        },
+      ],
+      max_tokens: 300,
+      temperature: 0.2,
+    }),
+    signal: AbortSignal.timeout(6000), // Strict timeout to prevent freezing
+  });
+
+  if (!res.ok) {
+    throw new Error(`NVIDIA status ${res.status}`);
+  }
+
+  const data = await res.json();
+  const content = data.choices?.[0]?.message?.content?.trim();
+  if (!content) throw new Error("Empty NVIDIA response");
+  return content;
+}
+
+function parseVisionResponse(rawText: string) {
+  // Strip code blocks if present
+  let cleaned = rawText.trim();
+  const codeBlockMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (codeBlockMatch) {
+    cleaned = codeBlockMatch[1].trim();
+  }
+
+  // Find first JSON structure
+  const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      return {
+        proactive: true,
+        comment:
+          parsed.comment ||
+          "I have observed your active screen environment, Boss.",
+        action: parsed.action || {
+          type: "task",
+          title: "Workspace Observation",
+          details: "Screen analyzed and parameters recorded.",
+          metadata: {},
+        },
+      };
+    } catch {
+      // Fall through to plain text extraction
+    }
+  }
+
+  // Plain text response fallback: Clean up model thinking or preamble
+  const lines = cleaned
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .trim()
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  const cleanComment = lines[0] || "I have analyzed your screen, Boss. Everything appears in order.";
+
+  return {
+    proactive: true,
+    comment: cleanComment,
+    action: {
+      type: "task",
+      title: "Screen Checked",
+      details: cleanComment,
+      metadata: {},
+    },
+  };
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -31,93 +183,60 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Image required" }, { status: 400 });
     }
 
-    if (!NVIDIA_API_KEY) {
+    let rawOutput: string | null = null;
+    let successfulModel = "";
+
+    // 1. Try OpenRouter vision models in priority order
+    for (const model of OPENROUTER_VISION_MODELS) {
+      try {
+        console.log(`[Sentinel] Attempting analysis with ${model}...`);
+        rawOutput = await tryOpenRouterVision(imageBase64, model);
+        successfulModel = model;
+        console.log(`[Sentinel] Success with ${model}`);
+        break;
+      } catch (err: any) {
+        console.warn(`[Sentinel] Model ${model} failed:`, err?.message || err);
+      }
+    }
+
+    // 2. If OpenRouter models failed, try NVIDIA NIM as secondary fallback
+    if (!rawOutput && NVIDIA_API_KEY) {
+      try {
+        console.log("[Sentinel] Attempting fallback to NVIDIA NIM...");
+        rawOutput = await tryNvidiaVision(imageBase64);
+        successfulModel = "nvidia-nim";
+      } catch (nimErr: any) {
+        console.warn("[Sentinel] NVIDIA NIM failed:", nimErr?.message || nimErr);
+      }
+    }
+
+    if (!rawOutput) {
       return NextResponse.json(
-        { error: "NVIDIA API key not configured" },
-        { status: 500 }
+        {
+          success: false,
+          error: "All vision models unavailable or rate-limited",
+        },
+        { status: 503 }
       );
     }
 
-    const response = await fetch(NVIDIA_API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${NVIDIA_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "meta/llama-3.2-90b-vision-instruct",
-        messages: [
-          {
-            role: "user",
-            content: [
-              { type: "text", text: SENTINEL_PROMPT },
-              {
-                type: "image_url",
-                image_url: {
-                  url: `data:image/png;base64,${imageBase64}`,
-                },
-              },
-            ],
-          },
-        ],
-        max_tokens: 512,
-        temperature: 0.1,
-      }),
+    const result = parseVisionResponse(rawOutput);
+
+    return NextResponse.json({
+      success: true,
+      proactive: true,
+      comment: result.comment,
+      action: result.action,
+      modelUsed: successfulModel,
     });
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.error?.message || `API error: ${response.status}`);
-    }
-
-    const data = await response.json();
-    const rawContent = data.choices?.[0]?.message?.content?.trim() || "";
-
-    console.log("[Sentinel] Raw VLM output:", rawContent.slice(0, 300));
-
-    // Strip markdown fences if present
-    let cleaned = rawContent;
-    const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (fenceMatch) cleaned = fenceMatch[1].trim();
-
-    // Extract first JSON object from content
-    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      console.warn("[Sentinel] No JSON found in VLM output, forcing proactive anyway.");
-      return NextResponse.json({ 
-        success: true, 
-        proactive: true, 
-        comment: rawContent.slice(0, 100) || "Checking screen...", 
-        action: { type: "task", title: "General Observation", details: "No specific JSON found.", metadata: {} } 
-      });
-    }
-
-    try {
-      const parsed = JSON.parse(jsonMatch[0]);
-      return NextResponse.json({
-        success: true,
-        proactive: true, // Force to true as requested by user
-        comment: parsed.comment || "I've analyzed your screen.",
-        action: parsed.action || {
-          type: "task",
-          title: "Screen Checked",
-          details: "Nothing major found, but keeping an eye out.",
-          metadata: {}
-        },
-      });
-    } catch (parseError) {
-      console.warn("[Sentinel] JSON parse failed:", jsonMatch[0].slice(0, 200));
-      return NextResponse.json({ 
-        success: true, 
-        proactive: true, 
-        comment: "Found something, but couldn't parse it clearly.", 
-        action: { type: "task", title: "Parsing Error", details: "JSON was malformed.", metadata: {} } 
-      });
-    }
   } catch (error) {
-    console.error("[Sentinel] Analysis error:", error);
+    console.error("[Sentinel] Unexpected route error:", error);
     return NextResponse.json(
-      { success: false, error: "Analysis failed", details: String(error) },
+      {
+        success: false,
+        error: "Sentinel analysis failed",
+        details: String(error),
+      },
       { status: 500 }
     );
   }

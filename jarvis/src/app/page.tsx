@@ -944,85 +944,78 @@ export default function Home() {
             )}
           </AnimatePresence>
 
-          {/* Telegram quick-launch button (floating) so the user can
-              open the panel without knowing the "open telegram" voice
-              command. Hidden when the panel is already open. */}
-          <AnimatePresence>
-            {!telegramOpen && (
-              <motion.button
-                key="telegram-launcher"
-                initial={{ opacity: 0, scale: 0.8 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.8 }}
-                whileHover={{ scale: 1.08 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={() => {
-                  recordPanelOpen("telegram");
-                  setTelegramOpen(true);
-                }}
-                title="Open Telegram panel"
-                aria-label="Open Telegram panel"
-                className="fixed top-20 left-1/2 -translate-x-1/2 z-[70] w-14 h-14 rounded-full shadow-lg flex items-center justify-center"
-                style={{
-                  background:
-                    "linear-gradient(135deg, #0088cc 0%, #229ed9 100%)",
-                  boxShadow:
-                    "0 6px 24px rgba(0, 136, 204, 0.4), 0 0 0 1px rgba(255,255,255,0.08)",
-                }}
-              >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 24 24"
-                  fill="white"
-                  className="w-7 h-7"
-                  aria-hidden="true"
+          {/* Holographic Quick-Launch Dock (Top Right) */}
+          <div className="fixed top-20 right-5 z-[75] flex items-center gap-2.5">
+            {/* Telegram quick-launch button */}
+            <AnimatePresence>
+              {!telegramOpen && (
+                <motion.button
+                  key="telegram-launcher"
+                  initial={{ opacity: 0, scale: 0.8 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.8 }}
+                  whileHover={{ scale: 1.08, y: -1 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={() => {
+                    recordPanelOpen("telegram");
+                    setTelegramOpen(true);
+                  }}
+                  title="Open Telegram Bot Relay"
+                  aria-label="Open Telegram Bot Relay"
+                  className="w-11 h-11 rounded-full flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-400/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240] shadow-[0_4px_20px_rgba(0,136,204,0.35),0_0_15px_rgba(0,243,255,0.2)]"
                 >
-                  <path d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 13.3 3.64 12c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.73 12.86c-.19.91-.74 1.13-1.5.71L12.6 16.3l-1.99 1.93c-.23.23-.42.42-.83.42z" />
-                </svg>
-              </motion.button>
-            )}
-          </AnimatePresence>
+                  <div className="absolute inset-0 rounded-full bg-gradient-to-br from-cyan-500/25 to-blue-600/10 opacity-70 group-hover:opacity-100 transition-opacity" />
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                    className="w-5 h-5 text-cyan-400 group-hover:text-cyan-200 transition-colors drop-shadow-[0_0_8px_rgba(0,243,255,0.7)] relative z-10"
+                    aria-hidden="true"
+                  >
+                    <path d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 13.3 3.64 12c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.73 12.86c-.19.91-.74 1.13-1.5.71L12.6 16.3l-1.99 1.93c-.23.23-.42.42-.83.42z" />
+                  </svg>
+                  {/* Glowing online indicator dot */}
+                  <span className="absolute top-0.5 right-0.5 w-2 h-2 rounded-full bg-cyan-400 ring-2 ring-[#061426] shadow-[0_0_8px_#00f3ff]" />
+                </motion.button>
+              )}
+            </AnimatePresence>
 
-          {/* Connected Apps launcher (small, top-right area) */}
-          <AnimatePresence>
-            {!connectedOpen && (
-              <motion.button
-                key="connected-launcher"
-                initial={{ opacity: 0, scale: 0.8 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.8 }}
-                whileHover={{ scale: 1.08 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={() => {
-                  recordPanelOpen("connected");
-                  setConnectedOpen(true);
-                }}
-                title="Open Connected Apps"
-                aria-label="Open Connected Apps"
-                className="fixed top-20 right-4 z-[70] w-11 h-11 rounded-full shadow-lg flex items-center justify-center"
-                style={{
-                  background:
-                    "linear-gradient(135deg, #0891b2 0%, #06b6d4 100%)",
-                  boxShadow:
-                    "0 6px 24px rgba(8, 145, 178, 0.4), 0 0 0 1px rgba(255,255,255,0.08)",
-                }}
-              >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="white"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  className="w-5 h-5"
-                  aria-hidden="true"
+            {/* Connected Apps launcher */}
+            <AnimatePresence>
+              {!connectedOpen && (
+                <motion.button
+                  key="connected-launcher"
+                  initial={{ opacity: 0, scale: 0.8 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.8 }}
+                  whileHover={{ scale: 1.08, y: -1 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={() => {
+                    recordPanelOpen("connected");
+                    setConnectedOpen(true);
+                  }}
+                  title="Open Connected Apps"
+                  aria-label="Open Connected Apps"
+                  className="w-11 h-11 rounded-full flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240] shadow-[0_4px_20px_rgba(8,145,178,0.35),0_0_15px_rgba(0,243,255,0.2)]"
                 >
-                  <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
-                </svg>
-              </motion.button>
-            )}
-          </AnimatePresence>
+                  <div className="absolute inset-0 rounded-full bg-gradient-to-br from-cyan-500/25 to-teal-600/10 opacity-70 group-hover:opacity-100 transition-opacity" />
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="w-5 h-5 text-cyan-400 group-hover:text-cyan-200 transition-colors drop-shadow-[0_0_8px_rgba(0,243,255,0.7)] relative z-10"
+                    aria-hidden="true"
+                  >
+                    <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+                  </svg>
+                </motion.button>
+              )}
+            </AnimatePresence>
+          </div>
 
           {/* Communication Hub */}
           <AnimatePresence>
