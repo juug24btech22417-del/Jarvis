@@ -123,8 +123,11 @@ interface JarvisStore {
   pulseReactor: () => void;
 
   // UI
-  activePanel: "chat" | "tasks" | "memory" | "notes" | "code" | "skill-trainer" | "image-generator" | "summarizer" | "web-scraper" | "firecrawl" | "playwright" | "whatsapp" | "instagram" | "telegram" | "security" | "vault" | "dungeon" | "habits" | "time-capsule" | "voice-notes" | "nasa" | "huggingface" | "ifttt" | "browser" | "local-llm" | "vision" | "automation" | "price-tracker" | "transcription" | "proxy" | "agent" | null;
+  activePanel: "chat" | "tasks" | "memory" | "notes" | "code" | "skill-trainer" | "image-generator" | "summarizer" | "web-scraper" | "firecrawl" | "playwright" | "whatsapp" | "instagram" | "telegram" | "security" | "vault" | "dungeon" | "habits" | "time-capsule" | "voice-notes" | "nasa" | "huggingface" | "ifttt" | "browser" | "local-llm" | "vision" | "automation" | "price-tracker" | "transcription" | "proxy" | "agent" | "mission" | null;
   setActivePanel: (panel: JarvisStore["activePanel"]) => void;
+  /** Goal typed/voiced elsewhere that Mission Control should run on open. */
+  pendingMissionGoal: string | null;
+  setPendingMissionGoal: (goal: string | null) => void;
   showBriefing: boolean;
   setShowBriefing: (show: boolean) => void;
 
@@ -281,6 +284,8 @@ export const useJarvisStore = create<JarvisStore>((set) => ({
   // UI
   activePanel: null,
   setActivePanel: (activePanel) => set({ activePanel }),
+  pendingMissionGoal: null,
+  setPendingMissionGoal: (pendingMissionGoal) => set({ pendingMissionGoal }),
   showBriefing: false,
   setShowBriefing: (showBriefing) => set({ showBriefing }),
 

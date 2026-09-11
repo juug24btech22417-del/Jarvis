@@ -1,11 +1,11 @@
 // Tier 2A — Goal agent HTTP API.
 // POST {goal} → plan (awaiting_approval)
-// POST {jobId, action: "approve" | "cancel"}
+// POST {jobId, action: "approve" | "cancel" | "resume", pick?}
 // GET ?jobId=X → status
 // GET (no jobId) → list
 
 import { NextRequest, NextResponse } from "next/server";
-import { planGoal, approveJob, cancelJob, getJob, listJobs } from "@/services/AgentService";
+import { planGoal, approveJob, cancelJob, resumeCheckpoint, getJob, listJobs } from "@/services/AgentService";
 
 export async function GET(req: NextRequest) {
   const jobId = req.nextUrl.searchParams.get("jobId");
@@ -37,6 +37,17 @@ export async function POST(req: NextRequest) {
       const job = await cancelJob(jobId);
       if (!job) return NextResponse.json({ error: "Job not found" }, { status: 404 });
       return NextResponse.json(job);
+    }
+    if (action === "resume") {
+      // Checkpoint answer from the user (e.g. which option they picked).
+      const pick = typeof body.pick === "string" ? body.pick.trim() : "";
+      if (!pick) return NextResponse.json({ error: "Missing 'pick' for resume" }, { status: 400 });
+      try {
+        const job = await resumeCheckpoint(jobId, pick);
+        return NextResponse.json(job);
+      } catch (e) {
+        return NextResponse.json({ error: (e as Error)?.message ?? "resume failed" }, { status: 400 });
+      }
     }
     return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });
   }

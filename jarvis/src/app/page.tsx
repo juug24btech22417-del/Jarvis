@@ -46,6 +46,7 @@ import PlaywrightPanel from "@/components/panels/PlaywrightPanel";
 import TranscriptionPanel from "@/components/panels/TranscriptionPanel";
 import ProxyPanel from "@/components/panels/ProxyPanel";
 import AgentPanel from "@/components/panels/AgentPanel";
+import MissionControlPanel from "@/components/panels/MissionControlPanel";
 import { useJarvisStore } from "@/store/jarvis.store";
 import { useTextToSpeech } from "@/hooks/useVoice";
 
@@ -664,6 +665,8 @@ export default function Home() {
   const [playwrightOpen, setPlaywrightOpen] = useState(false);
   const [proxyOpen, setProxyOpen] = useState(false);
   const [agentOpen, setAgentOpen] = useState(false);
+  // Tier 2A v3: hybrid Firecrawl × Playwright mission control
+  const [missionOpen, setMissionOpen] = useState(false);
 
   // Handle timer completion - speak notification
   const handleTimerComplete = useCallback((label: string) => {
@@ -693,6 +696,7 @@ export default function Home() {
     setFirecrawlOpen(false);
     setPlaywrightOpen(false);
     setProxyOpen(false);
+    setMissionOpen(false);
 
     // Open the requested panel
     switch (activePanel) {
@@ -763,6 +767,10 @@ export default function Home() {
       case "agent":
         setAgentOpen(true);
         recordPanelOpen("agent");
+        break;
+      case "mission":
+        setMissionOpen(true);
+        recordPanelOpen("mission");
         break;
       case "chat":
       case "tasks":
@@ -1422,6 +1430,12 @@ export default function Home() {
           <AgentPanel
             isOpen={agentOpen}
             onClose={() => setAgentOpen(false)}
+          />
+
+          {/* Tier 2A v3: Mission Control (hybrid Firecrawl × Playwright engine) */}
+          <MissionControlPanel
+            isOpen={missionOpen}
+            onClose={() => setMissionOpen(false)}
           />
 
           {/* Sentinel Proactive Suggestion Widget */}

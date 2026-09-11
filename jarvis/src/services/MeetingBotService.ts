@@ -1,24 +1,83 @@
-import { chromium as originalChromium, Browser, Page, BrowserContext } from 'playwright';
-import { chromium } from 'playwright-extra';
-import stealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { BrowserContext, Page, chromium } from 'playwright';
+import { execSync } from 'child_process';
+import * as fs from 'fs';
+import os from 'os';
+import path from 'path';
 
-// Apply the stealth plugin ONLY if it hasn't been added yet (prevents double-injection crashing Zoom)
-if (!(chromium as any)._plugins?.some((p: any) => p.name === 'stealth')) {
-  chromium.use(stealthPlugin());
-}
-import axios from 'axios';
+// Use the user's real installed Chrome to avoid Google's "insecure browser" block.
+// Points to the real Chrome profile already signed in to dhruvbijapur@gmail.com.
+const CHROME_PATH =
+  process.platform === 'win32'
+    ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
+    : process.platform === 'darwin'
+    ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+    : '/usr/bin/google-chrome';
 
-// Use environment variable or detect the port dynamically
-const API_BASE = process.env.INTERNAL_API_URL || `http://localhost:${process.env.PORT || 3000}`;
+// Use the dedicated JARVIS meeting profile (separate from the user's main Chrome)
+// so JARVIS joining a meeting doesn't interfere with normal Chrome usage.
+// On first run Playwright will create this directory automatically.
+const JARVIS_PROFILE_DIR = path.join(os.homedir(), '.jarvis-meet-profile');
+
+const SYSTEM_BLACKLIST = [
+  'no one can join a meeting',
+  'schedule a meeting',
+  'enjoy the free time',
+  'allowing notifications',
+  'ready to join',
+  'asking to join',
+  'waiting for the host',
+  'someone will let you in',
+  'will let you in soon',
+  'you\'re the only one here',
+  'meeting details',
+  'turn off microphone',
+  'turn on microphone',
+  'turn off camera',
+  'turn on camera',
+  'raise hand',
+  'leave call',
+  'your meeting is safe',
+  'more options',
+  'send a message to everyone',
+  'chat messages can only be seen',
+  'people in this call',
+  'host controls',
+  'turn on captions',
+  'turn off captions',
+  'captions have been turned on',
+  'captions have been turned off',
+  'caption settings',
+  'open caption settings',
+  'jump to the bottom',
+  'jump to bottom',
+  'arrow_downward',
+  'format_size',
+  'font size',
+  'afrikaans',
+  'albanian',
+  'amharic',
+  'cantonese',
+  'mandarin',
+  'south africa',
+  'cyan magenta',
+  'english (detected)',
+  'return to home screen',
+  'check your meeting code',
+  'to avoid echo',
+  'use companion mode',
+  'present now',
+  'stop presenting',
+  'device settings',
+];
 
 interface CaptionEntry {
   speaker: string;
   text: string;
   timestamp: string;
+  source?: 'caption' | 'chat';
 }
 
 interface BotState {
-  browser: Browser;
   context: BrowserContext;
   page: Page;
   isRecording: boolean;
@@ -27,50 +86,202 @@ interface BotState {
   captionLog: CaptionEntry[];
   lastCaptionText: string;
   meetingPlatform: 'google-meet' | 'zoom' | 'unknown';
+  meetingUrl: string;
+  statusMessage: string;
+}
+
+export interface MeetingSummary {
+  summary: string;
+  keyTopics: string[];
+  decisions: string[];
+  actionItems: Array<{ task: string; assignee?: string; due?: string; priority?: number }>;
+  nextSteps?: string;
+}
+
+export interface MeetingResult {
+  title: string;
+  platform: string;
+  captionCount: number;
+  summary: MeetingSummary;
+  notionUrl: string | null;
+  timestamp: string;
 }
 
 class MeetingBotService {
   private state: BotState | null = null;
+  private lastResult: MeetingResult | null = null;
+  private previousSnapshot: string = '';
+  private _captionBusy = false;
+  private _captionActive = false;  // Guards the recursive tick — flipped false by cleanup()
+  private currentSpeaker: string = 'Speaker';
+  private _captionsToggledOnce = false;
+  private _isSyncingNotion = false;
 
-  async joinMeeting(url: string, credentials?: { id?: string; password?: string }) {
-    console.log(`JARVIS: Attempting to join meeting at ${url}...`);
+  /**
+   * Kills any Chrome process that currently owns the JARVIS profile directory
+   * and clears the ProcessSingleton lock files it left behind.
+   * Without this, a second launch hits "Failed to create a ProcessSingleton" and aborts.
+   */
+  private async prepareProfile() {
+    // 1. Kill any Chrome process currently holding our profile directory lock.
+    //    We write a temp .ps1 to avoid shell-escaping issues when calling from Node.
+    try {
+      if (process.platform === 'win32') {
+        const tmpPs1 = path.join(os.tmpdir(), 'jarvis-kill-chrome.ps1');
+        const psScript = `
+$profilePath = '${JARVIS_PROFILE_DIR.replace(/'/g, "''")}';
+Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
+  Where-Object { $_.CommandLine -like "*jarvis-meet-profile*" } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+`;
+        fs.writeFileSync(tmpPs1, psScript, 'utf8');
+        execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${tmpPs1}"`, {
+          timeout: 6000,
+          stdio: 'ignore',
+        });
+        try { fs.unlinkSync(tmpPs1); } catch {}
+      } else {
+        execSync(`pkill -f "jarvis-meet-profile"`, { timeout: 3000, stdio: 'ignore' });
+      }
+      await new Promise(r => setTimeout(r, 1000));
+    } catch { /* No matching Chrome processes — that's fine */ }
 
-    // Close any existing session first
+    // 2. Remove ProcessSingleton lock files left by the previous Chrome instance
+    const lockFiles = [
+      path.join(JARVIS_PROFILE_DIR, 'SingletonLock'),
+      path.join(JARVIS_PROFILE_DIR, 'SingletonSocket'),
+      path.join(JARVIS_PROFILE_DIR, 'SingletonCookie'),
+      path.join(JARVIS_PROFILE_DIR, 'Default', 'LOCK'),
+      path.join(JARVIS_PROFILE_DIR, 'lockfile'),
+    ];
+    for (const f of lockFiles) {
+      try { fs.unlinkSync(f); } catch { /* File doesn't exist — fine */ }
+    }
+
+    console.log('JARVIS: Profile cleared — launching Chrome...');
+  }
+
+  /**
+   * Normalizes URLs and IDs for direct browser joining.
+   * Transforms Zoom meetings into direct Zoom Web Client URLs (/wc/...) to bypass native app redirects.
+   */
+  private normalizeMeetingTarget(rawUrl?: string, credentials?: { id?: string; password?: string }) {
+    let url = (rawUrl || '').trim();
+    let cleanId = credentials?.id ? credentials.id.replace(/[\s-]+/g, '') : '';
+    let password = credentials?.password ? credentials.password.trim() : '';
+
+    // If no URL provided but ID is present, format as Zoom Web Client
+    if (!url && cleanId) {
+      url = `https://zoom.us/wc/${cleanId}/join${password ? `?pwd=${encodeURIComponent(password)}` : ''}`;
+    }
+
+    // If Zoom URL is in /j/ or /w/ format, extract ID & password and convert to /wc/ URL
+    if (url.includes('zoom.us/j/') || url.includes('zoom.us/w/')) {
+      const idMatch = url.match(/zoom\.us\/[jw]\/(\d+)/i);
+      const pwdMatch = url.match(/[?&]pwd=([^&#]+)/i);
+      if (idMatch) {
+        cleanId = cleanId || idMatch[1];
+        if (pwdMatch) {
+          password = password || decodeURIComponent(pwdMatch[1]);
+        }
+        url = `https://zoom.us/wc/${cleanId}/join${password ? `?pwd=${encodeURIComponent(password)}` : ''}`;
+      }
+    }
+
+    // Determine platform
+    const platform: 'google-meet' | 'zoom' | 'unknown' =
+      url.includes('meet.google.com') ? 'google-meet'
+      : url.includes('zoom.us') || cleanId ? 'zoom'
+      : 'unknown';
+
+    return { url, platform, cleanId, password };
+  }
+
+  /**
+   * Spawns a native Chrome window (without Playwright or automation flags)
+   * pointing directly to Google Account Sign-In.
+   * This completely bypasses Google's "This browser or app may not be secure" error,
+   * because it is pure native Chrome. All cookies and credentials are saved to JARVIS_PROFILE_DIR.
+   */
+  async openGoogleSignInWindow(): Promise<{ success: boolean; message: string }> {
+    console.log("JARVIS: Opening native Chrome for secure Google sign-in...");
+    try {
+      if (this.state) {
+        await this.cleanup();
+      }
+      await this.prepareProfile();
+
+      const { spawn } = await import('child_process');
+      const signInUrl = 'https://accounts.google.com/ServiceLogin?continue=https://meet.google.com&hl=en';
+
+      const child = spawn(
+        CHROME_PATH,
+        [
+          `--user-data-dir=${JARVIS_PROFILE_DIR}`,
+          '--no-first-run',
+          '--no-default-browser-check',
+          signInUrl,
+        ],
+        {
+          detached: true,
+          stdio: 'ignore',
+        }
+      );
+      child.unref();
+
+      return {
+        success: true,
+        message: 'A clean Chrome window has been opened for Google Sign-In. Sign in with dhruvbijapur67@gmail.com, then click "Join Meeting" again in JARVIS.',
+      };
+    } catch (err: any) {
+      console.error("JARVIS: Failed to open native Chrome:", err);
+      return {
+        success: false,
+        message: `Failed to open Chrome: ${err.message}`,
+      };
+    }
+  }
+
+  async joinMeeting(rawUrl: string, credentials?: { id?: string; password?: string }) {
+    const { url, platform, cleanId, password } = this.normalizeMeetingTarget(rawUrl, credentials);
+    console.log(`JARVIS: Attempting to join meeting (${platform}) at ${url}...`);
+
+    // Close any previous meeting session
     if (this.state) {
       console.log("JARVIS: Closing previous meeting session...");
       await this.cleanup();
     }
 
     try {
-      // Launch a real Chromium browser with Playwright
-      const browser = await chromium.launch({
-        headless: false, // Needs to be visible for meetings
+      // Kill any Chrome process owning the JARVIS profile and clear lock files
+      // so launchPersistentContext never hits the ProcessSingleton error.
+      await this.prepareProfile();
+
+      // Launch a dedicated JARVIS meeting browser profile.
+      // On first run: Chrome opens — sign in to Google once, then it's permanent.
+      const context = await chromium.launchPersistentContext(JARVIS_PROFILE_DIR, {
+        executablePath: CHROME_PATH,
+        headless: false,
         args: [
-          '--use-fake-ui-for-media-stream',
+          '--disable-blink-features=AutomationControlled',
+          '--use-fake-ui-for-media-stream',           // Auto-grant mic/cam — no popup
           '--use-fake-device-for-media-stream',
           '--autoplay-policy=no-user-gesture-required',
-          '--disable-blink-features=AutomationControlled',
           '--no-sandbox',
-          '--window-size=1280,720', // Ensure CC button isn't hidden in a menu
+          '--disable-background-timer-throttling',
+          '--window-size=1280,720',
+          '--window-position=100,50',
         ],
-      });
-
-      const context = await browser.newContext({
-        permissions: ['microphone', 'camera'],
+        ignoreDefaultArgs: ['--enable-automation'],  // No "controlled by automation" banner
         viewport: { width: 1280, height: 720 },
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        permissions: ['microphone', 'camera'],
       });
 
-      const page = await context.newPage();
-      page.setDefaultTimeout(30000);
-
-      // Detect platform
-      const platform = url.includes('meet.google.com') ? 'google-meet'
-        : url.includes('zoom.us') ? 'zoom'
-        : 'unknown';
+      const pages = context.pages();
+      const page = pages.length > 0 ? pages[0] : await context.newPage();
+      page.setDefaultTimeout(35000);
 
       this.state = {
-        browser,
         context,
         page,
         isRecording: false,
@@ -79,30 +290,45 @@ class MeetingBotService {
         captionLog: [],
         lastCaptionText: '',
         meetingPlatform: platform,
+        meetingUrl: url,
+        statusMessage: 'Navigating to meeting URL...',
       };
 
       // Navigate to the meeting URL
       console.log(`JARVIS: Navigating to ${url}...`);
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await page.waitForTimeout(3000);
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 35000 });
+      await page.waitForTimeout(2500);
 
-      // Handle platform-specific join logic
+      // Handle platform-specific joining
+      let joinNotice = '';
+      let needsSignIn = false;
       if (platform === 'google-meet') {
-        await this.handleGoogleMeetJoin(page);
+        this.state.statusMessage = 'Handling Google Meet join flow...';
+        const res = await this.handleGoogleMeetJoin(page);
+        if (res?.notice) joinNotice = res.notice;
+        if (res?.needsSignIn) needsSignIn = true;
       } else if (platform === 'zoom') {
-        await this.handleZoomJoin(page, credentials);
+        this.state.statusMessage = 'Joining Zoom via Web Client...';
+        await this.handleZoomJoin(page, cleanId, password);
       }
 
-      // Start background services
+      this.state.statusMessage = joinNotice || 'In meeting — Transcribing dialogue and chat...';
+
+      // Start waiting room monitor
       this.startWaitingRoomMonitor();
 
-      // Auto-enable captions after a longer delay (give time for Zoom's browser join + name entry flow)
+      // Enable live captions and start background recording
       setTimeout(() => {
         this.enableCaptionsAndStartRecording();
-      }, 20000);
+      }, 2500);
 
       console.log("JARVIS: Successfully connected to the meeting.");
-      return { success: true, message: "JARVIS has joined the meeting, Boss. I'll enable captions and start taking notes automatically." };
+      return {
+        success: true,
+        message: joinNotice || "JARVIS has joined the meeting, Boss. I'll enable captions and start taking notes automatically.",
+        platform,
+        needsSignIn,
+      };
 
     } catch (error: any) {
       console.error("JARVIS: Failed to join meeting:", error.message);
@@ -118,114 +344,448 @@ class MeetingBotService {
     }
   }
 
-  // ─── CAPTION SCRAPING ENGINE ──────────────────────────────────────────
+  // ─── PLATFORM JOIN HANDLERS ────────────────────────────────────────────
+
+  private async handleGoogleMeetJoin(page: Page): Promise<{ notice?: string; needsSignIn?: boolean } | void> {
+    try {
+      console.log("JARVIS: Handling Google Meet join flow...");
+      await page.waitForTimeout(2500);
+
+      // 1. Check if blocked — could be auth issue or domain restriction
+      const currentUrl = page.url();
+      const bodyText = await page.evaluate(() => document.body.innerText.toLowerCase()).catch(() => '');
+      const cantJoin =
+        currentUrl.includes('accounts.google.com') ||
+        bodyText.includes("you can't join this video call") ||
+        bodyText.includes("returning to home screen") ||
+        bodyText.includes("sign in to join this meeting") ||
+        bodyText.includes("sign in with a google account");
+
+      if (cantJoin) {
+        // Check if actually signed into Google in this profile
+        const isSignedIn = await page.evaluate(() => {
+          // Google sets SSID, SID, HSID cookies when signed in
+          const cookies = document.cookie;
+          return cookies.includes('SSID') || cookies.includes('SID=') || cookies.includes('__Secure-1PSID');
+        }).catch(() => false);
+
+        if (!isSignedIn) {
+          // Not signed in — DO NOT navigate inside Playwright!
+          // Google blocks logins from Playwright with "This browser or app may not be secure".
+          // Instead, close Playwright and launch a clean native Chrome instance for the user.
+          console.log("JARVIS: Not signed into Google. Opening clean native Chrome for sign-in...");
+          await this.openGoogleSignInWindow();
+
+          const notice = "⚠️ Google Sign-In Required: A native Chrome window has been opened for dhruvbijapur67@gmail.com without automation flags so Google won't block you. Please sign in there, then click 'I\'ve Signed In — Join Meeting Again'.";
+          console.warn("JARVIS:", notice);
+          return { notice, needsSignIn: true };
+        } else {
+          // Signed in but meeting is domain-restricted (org workspace policy)
+          const notice = "Google Meet: This meeting is restricted to a specific Google Workspace organization. The host may need to admit JARVIS, or join with the organization's account.";
+          console.warn("JARVIS:", notice);
+          return { notice };
+        }
+      }
+
+      // 2. Dismiss initial popups ("Got it", "Dismiss", "Continue without microphone")
+      try {
+        const dismissBtns = page.locator('button:has-text("Got it"), button:has-text("Dismiss"), button:has-text("Continue without microphone and camera"), button:has-text("Continue without microphone")');
+        if (await dismissBtns.first().isVisible({ timeout: 2000 })) {
+          await dismissBtns.first().click();
+          console.log("JARVIS: Dismissed Google Meet prompt.");
+        }
+      } catch { /* No popup */ }
+
+      // 3. Fill guest name field if unauthenticated (Google Meet requires this to enable Join button)
+      try {
+        const nameSelectors = [
+          'input[placeholder*="name" i]',
+          'input[aria-label*="name" i]',
+          'input[type="text"]',
+        ];
+        for (const sel of nameSelectors) {
+          const nameInput = page.locator(sel).first();
+          if (await nameInput.isVisible({ timeout: 2000 })) {
+            await nameInput.fill('JARVIS (AI Assistant)');
+            console.log("JARVIS: Entered participant name for Google Meet.");
+            await page.waitForTimeout(500);
+            break;
+          }
+        }
+      } catch { /* Name not requested */ }
+
+      // 4. Turn off camera and mic before joining
+      try {
+        const micBtn = page.locator('[aria-label*="turn off microphone" i], [aria-label*="microphone" i], [data-tooltip*="microphone" i]').first();
+        if (await micBtn.isVisible({ timeout: 1500 })) {
+          const label = (await micBtn.getAttribute('aria-label')) || '';
+          if (!label.toLowerCase().includes('turn on')) {
+            await micBtn.click();
+            console.log("JARVIS: Muted microphone.");
+          }
+        }
+
+        const camBtn = page.locator('[aria-label*="turn off camera" i], [aria-label*="camera" i], [data-tooltip*="camera" i]').first();
+        if (await camBtn.isVisible({ timeout: 1500 })) {
+          const label = (await camBtn.getAttribute('aria-label')) || '';
+          if (!label.toLowerCase().includes('turn on')) {
+            await camBtn.click();
+            console.log("JARVIS: Turned off camera.");
+          }
+        }
+      } catch { /* Buttons not found */ }
+
+      // 5. Click "Ask to join" or "Join now" (with retries in case buttons take a moment to activate)
+      const joinButtonSelectors = [
+        'button:has-text("Join now")',
+        'button:has-text("Ask to join")',
+        'button:has-text("Join")',
+        'button[jsname="Qx7uuf"]',
+      ];
+
+      let joined = false;
+      const startTime = Date.now();
+      while (!joined && Date.now() - startTime < 12000) {
+        for (const sel of joinButtonSelectors) {
+          try {
+            const btn = page.locator(sel).first();
+            if (await btn.isVisible({ timeout: 1000 })) {
+              await btn.click({ force: true });
+              console.log(`JARVIS: Clicked Google Meet join button ("${sel}").`);
+              joined = true;
+              break;
+            }
+          } catch { /* Selector did not match */ }
+        }
+        if (!joined) {
+          await page.waitForTimeout(800);
+        }
+      }
+
+      await page.waitForTimeout(1500);
+
+      // Check if bot is waiting for host admittance
+      const isWaiting = await page.evaluate(() => {
+        const bodyText = document.body.innerText.toLowerCase();
+        return (
+          bodyText.includes("asking to join") ||
+          bodyText.includes("someone will let you in") ||
+          bodyText.includes("will let you in soon") ||
+          bodyText.includes("waiting for the host")
+        );
+      }).catch(() => false);
+
+      if (isWaiting) {
+        const notice = "🔔 JARVIS is asking to join. Boss, please click 'Admit' in your Google Meet window!";
+        console.log("JARVIS:", notice);
+        return { notice };
+      }
+
+    } catch (e: any) {
+      console.warn("JARVIS: Google Meet join flow note:", e.message);
+    }
+  }
+
+  private async handleZoomJoin(page: Page, meetingId?: string, password?: string) {
+    try {
+      console.log("JARVIS: Handling Zoom join flow...");
+      await page.waitForTimeout(2000);
+
+      // 1. Accept Cookie / Terms Banners if present
+      try {
+        const cookieBtn = page.locator('#onetrust-accept-btn-handler, button:has-text("Accept All"), button:has-text("Agree")').first();
+        if (await cookieBtn.isVisible({ timeout: 2000 })) {
+          await cookieBtn.click();
+          console.log("JARVIS: Accepted Zoom cookies.");
+        }
+      } catch {}
+
+      // 2. Handle Webinar Registration Form (if URL was a webinar link)
+      try {
+        const emailInput = page.locator('input[type="email"], input[name*="email" i], #question_email').first();
+        if (await emailInput.isVisible({ timeout: 2500 })) {
+          console.log("JARVIS: Webinar registration page detected. Auto-filling...");
+          const firstName = page.locator('input[name*="first" i], #question_first_name').first();
+          if (await firstName.isVisible()) {
+            await firstName.fill('JARVIS');
+          }
+          const lastName = page.locator('input[name*="last" i], #question_last_name').first();
+          if (await lastName.isVisible()) {
+            await lastName.fill('Assistant');
+          }
+          await emailInput.fill('dhruvbijapur@gmail.com');
+
+          const registerBtn = page.locator('button:has-text("Register"), button:has-text("Join")').first();
+          await registerBtn.click({ force: true });
+          console.log("JARVIS: Submitted webinar registration.");
+          await page.waitForTimeout(4000);
+        }
+      } catch {}
+
+      // 3. If on Zoom Web Client (/wc/): Enter name & password, then click Join
+      const isWebClient = page.url().includes('/wc/');
+      if (isWebClient) {
+        console.log("JARVIS: Zoom Web Client loaded. Filling credentials...");
+
+        // Fill Name
+        const nameSelectors = [
+          '#input-for-name',
+          'input[name="name"]',
+          '#inputname',
+          'input[placeholder*="name" i]',
+          'input[id*="name" i]',
+        ];
+        for (const sel of nameSelectors) {
+          try {
+            const nameEl = page.locator(sel).first();
+            if (await nameEl.isVisible({ timeout: 2500 })) {
+              await nameEl.fill('JARVIS (AI Assistant)');
+              console.log("JARVIS: Entered participant name in Zoom Web Client.");
+              break;
+            }
+          } catch {}
+        }
+
+        // Fill Passcode if requested
+        if (password) {
+          try {
+            const pwdSelectors = [
+              '#input-for-pwd',
+              'input[name="password"]',
+              '#joinPassword',
+              'input[type="password"]',
+            ];
+            for (const sel of pwdSelectors) {
+              const pwdEl = page.locator(sel).first();
+              if (await pwdEl.isVisible({ timeout: 2000 })) {
+                await pwdEl.fill(password);
+                console.log("JARVIS: Entered Zoom passcode.");
+                break;
+              }
+            }
+          } catch {}
+        }
+
+        // Click Join button
+        const joinBtnSelectors = [
+          'button.preview-join-button',
+          'button:has-text("Join")',
+          '#joinBtn',
+          'button[type="submit"]',
+        ];
+        for (const sel of joinBtnSelectors) {
+          try {
+            const joinBtn = page.locator(sel).first();
+            if (await joinBtn.isVisible({ timeout: 3000 })) {
+              await joinBtn.click();
+              console.log(`JARVIS: Clicked Zoom Web Client join button ("${sel}").`);
+              break;
+            }
+          } catch {}
+        }
+      } else {
+        // 4. Fallback if landing on a standard Zoom desktop download page (/j/):
+        console.log("JARVIS: Looking for 'Join from browser' on landing page...");
+
+        const joinFromBrowserSelectors = [
+          'button:has-text("Join from browser")',
+          'button:has-text("Join from your browser")',
+          'a:has-text("Join from browser")',
+          'a:has-text("Join from your browser")',
+          '#fallback_btn',
+          'a[href*="/wc/"]',
+        ];
+
+        let clickedFallback = false;
+        for (const sel of joinFromBrowserSelectors) {
+          try {
+            const el = page.locator(sel).first();
+            if (await el.isVisible({ timeout: 2000 })) {
+              await el.click();
+              clickedFallback = true;
+              console.log(`JARVIS: Clicked web fallback link: "${sel}"`);
+              break;
+            }
+          } catch {}
+        }
+
+        if (!clickedFallback) {
+          try {
+            const launchBtn = page.locator('button:has-text("Launch Meeting"), a:has-text("Launch Meeting")').first();
+            if (await launchBtn.isVisible({ timeout: 2000 })) {
+              console.log("JARVIS: Clicking 'Launch Meeting' to reveal browser fallback...");
+              await launchBtn.click();
+              await page.waitForTimeout(3000);
+
+              for (const sel of joinFromBrowserSelectors) {
+                const el = page.locator(sel).first();
+                if (await el.isVisible({ timeout: 2000 })) {
+                  await el.click();
+                  clickedFallback = true;
+                  console.log(`JARVIS: Found web fallback after launching: "${sel}"`);
+                  break;
+                }
+              }
+            }
+          } catch {}
+        }
+
+        // Fill Name if on name entry page
+        try {
+          const nameInput = page.locator('#inputname, input[placeholder*="name" i], #input-for-name').first();
+          if (await nameInput.isVisible({ timeout: 4000 })) {
+            await nameInput.fill('JARVIS (AI Assistant)');
+            const joinBtn = page.locator('button:has-text("Join"), #joinBtn').first();
+            if (await joinBtn.isVisible({ timeout: 2000 })) {
+              await joinBtn.click();
+            }
+          }
+        } catch {}
+      }
+
+      // 5. Connect Computer Audio inside meeting UI
+      await page.waitForTimeout(5000);
+      try {
+        const audioBtn = page.locator(
+          'button:has-text("Join Audio by Computer"), button:has-text("Computer Audio"), button.join-audio-by-voip'
+        ).first();
+        if (await audioBtn.isVisible({ timeout: 4000 })) {
+          await audioBtn.click();
+          console.log("JARVIS: Connected computer audio in Zoom.");
+        }
+      } catch {}
+
+    } catch (e: any) {
+      console.warn("JARVIS: Zoom join flow note:", e.message);
+    }
+  }
+
+  // ─── CAPTION & DIALOGUE SCRAPER ───────────────────────────────────────
 
   private async enableCaptionsAndStartRecording() {
     if (!this.state?.page) return;
-
     const page = this.state.page;
-    console.log("JARVIS: Attempting to enable live captions...");
+    console.log("JARVIS: Enabling captions and starting transcription engine...");
 
     try {
       if (this.state.meetingPlatform === 'google-meet') {
         await this.enableGoogleMeetCaptions(page);
+      } else if (this.state.meetingPlatform === 'zoom') {
+        await this.enableZoomCaptions(page);
       }
-      
-      this.state.isRecording = true;
-      this.startSmartCaptionEngine(page);
-      console.log("JARVIS: 🧠 Selector-free caption engine active. Scanning bottom of viewport for any text changes.");
-
     } catch (e: any) {
-      console.warn("JARVIS: Could not auto-enable captions:", e.message);
-      console.log("JARVIS: Please enable captions manually — I'll still scrape them.");
-      
-      this.state.isRecording = true;
-      this.startSmartCaptionEngine(page);
+      console.warn("JARVIS: Caption toggle note:", e.message);
     }
+
+    this.state.isRecording = true;
+    this.startSmartCaptionEngine(page);
   }
 
   private async enableGoogleMeetCaptions(page: Page) {
     try {
-      // 1. Ensure the control bar is visible by moving the mouse
       await page.mouse.move(500, 500);
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(500);
 
-      // 2. Look for the Turn on Captions button (often hidden in small windows, hence the 1280x720 fix)
+      // In Google Meet, 'c' is the standard shortcut to toggle captions
+      await page.keyboard.press('c');
+      console.log("JARVIS: Toggled Google Meet captions via shortcut 'c'.");
+
       const ccButton = page.locator(
-        'button[aria-label*="Turn on captions" i], button[aria-label*="Turn off captions" i]'
+        'button[aria-label*="Turn on captions" i], button[aria-label*="captions" i]'
+      ).first();
+      if (await ccButton.isVisible({ timeout: 2000 })) {
+        const label = (await ccButton.getAttribute('aria-label')) || '';
+        if (label.toLowerCase().includes('turn on')) {
+          await ccButton.click();
+        }
+      }
+    } catch {}
+  }
+
+  private async ensureCaptionsEnabled(page: Page) {
+    try {
+      if (this.state?.meetingPlatform === 'google-meet') {
+        // Dismiss any accidental popups or settings dialogs that may have opened
+        await page.evaluate(() => {
+          const dialogClose = document.querySelector(
+            '[role="dialog"] button[aria-label*="Close" i], [role="dialog"] button[aria-label*="Cancel" i]'
+          ) as HTMLElement | null;
+          if (dialogClose) dialogClose.click();
+        }).catch(() => {});
+
+        const ccResult = await page.evaluate(() => {
+          // 1. Check if captions are already active (button says "Turn off captions" or is pressed)
+          const turnOff = document.querySelector(
+            'button[aria-label*="Turn off captions" i], button[data-tooltip*="Turn off captions" i], button[aria-label*="Turn off live captions" i], button[aria-pressed="true"][aria-label*="caption" i]'
+          );
+          if (turnOff) {
+            return 'already_on';
+          }
+
+          // 2. Look for turn on button
+          const turnOn = document.querySelector(
+            'button[aria-label*="Turn on captions" i], button[data-tooltip*="Turn on captions" i], button[aria-label*="Turn on live captions" i], button[aria-pressed="false"][aria-label*="caption" i]'
+          ) as HTMLElement | null;
+          if (turnOn) {
+            turnOn.click();
+            return 'clicked_turn_on';
+          }
+
+          return 'not_found';
+        }).catch(() => 'not_found');
+
+        if (ccResult === 'clicked_turn_on') {
+          this._captionsToggledOnce = true;
+          console.log("JARVIS: Activated Google Meet live captions via CC button.");
+        } else if (ccResult === 'already_on') {
+          this._captionsToggledOnce = true;
+        } else if (ccResult === 'not_found' && !this._captionsToggledOnce) {
+          this._captionsToggledOnce = true;
+          await page.keyboard.press('c');
+          console.log("JARVIS: Pressed 'c' once to activate live captions.");
+        }
+      } else if (this.state?.meetingPlatform === 'zoom') {
+        await this.enableZoomCaptions(page);
+      }
+    } catch {}
+  }
+
+  private async enableZoomCaptions(page: Page) {
+    try {
+      await page.mouse.move(500, 500);
+      await page.waitForTimeout(500);
+
+      const captionBtn = page.locator(
+        'button[aria-label*="caption" i], button:has-text("Captions"), button:has-text("Show Captions"), button:has-text("CC")'
       ).first();
 
-      if (await ccButton.isVisible({ timeout: 5000 })) {
-        const ariaLabel = await ccButton.getAttribute('aria-label') || '';
-        if (ariaLabel.toLowerCase().includes('turn on')) {
-          await ccButton.click();
-          console.log("JARVIS: Captions enabled via CC button.");
-        } else {
-          console.log("JARVIS: Captions are already enabled.");
-        }
+      if (await captionBtn.isVisible({ timeout: 3000 })) {
+        await captionBtn.click();
+        console.log("JARVIS: Clicked Zoom Captions button.");
         return;
       }
 
-      // 3. Fallback: try the 3-dots menu
-      const moreBtn = page.locator('button[aria-label="More options" i]').first();
-      if (await moreBtn.isVisible()) {
+      const moreBtn = page.locator('button[aria-label*="More meeting control" i], button:has-text("More")').first();
+      if (await moreBtn.isVisible({ timeout: 2000 })) {
         await moreBtn.click();
-        await page.waitForTimeout(1000);
-        const menuCcBtn = page.locator('li:has-text("Turn on captions")').first();
-        if (await menuCcBtn.isVisible()) {
-          await menuCcBtn.click();
-          console.log("JARVIS: Captions enabled via More menu.");
-          return;
+        await page.waitForTimeout(500);
+        const menuCc = page.locator('li:has-text("Captions"), button:has-text("Captions")').first();
+        if (await menuCc.isVisible({ timeout: 2000 })) {
+          await menuCc.click();
+          console.log("JARVIS: Enabled Zoom captions via More menu.");
         }
-        // Close menu if it was open but CC not found
-        await page.mouse.click(10, 10);
       }
-
-      // 4. Last resort: Keyboard Shortcut (c)
-      await page.keyboard.press('c');
-      console.log("JARVIS: Tried enabling captions via keyboard shortcut 'c'.");
-
-    } catch (e) {
-      console.warn("JARVIS: Caption enable attempt failed, will wait for user to click it manually.");
-    }
+    } catch {}
   }
-
-  /**
-   * SELECTOR-FREE CAPTION ENGINE v3
-   * 
-   * How Zoom captions work:
-   * - Zoom renders 1-3 caption lines at the bottom of the viewport
-   * - As new speech arrives, text is REPLACED in-place in the same DOM elements
-   * - Old captions scroll away or vanish; new ones appear in the same position
-   * 
-   * Strategy:
-   * 1. Scan ALL visible leaf-text in the bottom 45% of the viewport
-   * 2. Combine into a SINGLE snapshot string
-   * 3. Compare the full snapshot to the previous one
-   * 4. If changed, log the delta
-   * 
-   * v4 fixes: uses recursive setTimeout (not setInterval) to prevent
-   * overlapping async page.evaluate() calls that were crashing Playwright.
-   */
-
-  private previousSnapshot: string = '';
-  private captionSeenSet: Set<string> = new Set();
-  private _captionBusy = false;
-  private currentSpeaker: string = 'Speaker';
 
   private findNewText(oldStr: string, newStr: string): string {
     if (!oldStr) return newStr;
     if (oldStr === newStr) return '';
-    
-    // Exact continuation
+
     if (newStr.startsWith(oldStr)) return newStr.substring(oldStr.length).trim();
-    
-    // Substring containment
     if (newStr.includes(oldStr)) return newStr.substring(newStr.indexOf(oldStr) + oldStr.length).trim();
 
-    // Check for overlapping suffix of oldStr and prefix of newStr
     const minLen = Math.min(oldStr.length, newStr.length);
-    // Only check overlaps that are at least 3 characters to avoid false positive single-letter matches
     for (let i = minLen; i >= 3; i--) {
       const suffix = oldStr.substring(oldStr.length - i);
       const prefix = newStr.substring(0, i);
@@ -233,363 +793,232 @@ class MeetingBotService {
         return newStr.substring(i).trim();
       }
     }
-    
-    // No meaningful overlap found, treat as entirely new text
     return newStr.trim();
   }
 
   private startSmartCaptionEngine(page: Page) {
     if (!this.state) return;
+    this._captionActive = true;
+    console.log("JARVIS: 🧠 Live transcription & chat engine active.");
 
-    console.log("JARVIS: 🧠 Starting smart caption engine v5 (Overlap Diffing)...");
+    let checkCcCounter = 0;
 
     const tick = async () => {
-      if (!this.state?.page || !this.state.isRecording) return;
+      // Self-terminate if cleanup() was called or bot is no longer recording
+      if (!this._captionActive || !this.state?.page || !this.state.isRecording) return;
       if (this._captionBusy) {
-        this.state.captionInterval = setTimeout(tick, 2000) as any;
+        this.state.captionInterval = setTimeout(tick, 1800) as any;
         return;
       }
 
       this._captionBusy = true;
 
       try {
-        // Grab all text in the bottom 45% of the screen
-        const rawText: string = await page.evaluate(() => {
-          const vh = window.innerHeight;
-          const threshold = vh * 0.55;
-          const vw = window.innerWidth;
-          let fullText = '';
+        // Step 1: Detect actual room state
+        const roomState = await page.evaluate(() => {
+          const bodyText = document.body.innerText.toLowerCase();
+          const url = window.location.href;
 
-          document.querySelectorAll('span, p, div').forEach(el => {
-            const style = window.getComputedStyle(el);
-            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return;
+          if (url === 'https://meet.google.com/' || bodyText.includes('schedule a meeting or enjoy')) {
+            return { status: 'home' };
+          }
 
-            const tag = el.tagName.toLowerCase();
-            const role = el.getAttribute('role') || '';
-            if (['button', 'input', 'select', 'nav', 'header', 'footer', 'a'].includes(tag)) return;
-            if (['button', 'menuitem', 'tab', 'navigation', 'toolbar', 'menu'].includes(role)) return;
-            if (el.closest('button') || el.closest('[role="button"]') || el.closest('nav') || el.closest('[role="toolbar"]')) return;
-            if (el.getAttribute('aria-hidden') === 'true') return;
+          const isWaiting =
+            bodyText.includes('asking to join') ||
+            bodyText.includes('someone will let you in') ||
+            bodyText.includes('waiting for the host') ||
+            bodyText.includes('will let you in soon') ||
+            bodyText.includes('no one can join a meeting unless invited');
 
-            const rect = el.getBoundingClientRect();
-            if (rect.top < threshold) return;
-            if (rect.left < -100 || rect.right > vw + 100) return;
-            if (rect.width < 10 || rect.height < 10) return;
+          if (isWaiting) {
+            return { status: 'waiting' };
+          }
 
-            // Only grab leaf nodes to avoid duplicate text from parent elements
-            let text = '';
-            if (el.children.length === 0) {
-              text = (el.textContent || '').trim();
-            } else {
-              el.childNodes.forEach(node => {
-                if (node.nodeType === Node.TEXT_NODE) {
-                  text += node.textContent || '';
-                }
-              });
-              text = text.trim();
+          const hasLeave =
+            document.querySelector(
+              'button[aria-label*="Leave call" i], button[data-tooltip*="Leave call" i], button[jsname="CQylAd"]'
+            ) !== null;
+          const hasInCallControls =
+            document.querySelector(
+              'div[data-meeting-title], button[aria-label*="Meeting details" i], div[data-allocation-index]'
+            ) !== null;
+
+          if (hasLeave || hasInCallControls) {
+            return { status: 'in_call' };
+          }
+
+          return { status: 'unknown' };
+        }).catch(() => ({ status: 'unknown' }));
+
+        if (roomState.status === 'waiting') {
+          this.state.statusMessage = "🔔 JARVIS is asking to join. Boss, please click 'Admit' in your Google Meet window!";
+          // Never scrape waiting room banner text!
+          return;
+        }
+
+        if (roomState.status === 'home') {
+          this.state.statusMessage = "Meeting ended or returned to home screen.";
+          return;
+        }
+
+        if (roomState.status === 'in_call') {
+          if (!this.state.statusMessage.startsWith('In meeting')) {
+            this.state.statusMessage = 'In meeting — Transcribing dialogue and chat...';
+          }
+
+          // Ensure captions are actively turned ON in the meeting (check every ~5 seconds)
+          checkCcCounter++;
+          if (checkCcCounter % 3 === 0) {
+            await this.ensureCaptionsEnabled(page);
+          }
+        }
+
+        // Step 2: Scrape live subtitles/captions
+        const scrapedCaptions = await page.evaluate(() => {
+          const entries: Array<{ speaker: string; text: string }> = [];
+
+          // Never scrape inside modals, menus, settings, or dialogs!
+          const isDialogOrMenu = (el: Element) => {
+            return !!el.closest('[role="dialog"], [role="menu"], [role="listbox"], [aria-modal="true"], .VfPpkd-xl07Ob, aside');
+          };
+
+          // Google Meet dedicated subtitle containers
+          const meetContainers = document.querySelectorAll('div[jsname="tgaKEf"], div.nMxPwe');
+
+          meetContainers.forEach(container => {
+            if (isDialogOrMenu(container)) return;
+
+            const speakerEl = container.querySelector('.zs7s8d, [jsname="r4nke"], .NWp81d, [data-sender-name]');
+            const speaker = speakerEl?.textContent?.trim() || '';
+
+            // Strictly query the actual Google Meet spoken text nodes (NEVER generic 'span')
+            const textEls = container.querySelectorAll('.VbkSUe, [jsname="YSxPC"], .bh44bd');
+            let parts: string[] = [];
+
+            textEls.forEach(el => {
+              if (speakerEl && (el === speakerEl || speakerEl.contains(el))) return;
+              const t = el.textContent?.trim() || '';
+              if (t && t.length > 0 && !parts.includes(t)) {
+                parts.push(t);
+              }
+            });
+
+            const text = parts.join(' ').replace(/\s+/g, ' ').trim();
+            // Discard language menus (usually hundreds of characters of language names)
+            if (text.length > 1 && text.length < 500) {
+              entries.push({ speaker: speaker || 'Speaker', text });
             }
-
-            if (!text || text.length < 2) return;
-
-            const lower = text.toLowerCase();
-            if (lower === 'word' || lower.includes('word word') || lower.includes('mmmw') || lower.includes('fiflo') || lower.includes('mmwwll')) return;
-
-            fullText += text + ' ';
           });
 
-          return fullText.replace(/\s+/g, ' ').trim();
-        });
-
-        // Always update previousSnapshot even if rawText is empty, so we can handle clears
-        if (rawText !== this.previousSnapshot) {
-          if (rawText) {
-            const newText = this.findNewText(this.previousSnapshot, rawText);
-            
-            if (newText.length > 1) {
-              // Check if the new text has a speaker tag (e.g., "John Doe: Hello")
-              let textToLog = newText;
-              const colonIdx = newText.indexOf(':');
-              if (colonIdx > 0 && colonIdx < 30) {
-                const possibleName = newText.substring(0, colonIdx).trim();
-                if (possibleName.length > 1 && possibleName.length < 25 && !possibleName.includes('http')) {
-                  this.currentSpeaker = possibleName;
-                  textToLog = newText.substring(colonIdx + 1).trim();
-                }
+          // Fallback: direct query for subtitle spans if outer container classes differ
+          if (entries.length === 0) {
+            const subtitleNodes = document.querySelectorAll('.VbkSUe, [jsname="YSxPC"]');
+            subtitleNodes.forEach(node => {
+              if (isDialogOrMenu(node)) return;
+              const parent = node.closest('div');
+              const speakerEl = parent?.querySelector('.zs7s8d, [jsname="r4nke"], .NWp81d');
+              const speaker = speakerEl?.textContent?.trim() || '';
+              const text = node.textContent?.trim() || '';
+              if (text && text.length > 1 && text.length < 500) {
+                entries.push({ speaker: speaker || 'Speaker', text });
               }
+            });
+          }
 
-              if (textToLog.length > 1) {
-                const entry: CaptionEntry = {
-                  speaker: this.currentSpeaker,
-                  text: textToLog,
-                  timestamp: new Date().toISOString(),
-                };
-                
-                this.state!.captionLog.push(entry);
-                console.log(`JARVIS 📝 [${entry.speaker}]: ${entry.text}`);
+          // Zoom Web Client captions fallback
+          if (entries.length === 0) {
+            const zoomItems = document.querySelectorAll('.meeting-transcription-item, .caption-window, .cc-text');
+            zoomItems.forEach(item => {
+              if (isDialogOrMenu(item)) return;
+              const speaker = item.querySelector('.speaker-name, strong')?.textContent?.trim() || '';
+              const text = item.textContent?.replace(speaker, '').trim() || '';
+              if (text.length > 1 && text.length < 500) {
+                entries.push({ speaker: speaker || 'Speaker', text });
               }
+            });
+          }
+
+          return entries;
+        }).catch(() => []);
+
+        // Step 3: Filter against blacklist and deduplicate
+        for (const entry of scrapedCaptions) {
+          const lower = entry.text.toLowerCase();
+          const isBlacklisted = SYSTEM_BLACKLIST.some(b => lower.includes(b));
+          if (isBlacklisted) continue;
+
+          const cleanText = entry.text.replace(/\s+/g, ' ').trim();
+          if (cleanText.length < 2) continue;
+
+          const recent = this.state!.captionLog.slice(-4);
+          const isExactDuplicate = recent.some(r => r.text === cleanText);
+          if (isExactDuplicate) continue;
+
+          // If this is an extension of the last utterance by the same speaker within 7 seconds
+          const lastEntry = this.state!.captionLog[this.state!.captionLog.length - 1];
+          if (
+            lastEntry &&
+            lastEntry.speaker === entry.speaker &&
+            cleanText.startsWith(lastEntry.text) &&
+            Date.now() - new Date(lastEntry.timestamp).getTime() < 7000
+          ) {
+            lastEntry.text = cleanText;
+            continue;
+          }
+
+          const logEntry: CaptionEntry = {
+            speaker: entry.speaker || this.currentSpeaker,
+            text: cleanText,
+            timestamp: new Date().toISOString(),
+            source: 'caption',
+          };
+          this.state!.captionLog.push(logEntry);
+          console.log(`JARVIS 📝 [${logEntry.speaker}]: ${logEntry.text}`);
+        }
+
+        // Step 4: Also scrape in-meeting chat messages if chat panel is open
+        const chatEntries = await page.evaluate(() => {
+          const msgs: Array<{ speaker: string; text: string }> = [];
+          document.querySelectorAll('div[data-message-text]').forEach(el => {
+            const text = el.textContent?.trim();
+            const parent = el.closest('[data-sender-name]');
+            const speaker = parent?.getAttribute('data-sender-name') || 'Chat User';
+            if (text) msgs.push({ speaker, text });
+          });
+          document.querySelectorAll('.chat-item__chat-info, .chat-message__text').forEach(el => {
+            const text = el.textContent?.trim();
+            if (text) msgs.push({ speaker: 'Chat User', text });
+          });
+          return msgs.slice(-5);
+        }).catch(() => []);
+
+        if (chatEntries.length > 0) {
+          for (const msg of chatEntries) {
+            const alreadyExists = this.state!.captionLog.some(e => e.text === msg.text);
+            if (!alreadyExists && msg.text.length > 1) {
+              const chatEntry: CaptionEntry = {
+                speaker: msg.speaker,
+                text: msg.text,
+                timestamp: new Date().toISOString(),
+                source: 'chat',
+              };
+              this.state!.captionLog.push(chatEntry);
+              console.log(`JARVIS 💬 [${chatEntry.speaker}]: ${chatEntry.text}`);
             }
           }
-          
-          this.previousSnapshot = rawText;
         }
 
       } catch (e: any) {
-        console.warn("JARVIS CAPTION ENGINE: tick error (will retry):", e?.message?.substring(0, 80));
+        console.warn("JARVIS: Caption scrape loop note:", e?.message?.substring(0, 80));
       } finally {
         this._captionBusy = false;
-      }
-
-      if (this.state?.isRecording) {
-        this.state.captionInterval = setTimeout(tick, 2000) as any;
+        if (this._captionActive && this.state?.isRecording) {
+          this.state.captionInterval = setTimeout(tick, 1800) as any;
+        }
       }
     };
 
     this.state.captionInterval = setTimeout(tick, 2000) as any;
-  }
-
-  /**
-   * Get a debug snapshot of what Jarvis can see on the page.
-   * Call this via the API to troubleshoot caption detection.
-   */
-  async getPageDebugInfo(): Promise<any> {
-    if (!this.state?.page) return { error: 'Bot not active' };
-
-    try {
-      const debugInfo = await this.state.page.evaluate(() => {
-        const viewportHeight = window.innerHeight;
-        const viewportWidth = window.innerWidth;
-        const elements: any[] = [];
-
-        document.querySelectorAll('span, p, div').forEach(el => {
-          const rect = el.getBoundingClientRect();
-          if (rect.top < viewportHeight * 0.5) return; // Only bottom half
-          const style = window.getComputedStyle(el);
-          if (style.display === 'none' || style.visibility === 'hidden') return;
-          if (rect.width < 30 || rect.height < 8) return;
-
-          const text = el.textContent?.trim();
-          if (text && text.length > 2 && text.length < 300) {
-            elements.push({
-              tag: el.tagName,
-              class: el.className?.toString()?.substring(0, 80) || '',
-              text: text.substring(0, 100),
-              position: `top:${Math.round(rect.top)} left:${Math.round(rect.left)} w:${Math.round(rect.width)} h:${Math.round(rect.height)}`,
-            });
-          }
-        });
-
-        return {
-          viewport: `${viewportWidth}x${viewportHeight}`,
-          url: window.location.href,
-          title: document.title,
-          elementsInBottomHalf: elements.length,
-          elements: elements.slice(0, 30), // Cap at 30
-        };
-      });
-
-      return {
-        ...debugInfo,
-        captionsCollected: this.state.captionLog.length,
-        isRecording: this.state.isRecording,
-        lastCaptionTexts: this.previousSnapshot,
-      };
-    } catch (e: any) {
-      return { error: e.message };
-    }
-  }
-
-  // ─── PLATFORM JOIN HANDLERS ────────────────────────────────────────────
-
-  private async handleGoogleMeetJoin(page: Page) {
-    try {
-      console.log("JARVIS: Handling Google Meet join flow...");
-
-      // Dismiss any initial popups / "Got it" buttons
-      try {
-        const gotItBtn = page.locator('button:has-text("Got it")');
-        if (await gotItBtn.isVisible({ timeout: 3000 })) {
-          await gotItBtn.click();
-        }
-      } catch { /* No popup */ }
-
-      // Turn off camera and mic before joining
-      try {
-        const micBtn = page.locator('[aria-label*="microphone" i], [data-tooltip*="microphone" i]').first();
-        if (await micBtn.isVisible({ timeout: 3000 })) {
-          await micBtn.click();
-          console.log("JARVIS: Muted microphone.");
-        }
-
-        const camBtn = page.locator('[aria-label*="camera" i], [data-tooltip*="camera" i]').first();
-        if (await camBtn.isVisible({ timeout: 3000 })) {
-          await camBtn.click();
-          console.log("JARVIS: Turned off camera.");
-        }
-      } catch { /* Buttons not found */ }
-
-      // Click "Join now" or "Ask to join"
-      const joinButton = page.locator('button:has-text("Join now"), button:has-text("Ask to join")').first();
-      await joinButton.waitFor({ state: 'visible', timeout: 15000 });
-      await joinButton.click();
-      console.log("JARVIS: Clicked join button for Google Meet.");
-
-    } catch (e: any) {
-      console.warn("JARVIS: Could not auto-click Google Meet join button:", e.message);
-    }
-  }
-
-  private async handleZoomJoin(page: Page, credentials?: { id?: string; password?: string }) {
-    try {
-      console.log("JARVIS: Handling Zoom join flow...");
-
-      if (credentials?.id) {
-        await page.goto('https://zoom.us/join', { waitUntil: 'domcontentloaded' });
-        await page.waitForTimeout(2000);
-
-        const meetingIdInput = page.locator('#join-confno, input[name="confno"]').first();
-        await meetingIdInput.waitFor({ state: 'visible', timeout: 10000 });
-        await meetingIdInput.fill(credentials.id);
-
-        const joinBtn = page.locator('#joinBtn, button:has-text("Join")').first();
-        await joinBtn.click();
-
-        if (credentials.password) {
-          await page.waitForTimeout(2000);
-          const pwdInput = page.locator('input[type="password"], #joinPassword').first();
-          if (await pwdInput.isVisible({ timeout: 5000 })) {
-            await pwdInput.fill(credentials.password);
-            const submitBtn = page.locator('button:has-text("Join Meeting"), button[type="submit"]').first();
-            await submitBtn.click();
-          }
-        }
-      } else {
-        // --- 1. Handle Webinar Registration Form (if present) ---
-        console.log("JARVIS: Checking if this is a webinar registration page...");
-        try {
-          const emailInput = page.locator('input[type="email"], input[name*="email" i], #question_email').first();
-          if (await emailInput.isVisible({ timeout: 3000 })) {
-            console.log("JARVIS: Webinar registration form detected. Auto-filling...");
-            
-            // Fill first name
-            const firstName = page.locator('input[name*="first" i], #question_first_name').first();
-            if (await firstName.isVisible()) {
-              await firstName.click();
-              await firstName.pressSequentially('JARVIS', { delay: 50 });
-              await page.keyboard.press('Tab');
-            }
-            
-            // Fill last name
-            const lastName = page.locator('input[name*="last" i], #question_last_name').first();
-            if (await lastName.isVisible()) {
-              await lastName.click();
-              await lastName.pressSequentially('B', { delay: 50 });
-              await page.keyboard.press('Tab');
-            }
-            
-            // Fill email
-            await emailInput.click();
-            await emailInput.pressSequentially('dhruvbijapur@gmail.com', { delay: 50 });
-            await page.keyboard.press('Tab');
-            
-            // Fill mobile/phone (if requested by webinar)
-            try {
-              const phoneInput = page.locator('input[type="tel"], input[name*="phone" i], input[name*="mobile" i], input[id*="phone" i]').first();
-              if (await phoneInput.isVisible({ timeout: 1000 })) {
-                await phoneInput.click();
-                await phoneInput.pressSequentially('9606571200', { delay: 50 });
-                await page.keyboard.press('Tab');
-                console.log("JARVIS: Filled mobile number.");
-              }
-            } catch {
-              // Phone field not present
-            }
-            
-            // Wait a moment for Zoom's validation to enable the button
-            await page.waitForTimeout(1000);
-
-            // Submit registration - using force: true as a fallback just in case
-            const registerBtn = page.locator('button:has-text("Register"), button:has-text("Join")').first();
-            await registerBtn.click({ force: true });
-            console.log("JARVIS: Submitted webinar registration.");
-            
-            // Wait for the next page to load
-            await page.waitForTimeout(5000);
-          }
-        } catch {
-          console.log("JARVIS: No registration form detected. Proceeding...");
-        }
-
-        // --- 2. Handle "Join from browser" Landing Page ---
-        console.log("JARVIS: Looking for 'Join from browser' link on Zoom landing page...");
-        
-        // Try multiple selectors in order of likelihood. 
-        // We use exact string matching where possible to avoid clicking the wrong "Join" buttons
-        const joinFromBrowserSelectors = [
-          'button:has-text("Join from browser")',
-          'button:has-text("Join from Browser")',
-          'a:has-text("Join from browser")',
-          'a:has-text("Join from Browser")', 
-          'a:has-text("Join from Your Browser")',
-          'a:has-text("join from your browser")',
-          'button:has-text("Launch Meeting")',
-          'a:has-text("Launch Meeting")',
-          '#fallback_btn',  // Zoom's fallback join button ID
-          'button >> text="Join"',
-          'a >> text="Join"'
-        ];
-
-        let clicked = false;
-        for (let attempt = 0; attempt < 3 && !clicked; attempt++) {
-          if (attempt > 0) {
-            console.log(`JARVIS: Retry ${attempt}/3 - waiting for Zoom page to render...`);
-            await page.waitForTimeout(3000);
-          }
-
-          for (const sel of joinFromBrowserSelectors) {
-            try {
-              const el = page.locator(sel).first();
-              if (await el.isVisible({ timeout: 1000 })) {
-                console.log(`JARVIS: Found join link with selector: "${sel}"`);
-                await el.click();
-                clicked = true;
-                break;
-              }
-            } catch {
-              // Selector didn't match, try next
-            }
-          }
-        }
-
-        if (clicked) {
-          console.log("JARVIS: Clicked 'Join from browser'. Waiting for meeting UI to load...");
-          await page.waitForTimeout(5000);
-          
-          // --- 3. Handle Meeting Name Entry (if present) ---
-          try {
-            const nameInput = page.locator('#inputname, input[placeholder*="name" i], input[id*="name" i]').first();
-            if (await nameInput.isVisible({ timeout: 3000 })) {
-              await nameInput.fill('JARVIS Bot');
-              console.log("JARVIS: Entered name for Zoom meeting.");
-              
-              const joinMeetingBtn = page.locator('button:has-text("Join"), #joinBtn').first();
-              if (await joinMeetingBtn.isVisible({ timeout: 3000 })) {
-                await joinMeetingBtn.click();
-                console.log("JARVIS: Clicked Join on name entry page.");
-              }
-            }
-          } catch {
-            // No name input, might have gone straight to meeting
-          }
-
-          // Wait for meeting to fully load
-          await page.waitForTimeout(5000);
-        } else {
-          console.warn("JARVIS: Could not find 'Join from browser' link. Page might have loaded directly into meeting.");
-        }
-      }
-    } catch (e: any) {
-      console.warn("JARVIS: Could not auto-join Zoom:", e.message);
-    }
   }
 
   // ─── WAITING ROOM MONITOR ─────────────────────────────────────────────
@@ -601,76 +1030,32 @@ class MeetingBotService {
       if (!this.state?.page) return;
 
       try {
-        const isWaiting = await this.state.page.evaluate(() => {
+        const info = await this.state.page.evaluate(() => {
           const bodyText = document.body.innerText.toLowerCase();
-          return bodyText.includes("asking to join") ||
-                 bodyText.includes("waiting room") ||
-                 bodyText.includes("will let you in soon") ||
-                 bodyText.includes("waiting for the host");
+          const isWaiting =
+            bodyText.includes("asking to join") ||
+            bodyText.includes("waiting room") ||
+            bodyText.includes("someone will let you in") ||
+            bodyText.includes("will let you in soon") ||
+            bodyText.includes("waiting for the host") ||
+            bodyText.includes("no one can join a meeting unless invited");
+
+          const hasLeave =
+            document.querySelector('button[aria-label*="Leave call" i], button[data-tooltip*="Leave call" i], button[jsname="CQylAd"]') !== null;
+
+          return { isWaiting, hasLeave };
         });
 
-        if (isWaiting) {
-          console.log("JARVIS: I'm stuck in the waiting room!");
-          try {
-            await fetch(`${API_BASE}/api/notifications`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                message: "Boss, I'm in the waiting room. Please admit me!",
-                status: "info"
-              })
-            });
-          } catch { /* ignore */ }
+        if (info.isWaiting) {
+          this.state.statusMessage = "🔔 JARVIS is asking to join. Boss, please click 'Admit' in your Google Meet window!";
+          console.log("JARVIS: In waiting room — waiting for host admittance.");
+        } else if (info.hasLeave) {
+          if (!this.state.statusMessage.startsWith('In meeting')) {
+            this.state.statusMessage = "In meeting — Transcribing dialogue and chat...";
+          }
         }
-      } catch { /* page navigating */ }
-    }, 10000);
-  }
-
-  // ─── CHAT ──────────────────────────────────────────────────────────────
-
-  async sendChatMessage(message: string) {
-    if (!this.state?.page) {
-      return { success: false, error: "No active meeting session." };
-    }
-
-    try {
-      const page = this.state.page;
-
-      if (this.state.meetingPlatform === 'google-meet') {
-        // Open chat panel
-        const chatBtn = page.locator('[aria-label*="chat" i], button:has-text("Chat")').first();
-        if (await chatBtn.isVisible({ timeout: 3000 })) {
-          await chatBtn.click();
-          await page.waitForTimeout(500);
-        }
-
-        const chatInput = page.locator('textarea[aria-label*="Send a message" i], textarea[placeholder*="Send a message" i]').first();
-        await chatInput.waitFor({ state: 'visible', timeout: 5000 });
-        await chatInput.fill(message);
-        await chatInput.press('Enter');
-
-        return { success: true, message: `Message sent: "${message}"` };
-      }
-
-      if (this.state.meetingPlatform === 'zoom') {
-        const chatBtn = page.locator('[aria-label*="Chat" i]').first();
-        if (await chatBtn.isVisible({ timeout: 3000 })) {
-          await chatBtn.click();
-          await page.waitForTimeout(500);
-        }
-
-        const chatInput = page.locator('textarea.chat-box__chat-textarea, textarea[placeholder*="Type message" i]').first();
-        await chatInput.waitFor({ state: 'visible', timeout: 5000 });
-        await chatInput.fill(message);
-        await chatInput.press('Enter');
-
-        return { success: true, message: `Message sent: "${message}"` };
-      }
-
-      return { success: false, error: "Unsupported platform for chat." };
-    } catch (e: any) {
-      return { success: false, error: `Could not send message: ${e.message}` };
-    }
+      } catch {}
+    }, 4000);
   }
 
   // ─── LEAVE & SUMMARIZE ─────────────────────────────────────────────────
@@ -681,114 +1066,359 @@ class MeetingBotService {
     }
 
     console.log("JARVIS: Leaving the meeting...");
-
-    // Grab all the captions we collected
     const captionLog = [...(this.state.captionLog || [])];
+    const platform = this.state.meetingPlatform;
+    const meetingUrl = this.state.meetingUrl;
     const captionCount = captionLog.length;
 
-    // Cleanup everything
     await this.cleanup();
+    this.lastResult = null;
+    this._isSyncingNotion = true;
 
-    // Summarize in the background if we have data
-    if (captionLog.length > 0) {
-      console.log(`JARVIS: Collected ${captionCount} caption entries. Generating summary...`);
-      this.runSummarizationPipeline(captionLog).catch(e =>
-        console.error("JARVIS: Summarization pipeline failed:", e)
-      );
-    } else {
-      console.log("JARVIS: No caption data collected (captions may not have been enabled).");
-    }
+    // Trigger AI summarization and Notion sync
+    console.log(`JARVIS: Processing meeting session (${captionCount} dialogue entries)...`);
+    this.runSummarizationPipeline(captionLog, platform, meetingUrl).catch(e => {
+      console.error("JARVIS: Summarization pipeline error:", e);
+      this._isSyncingNotion = false;
+    });
 
     return {
       success: true,
-      message: captionCount > 0
-        ? `JARVIS has left the meeting. Captured ${captionCount} dialogue entries — generating summary & syncing tasks now, Boss.`
-        : "JARVIS has left the meeting. No caption data was captured (try enabling captions next time).",
+      message:
+        captionCount > 0
+          ? `JARVIS has left the meeting. Captured ${captionCount} dialogue entries — generating summary & syncing to Notion now, Boss.`
+          : "JARVIS has left the meeting. Meeting attendance note is being synced to Notion.",
+      captionCount,
     };
   }
 
-  private async runSummarizationPipeline(captionLog: CaptionEntry[]) {
+  private extractValidJson(raw: string): MeetingSummary | null {
     try {
-      // Build a readable transcript from the caption log
-      const transcript = captionLog
-        .map(entry => `[${new Date(entry.timestamp).toLocaleTimeString()}] ${entry.speaker}: ${entry.text}`)
-        .join('\n');
+      return JSON.parse(raw);
+    } catch {
+      const cleaned = raw.replace(/```(?:json)?/gi, '').replace(/```/g, '').trim();
+      try {
+        return JSON.parse(cleaned);
+      } catch {
+        const match = cleaned.match(/\{[\s\S]*\}/);
+        if (match) {
+          try {
+            return JSON.parse(match[0]);
+          } catch {}
+        }
+      }
+    }
+    return null;
+  }
 
-      console.log("JARVIS: Sending transcript to AI for summarization...");
-      console.log(`--- TRANSCRIPT (${captionLog.length} entries) ---`);
-      console.log(transcript.substring(0, 500) + (transcript.length > 500 ? '...' : ''));
+  private async runSummarizationPipeline(captionLog: CaptionEntry[], platform: string, meetingUrl: string) {
+    try {
+      const transcript =
+        captionLog.length > 0
+          ? captionLog
+              .map(entry => `[${new Date(entry.timestamp).toLocaleTimeString()}] ${entry.speaker}: ${entry.text}`)
+              .join('\n')
+          : "(No speech dialogue was captured during this session. Captions may have been disabled.)";
 
-      // 1. Generate AI Summary
-      const aiRes = await axios.post(`${API_BASE}/api/openai`, {
-        messages: [
-          {
-            role: "system",
-            content: `You are JARVIS, a high-efficiency executive assistant. Analyze the following meeting transcript and return a structured summary as JSON.
-            
-Format:
+      console.log("JARVIS: Generating meeting summary...");
+      let summary: MeetingSummary | null = null;
+
+      // 1. Direct AI Summarization with Gemini 2.5 Flash
+      const geminiKey = process.env.GEMINI_API_KEY;
+      if (geminiKey && captionLog.length > 0) {
+        try {
+          const prompt = `You are JARVIS, an elite executive AI assistant. Analyze the following meeting transcript and return a structured summary as JSON.
+
+Format strictly as JSON:
 {
   "summary": "2-3 sentence overview of the meeting",
-  "keyTopics": ["topic1", "topic2"],
-  "decisions": ["decision1", "decision2"],
+  "keyTopics": ["topic 1", "topic 2"],
+  "decisions": ["decision 1", "decision 2"],
   "actionItems": [
-    { "task": "specific action", "assignee": "person name or Unknown", "due": "suggested due date", "priority": 1-4 }
+    { "task": "specific action", "assignee": "person or Unassigned", "due": "suggested due date", "priority": 1 }
   ],
-  "nextSteps": "any mentioned follow-ups or next meeting details"
-}`
-          },
-          { role: "user", content: `Meeting Transcript:\n${transcript}` }
-        ],
-        response_format: { type: "json_object" }
-      });
+  "nextSteps": "follow-ups or next meeting notes"
+}
 
-      const summary = JSON.parse(aiRes.data.content);
-      console.log("JARVIS: ✅ Meeting summary generated!");
-      console.log("Summary:", summary.summary);
-      console.log("Decisions:", summary.decisions);
-      console.log("Action Items:", summary.actionItems?.length || 0);
+Transcript:
+${transcript.slice(0, 30000)}`;
 
-      // 2. Save to Notion
-      try {
-        await axios.post(`${API_BASE}/api/notion/create-page`, {
-          title: `Meeting Notes — ${new Date().toLocaleDateString()}`,
-          content: `## Summary\n${summary.summary}\n\n## Key Topics\n${(summary.keyTopics || []).map((t: string) => `- ${t}`).join('\n')}\n\n## Decisions\n${(summary.decisions || []).map((d: string) => `- ${d}`).join('\n')}\n\n## Action Items\n${(summary.actionItems || []).map((a: any) => `- [ ] ${a.task} (${a.assignee || 'Unassigned'}) — Due: ${a.due || 'TBD'}`).join('\n')}\n\n## Full Transcript\n${transcript}`,
-          tags: ["Meeting", "JARVIS-Bot"]
-        });
-        console.log("JARVIS: 📝 Meeting notes saved to Notion.");
-      } catch (e) {
-        console.warn("JARVIS: Could not save to Notion (may not be configured).");
+          const geminiRes = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: {
+                  responseMimeType: 'application/json',
+                  temperature: 0.2,
+                },
+              }),
+            }
+          );
+
+          if (geminiRes.ok) {
+            const data = await geminiRes.json();
+            const textContent = data.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (textContent) {
+              summary = this.extractValidJson(textContent);
+            }
+          }
+        } catch (aiErr: any) {
+          console.warn("JARVIS: Gemini summarization note:", aiErr.message);
+        }
+      }
+
+      // Fallback summary if AI was unavailable or 0 captions
+      if (!summary) {
+        summary = {
+          summary:
+            captionLog.length > 0
+              ? `Meeting concluded on ${new Date().toLocaleDateString()} via ${platform}. JARVIS collected ${captionLog.length} dialogue entries.`
+              : `Meeting session logged on ${new Date().toLocaleDateString()} (${platform}). No live captions were detected.`,
+          keyTopics: [platform === 'zoom' ? 'Zoom Meeting' : platform === 'google-meet' ? 'Google Meet' : 'Online Conference'],
+          decisions: ['Meeting attended and recorded in JARVIS log.'],
+          actionItems: [],
+          nextSteps: 'Review meeting dialogue log.',
+        };
+      }
+
+      console.log("JARVIS: ✅ Summary generated:", summary.summary);
+
+      // 2. Direct Sync to Notion Database (no fragile loopback HTTP requests)
+      const notionToken = process.env.NOTION_TOKEN;
+      const notionDatabaseId = process.env.NOTION_DATABASE_ID;
+      let notionUrl: string | null = null;
+
+      if (notionToken && notionDatabaseId) {
+        try {
+          notionUrl = await this.saveToNotionDirect({
+            title: `Meeting Notes — ${new Date().toLocaleDateString()} (${platform.toUpperCase()})`,
+            summary,
+            transcript,
+            meetingUrl,
+          });
+          console.log("JARVIS: 📝 Notes saved to Notion:", notionUrl);
+        } catch (notionErr: any) {
+          console.error("JARVIS: Notion sync error:", notionErr.message);
+        }
+      } else {
+        console.warn("JARVIS: Notion credentials not configured in .env.local");
       }
 
       // 3. Sync Action Items to Todoist
-      if (summary.actionItems && Array.isArray(summary.actionItems)) {
-        console.log(`JARVIS: Syncing ${summary.actionItems.length} tasks to Todoist...`);
+      const todoistToken = process.env.TODOIST_API_TOKEN;
+      if (todoistToken && summary.actionItems && Array.isArray(summary.actionItems)) {
         for (const item of summary.actionItems) {
           try {
-            await axios.post(`${API_BASE}/api/todoist/add-task`, {
-              content: `[Meeting] ${item.task}`,
-              dueString: item.due || 'next week',
-              priority: item.priority || 1
+            await fetch('https://api.todoist.com/rest/v2/tasks', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${todoistToken}`,
+              },
+              body: JSON.stringify({
+                content: `[Meeting] ${item.task}`,
+                due_string: item.due || 'next week',
+                priority: item.priority || 1,
+              }),
             });
-          } catch {
-            console.warn(`JARVIS: Could not sync task: "${item.task}"`);
-          }
+          } catch {}
         }
-        console.log("JARVIS: ✅ Tasks synced to Todoist.");
       }
 
-      // 4. Send completion notification
-      try {
-        await fetch(`${API_BASE}/api/whatsapp/send`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            message: `✅ *Meeting Summary Ready*\n\n${summary.summary}\n\n📋 *Action Items:* ${(summary.actionItems || []).length}\n📝 Full notes saved to Notion.`
-          })
-        });
-      } catch { /* WhatsApp may not be configured */ }
+      // Store result
+      this.lastResult = {
+        title: `Meeting Notes — ${new Date().toLocaleDateString()}`,
+        platform,
+        captionCount: captionLog.length,
+        summary,
+        notionUrl,
+        timestamp: new Date().toISOString(),
+      };
+      this._isSyncingNotion = false;
 
     } catch (e) {
+      this._isSyncingNotion = false;
       console.error("JARVIS: Error in summarization pipeline:", e);
+    }
+  }
+
+  private async saveToNotionDirect(params: {
+    title: string;
+    summary: MeetingSummary;
+    transcript: string;
+    meetingUrl: string;
+  }): Promise<string | null> {
+    const notionToken = process.env.NOTION_TOKEN;
+    const notionDatabaseId = process.env.NOTION_DATABASE_ID;
+    if (!notionToken || !notionDatabaseId) return null;
+
+    // Split transcript into <= 2000-char chunks for Notion block limits
+    const transcriptBlocks: any[] = [];
+    const MAX_CHUNK = 1800;
+    for (let i = 0; i < params.transcript.length; i += MAX_CHUNK) {
+      transcriptBlocks.push({
+        object: 'block',
+        type: 'paragraph',
+        paragraph: {
+          rich_text: [{ type: 'text', text: { content: params.transcript.substring(i, i + MAX_CHUNK) } }],
+        },
+      });
+    }
+
+    const children: any[] = [
+      {
+        object: 'block',
+        type: 'heading_2',
+        heading_2: {
+          rich_text: [{ type: 'text', text: { content: 'Executive Summary' } }],
+        },
+      },
+      {
+        object: 'block',
+        type: 'paragraph',
+        paragraph: {
+          rich_text: [{ type: 'text', text: { content: params.summary.summary } }],
+        },
+      },
+      {
+        object: 'block',
+        type: 'heading_2',
+        heading_2: {
+          rich_text: [{ type: 'text', text: { content: 'Key Topics' } }],
+        },
+      },
+      ...(params.summary.keyTopics || []).map((t: string) => ({
+        object: 'block',
+        type: 'bulleted_list_item',
+        bulleted_list_item: {
+          rich_text: [{ type: 'text', text: { content: t } }],
+        },
+      })),
+      {
+        object: 'block',
+        type: 'heading_2',
+        heading_2: {
+          rich_text: [{ type: 'text', text: { content: 'Decisions' } }],
+        },
+      },
+      ...(params.summary.decisions || []).map((d: string) => ({
+        object: 'block',
+        type: 'bulleted_list_item',
+        bulleted_list_item: {
+          rich_text: [{ type: 'text', text: { content: d } }],
+        },
+      })),
+      {
+        object: 'block',
+        type: 'heading_2',
+        heading_2: {
+          rich_text: [{ type: 'text', text: { content: 'Action Items' } }],
+        },
+      },
+      ...(params.summary.actionItems || []).map((item: any) => ({
+        object: 'block',
+        type: 'to_do',
+        to_do: {
+          rich_text: [
+            {
+              type: 'text',
+              text: { content: `${item.task} (${item.assignee || 'Unassigned'}) — Due: ${item.due || 'TBD'}` },
+            },
+          ],
+          checked: false,
+        },
+      })),
+      {
+        object: 'block',
+        type: 'heading_2',
+        heading_2: {
+          rich_text: [{ type: 'text', text: { content: 'Meeting Transcript' } }],
+        },
+      },
+      ...transcriptBlocks.slice(0, 50),
+    ];
+
+    const res = await fetch('https://api.notion.com/v1/pages', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${notionToken}`,
+        'Notion-Version': '2022-06-28',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        parent: { database_id: notionDatabaseId },
+        properties: {
+          Name: {
+            title: [{ text: { content: params.title } }],
+          },
+          Tags: {
+            multi_select: [{ name: 'Meeting' }, { name: 'JARVIS-Bot' }],
+          },
+          ...(params.meetingUrl ? { URL: { url: params.meetingUrl } } : {}),
+        },
+        children,
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(`Notion API error ${res.status}: ${JSON.stringify(err)}`);
+    }
+
+    const data = await res.json();
+    return data.url || null;
+  }
+
+  // ─── CHAT ──────────────────────────────────────────────────────────────
+
+  async sendChatMessage(message: string) {
+    if (!this.state?.page) {
+      return { success: false, error: 'No active meeting session.' };
+    }
+
+    try {
+      const page = this.state.page;
+
+      if (this.state.meetingPlatform === 'google-meet') {
+        const chatBtn = page.locator('[aria-label*="chat" i], button:has-text("Chat")').first();
+        if (await chatBtn.isVisible({ timeout: 2500 })) {
+          await chatBtn.click();
+          await page.waitForTimeout(500);
+        }
+
+        const chatInput = page
+          .locator('textarea[aria-label*="Send a message" i], textarea[placeholder*="Send a message" i]')
+          .first();
+        await chatInput.waitFor({ state: 'visible', timeout: 5000 });
+        await chatInput.fill(message);
+        await chatInput.press('Enter');
+
+        return { success: true, message: `Message sent: "${message}"` };
+      }
+
+      if (this.state.meetingPlatform === 'zoom') {
+        const chatBtn = page.locator('[aria-label*="Chat" i]').first();
+        if (await chatBtn.isVisible({ timeout: 2500 })) {
+          await chatBtn.click();
+          await page.waitForTimeout(500);
+        }
+
+        const chatInput = page
+          .locator('textarea.chat-box__chat-textarea, textarea[placeholder*="Type message" i]')
+          .first();
+        await chatInput.waitFor({ state: 'visible', timeout: 5000 });
+        await chatInput.fill(message);
+        await chatInput.press('Enter');
+
+        return { success: true, message: `Message sent: "${message}"` };
+      }
+
+      return { success: false, error: 'Unsupported platform for chat.' };
+    } catch (e: any) {
+      return { success: false, error: `Could not send message: ${e.message}` };
     }
   }
 
@@ -797,20 +1427,22 @@ Format:
   private async cleanup() {
     if (!this.state) return;
 
+    // Flip the caption guard FIRST so any in-flight tick self-terminates
+    this._captionActive = false;
+    this._captionBusy = false;
+    this._captionsToggledOnce = false;
+
     if (this.state.monitorInterval) clearInterval(this.state.monitorInterval);
     if (this.state.captionInterval) clearTimeout(this.state.captionInterval);
 
+    // Mark as not recording so any already-running async tick won't reschedule
+    this.state.isRecording = false;
+
     try {
-      await this.state.browser.close();
-    } catch (e) {
-      console.error("JARVIS: Error closing browser:", e);
-    }
+      await this.state.context.close();
+    } catch { /* Context may already be closed if browser was closed externally */ }
 
-    // Reset caption engine state so re-dispatch starts fresh
     this.previousSnapshot = '';
-    this.captionSeenSet.clear();
-    this._captionBusy = false;
-
     this.state = null;
   }
 
@@ -818,10 +1450,49 @@ Format:
     return {
       isActive: !!this.state,
       isRecording: this.state?.isRecording || false,
+      isSyncingNotion: this._isSyncingNotion,
       captionsCollected: this.state?.captionLog?.length || 0,
       platform: this.state?.meetingPlatform || null,
+      statusMessage:
+        this.state?.statusMessage ||
+        (this._isSyncingNotion
+          ? 'Generating AI summary with Gemini & syncing to Notion...'
+          : this.state
+          ? 'In Meeting'
+          : 'Idle'),
+      lastResult: this.lastResult,
     };
+  }
+
+  async getPageDebugInfo(): Promise<any> {
+    if (!this.state?.page) return { error: 'Bot not active' };
+    try {
+      const debugInfo = await this.state.page.evaluate(() => ({
+        url: window.location.href,
+        title: document.title,
+        viewport: `${window.innerWidth}x${window.innerHeight}`,
+      }));
+      return {
+        ...debugInfo,
+        captionsCollected: this.state.captionLog.length,
+        isRecording: this.state.isRecording,
+      };
+    } catch (e: any) {
+      return { error: e.message };
+    }
   }
 }
 
-export const meetingBot = new MeetingBotService();
+// Singleton pinned to globalThis so Next.js HMR and separate requests share the exact same instance
+const globalForMeetingBot = globalThis as unknown as {
+  __jarvisMeetingBot?: MeetingBotService;
+};
+
+if (!globalForMeetingBot.__jarvisMeetingBot) {
+  globalForMeetingBot.__jarvisMeetingBot = new MeetingBotService();
+} else {
+  // Ensure prototype methods are up-to-date across Next.js HMR reloads
+  Object.setPrototypeOf(globalForMeetingBot.__jarvisMeetingBot, MeetingBotService.prototype);
+}
+
+export const meetingBot = globalForMeetingBot.__jarvisMeetingBot;

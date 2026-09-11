@@ -11,6 +11,40 @@ import { useVolumeControl, useClipboard, useBatteryStatus, useNetworkStatus } fr
 import { addHoverScale, createRipple, animateTyping } from "@/lib/animations/gsap";
 import PersonaSwitcher from "@/components/ui/PersonaSwitcher";
 
+/**
+ * Tier 2A v3 — detect natural-language web missions that should be routed
+ * to Mission Control (hybrid Firecrawl × Playwright engine).
+ * Returns the cleaned goal, or null when this isn't a mission.
+ */
+function matchMissionCommand(text: string): string | null {
+  const t = text.trim().replace(/^(?:hey\s+)?jarvis[,:]?\s*/i, "").trim();
+
+  // 1. Explicit prefix: "mission: find …" / "mission find …"
+  const explicit = t.match(/^mission[:\s]+(.+)/i);
+  if (explicit) return explicit[1].trim();
+
+  // Local-file searches ("find my resume.pdf") are NOT missions.
+  if (/\b(?:find|locate|search\s+for)\s+(?:my|us)\b/i.test(t)) return null;
+
+  // 2. Research + open combo: "find the best free react course and open the best one"
+  if (/\b(?:find|search\s+for|look\s+up|research)\b[\s\S]{3,120}\b(?:and\s+)?open\b/i.test(t)) return t;
+
+  // 3. Docs/tutorial missions: "find the odoo documentation … open both and summarise …"
+  if (
+    /\bfind\b/i.test(t) &&
+    /\b(?:documentation|docs|tutorial)\b/i.test(t) &&
+    /\b(?:open|summar\w+|explain|brief)\b/i.test(t)
+  ) return t;
+
+  // 4. Open-and-summarize combos: "… open both and summarise the important concepts"
+  if (
+    /\bfind\b/i.test(t) &&
+    /\b(?:open|summar\w+)\b[\s\S]{0,80}\b(?:both|all of them|the best one|each)\b/i.test(t)
+  ) return t;
+
+  return null;
+}
+
 interface CommandBarProps {
   onCalculate?: (expression: string, result: string) => void;
   onOpenWhatsapp?: () => void;
@@ -81,6 +115,7 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
   } = useJarvisVoice();
 
   const { setVolume, mute, unmute } = useVolumeControl();
+  const setPendingMissionGoal = useJarvisStore((s) => s.setPendingMissionGoal);
 
   // Derive the "actively listening for commands" state from the Jarvis state machine.
   // This is different from store.isListening which tracks the raw SpeechRecognition engine.
@@ -265,6 +300,19 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
   // Process system control commands (volume, clipboard, battery, network)
   const processSystemCommand = async (text: string): Promise<string | null> => {
     const lower = text.toLowerCase();
+
+    // TIER 2A v3: HYBRID MISSION CONTROL (Firecrawl × Playwright)
+    // Natural-language web missions — "find the best free react course and
+    // open the best one", "find the odoo documentation … open both and
+    // summarise …", or an explicit "mission: …". MUST run before the
+    // generic file/search/music handlers below, which match the same
+    // "find …" prefixes.
+    const missionGoal = matchMissionCommand(text);
+    if (missionGoal) {
+      setPendingMissionGoal(missionGoal);
+      setActivePanel("mission");
+      return "Engaging Mission Control, Boss. I'll research it, open the best pages and summarize what matters — watch the panel.";
+    }
 
     // ─── SPOTIFY DESKTOP AUTOMATION (PyAutoGUI) ──────────────────────────────
     // Handle "open spotify and play X" or "play X on spotify" by calling the

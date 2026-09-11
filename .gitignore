@@ -49,3 +49,11 @@ jarvis/tsconfig.tsbuildinfo
 
 # Certificates
 jarvis/.certificates/
+
+# Logs and scratch
+*.log
+jarvis-server.log
+jarvis/scratch/
+test-*.*
+setup-google-login.js
+inject-google-session.js

@@ -38,6 +38,7 @@ const config: Config = {
         "slide-in-bottom": "slide-in-bottom 0.5s ease-out",
         "fade-in": "fade-in 0.5s ease-out",
         "typewriter": "typewriter 2s steps(40) forwards",
+        "shimmer": "shimmer 1.6s linear infinite",
       },
       keyframes: {
         "spin-reverse": {
@@ -71,6 +72,10 @@ const config: Config = {
         "typewriter": {
           "0%": { width: "0%" },
           "100%": { width: "100%" },
+        },
+        shimmer: {
+          "0%": { transform: "translateX(-100%)" },
+          "100%": { transform: "translateX(300%)" },
         },
       },
     },
