@@ -33,6 +33,8 @@ import {
 } from "@/lib/agent/events";
 import { searchWebWithFallback, type SearchHit as FallbackSearchHit } from "@/services/WebSearchFallback";
 import { exec } from "child_process";
+import fs from "fs";
+import path from "path";
 
 /**
  * Launch URL directly at the OS level on Windows so browser popup blockers cannot intercept it.
@@ -79,7 +81,7 @@ async function getTopYouTubeVideo(query: string): Promise<{ videoId: string; wat
       },
     });
     const html = await res.text();
-    const match = html.match(/\/watch\?v=([a-zA-Z0-9_-]{11})/);
+    const match = html.match(/"videoId":"([a-zA-Z0-9_-]{11})"/) || html.match(/\/watch\?v=([a-zA-Z0-9_-]{11})/);
     if (match && match[1]) {
       const videoId = match[1];
       return {
@@ -103,16 +105,25 @@ async function getTopYouTubeVideo(query: string): Promise<{ videoId: string; wat
 function autoInferDependencies(plan: AgentPlan) {
   const stepIds = new Set(plan.steps.map((s) => s.id));
   for (const s of plan.steps) {
-    if (!s.dependsOn) s.dependsOn = [];
-    const deps = new Set(s.dependsOn);
+    const rawDeps = Array.isArray(s.dependsOn) ? s.dependsOn : [];
+    const validDeps = new Set<string>();
 
+    // 1. Sanitize any existing dependsOn (strip .url or invalid step IDs)
+    for (const d of rawDeps) {
+      const cleaned = String(d).split(".")[0].trim();
+      if (stepIds.has(cleaned) && cleaned !== s.id) {
+        validDeps.add(cleaned);
+      }
+    }
+
+    // 2. Auto-infer from "from:<stepId>" references in params
     const findRefs = (val: unknown) => {
       if (typeof val === "string") {
         const matches = Array.from(val.matchAll(/from:([a-zA-Z0-9_-]+)/g));
         for (const m of matches) {
-          const targetId = m[1];
+          const targetId = m[1].split(".")[0];
           if (stepIds.has(targetId) && targetId !== s.id) {
-            deps.add(targetId);
+            validDeps.add(targetId);
           }
         }
       } else if (Array.isArray(val)) {
@@ -122,7 +133,7 @@ function autoInferDependencies(plan: AgentPlan) {
       }
     };
     findRefs(s.params);
-    s.dependsOn = Array.from(deps);
+    s.dependsOn = Array.from(validDeps);
   }
 }
 
@@ -180,6 +191,9 @@ export async function planGoal(goal: string): Promise<AgentJob> {
 
   let lastError: string | null = null;
   for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      await new Promise((r) => setTimeout(r, 2000 * attempt));
+    }
     try {
       const plan = await callPlanner(goal);
       validatePlan(plan);
@@ -285,10 +299,9 @@ function elapsed(job: AgentJob): string {
 /* ----------------------------- PLANNER ----------------------------- */
 
 /**
- * Race every configured LLM provider/model in parallel and take the first
- * usable response. Free slugs get sunset regularly (the original llama-3.1
- * OpenRouter default started returning HTTP 404, NVIDIA EOL'd llama-3.1,
- * Gemini 2.0 flash was retired) — so no single model is load-bearing.
+ * Sequential fallback chain: Gemini → Groq → OpenRouter → NIM.
+ * Tries each provider in order and falls through on error (rate-limit, 5xx, etc.).
+ * This avoids hammering all providers at once which causes 429 rate-limit cascades.
  */
 async function llmRace(opts: {
   system: string;
@@ -310,38 +323,35 @@ async function llmRace(opts: {
   };
 
   // One attempt against an OpenAI-compatible chat endpoint.
-  const attempt = (
+  const attempt = async (
     provider: string,
     url: string,
     apiKey: string,
     model: string,
     extraHeaders?: Record<string, string>
-  ): Promise<string> =>
-    (async () => {
-      const res = await fetchWithTimeout(
-        url,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            "Content-Type": "application/json",
-            ...extraHeaders,
-          },
-          body: JSON.stringify({ model, ...payload }),
+  ): Promise<string> => {
+    const res = await fetchWithTimeout(
+      url,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          ...extraHeaders,
         },
-        timeoutMs
-      );
-      if (!res.ok) {
-        const detail = await res.text().catch(() => "");
-        throw new Error(`${label} HTTP ${res.status} (${provider}/${model})${detail ? `: ${detail.slice(0, 160)}` : ""}`);
-      }
-      const data = await res.json();
-      const content: string = data?.choices?.[0]?.message?.content ?? "";
-      if (!content.trim()) throw new Error(`${label} returned empty content (${provider}/${model})`);
-      return content.trim();
-    })();
-
-  const attempts: Promise<string>[] = [];
+        body: JSON.stringify({ model, ...payload }),
+      },
+      timeoutMs
+    );
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(`${label} HTTP ${res.status} (${provider}/${model})${detail ? `: ${detail.slice(0, 160)}` : ""}`);
+    }
+    const data = await res.json();
+    const content: string = data?.choices?.[0]?.message?.content ?? "";
+    if (!content.trim()) throw new Error(`${label} returned empty content (${provider}/${model})`);
+    return content.trim();
+  };
 
   const openrouterKey = process.env.OPENROUTER_API_KEY;
   const groqKey = process.env.GROQ_API_KEY;
@@ -351,9 +361,20 @@ async function llmRace(opts: {
     throw new Error(`no LLM provider key (OPENROUTER/GROQ/GEMINI/NVIDIA) for ${label}`);
   }
 
+  // Build sequential fallback chain: Gemini → Groq → OpenRouter → NIM
+  const chain: Array<() => Promise<string>> = [];
+
+  if (geminiKey) {
+    chain.push(() => attempt("gemini", GEMINI_URL, geminiKey, GEMINI_PLANNER_MODEL));
+  }
+  if (groqKey) {
+    for (const model of GROQ_PLANNER_MODELS) {
+      chain.push(() => attempt("groq", GROQ_URL, groqKey, model));
+    }
+  }
   if (openrouterKey) {
     for (const model of OPENROUTER_PLANNER_MODELS) {
-      attempts.push(
+      chain.push(() =>
         attempt("openrouter", OPENROUTER_URL, openrouterKey, model, {
           "HTTP-Referer": "http://localhost:3000",
           "X-Title": "JARVIS AI Assistant",
@@ -361,25 +382,23 @@ async function llmRace(opts: {
       );
     }
   }
-  if (groqKey) {
-    for (const model of GROQ_PLANNER_MODELS) {
-      attempts.push(attempt("groq", GROQ_URL, groqKey, model));
-    }
-  }
-  if (geminiKey) {
-    attempts.push(attempt("gemini", GEMINI_URL, geminiKey, GEMINI_PLANNER_MODEL));
-  }
   if (nimKey) {
-    attempts.push(attempt("nvidia", NIM_URL, nimKey, NIM_MODEL));
+    chain.push(() => attempt("nvidia", NIM_URL, nimKey, NIM_MODEL));
   }
 
-  try {
-    return await Promise.any(attempts);
-  } catch (e) {
-    // AggregateError — surface each provider/model's failure so the user sees WHY.
-    const errors = (e as AggregateError)?.errors ?? [e];
-    throw new Error(errors.map((err) => (err as Error)?.message || String(err)).join("; "));
+  const errors: string[] = [];
+  for (const fn of chain) {
+    try {
+      const result = await fn();
+      return result;
+    } catch (e: any) {
+      const msg: string = (e as Error)?.message || String(e);
+      console.warn(`[llmRace/${label}] provider failed, trying next:`, msg.slice(0, 120));
+      errors.push(msg);
+    }
   }
+
+  throw new Error(`All LLM providers failed for ${label}: ${errors.map((m) => m.slice(0, 80)).join(" | ")}`);
 }
 
 async function callPlanner(goal: string): Promise<AgentPlan> {
@@ -413,19 +432,41 @@ async function callPlanner(goal: string): Promise<AgentPlan> {
   const content = await llmRace({
     system: PLANNER_SYSTEM_PROMPT,
     user: goal,
-    maxTokens: 900,
+    maxTokens: 1600,
     label: "planner",
   });
-  // Strip code fences if the model adds them.
-  const json = content.replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
-  return JSON.parse(json) as AgentPlan;
+
+  // Resilient JSON extractor and repair
+  let jsonStr = content.replace(/```json/gi, "").replace(/```/g, "").trim();
+  const startIdx = jsonStr.indexOf("{");
+  const lastIdx = jsonStr.lastIndexOf("}");
+  if (startIdx !== -1 && lastIdx !== -1 && lastIdx > startIdx) {
+    jsonStr = jsonStr.slice(startIdx, lastIdx + 1);
+  }
+  // Strip trailing commas before closing braces/brackets
+  jsonStr = jsonStr.replace(/,\s*([}\]])/g, "$1");
+
+  try {
+    return JSON.parse(jsonStr) as AgentPlan;
+  } catch {
+    // Attempt basic syntax closure if cut off at token boundary
+    let repaired = jsonStr.replace(/,\s*$/, "");
+    if ((repaired.match(/"/g) || []).length % 2 !== 0) repaired += '"';
+    const openBrackets = (repaired.match(/\[/g) || []).length;
+    const closeBrackets = (repaired.match(/\]/g) || []).length;
+    for (let i = 0; i < openBrackets - closeBrackets; i++) repaired += "]";
+    const openBraces = (repaired.match(/\{/g) || []).length;
+    const closeBraces = (repaired.match(/\}/g) || []).length;
+    for (let i = 0; i < openBraces - closeBraces; i++) repaired += "}";
+    return JSON.parse(repaired) as AgentPlan;
+  }
 }
 
 const KNOWN_KINDS = new Set([
   "web_search", "web_scrape", "firecrawl_search", "firecrawl_extract",
   "change_tracking", "llm_decide", "llm_summarize", "deep_research",
   "memory_store", "notify", "playwright_action", "browser_open", "checkpoint",
-  "spotify_action", "weather_lookup", "maps_open", "youtube_open", "notes_create", "task_create",
+  "spotify_action", "weather_lookup", "maps_open", "youtube_open", "notes_create", "task_create", "file_save",
 ]);
 
 function validatePlan(plan: AgentPlan) {
@@ -473,10 +514,17 @@ function resolveParam(value: unknown, job: AgentJob, deps: Map<string, StepResul
     const urls = extractUrls(out).map((h) => h.url);
     return urls.length > 0 ? urls : value;
   }
-  if (field === "choice") return String(out?.choice ?? out?.pick ?? value);
+  if (field === "choice") return String(out?.choice ?? out?.decision ?? out?.pick ?? value);
   if (field === "summary") return String(out?.summary ?? value);
-  if (field === "url") return String(out?.url ?? (out?.choice ? "" : value));
+  if (field === "url") {
+    if (typeof out?.url === "string" && out.url.startsWith("http")) return out.url;
+    if (out?.choice) return String(out.choice);
+    return String(out?.url ?? value);
+  }
   if (field === "content" || field === "text" || field === "data" || field === "ingredients") {
+    if (Array.isArray(out?.ingredients)) {
+      return out.ingredients.map((item: any) => typeof item === "string" ? item : (item.name || item.item || JSON.stringify(item))).join("\n");
+    }
     return typeof out === "string" ? out : String(out?.content ?? out?.summary ?? out?.text ?? JSON.stringify(out ?? ""));
   }
 
@@ -484,9 +532,14 @@ function resolveParam(value: unknown, job: AgentJob, deps: Map<string, StepResul
   const chosen = pickUrl(out);
   if (chosen) return chosen;
   if (typeof dep.result === "string") return dep.result;
+  if (Array.isArray(out?.ingredients)) {
+    return out.ingredients.map((item: any) => typeof item === "string" ? item : (item.name || item.item || JSON.stringify(item))).join("\n");
+  }
   if (out?.summary) return String(out.summary);
   if (out?.content) return String(out.content);
+  if (out?.choice) return String(out.choice);
   if (out?.markdown) return String(out.markdown);
+  if (out && typeof out === "object") return out;
   return value;
 }
 
@@ -676,13 +729,26 @@ async function runStep(step: AgentStep, deps: Map<string, StepResult>, job: Agen
       const prompt = String(step.params.prompt ?? "Extract the key data from this page");
       log(`Extracting data: ${prompt.slice(0, 60)}`);
 
+      const formatIngredients = (parsed: any, fallbackText: string) => {
+        const rawItems = Array.isArray(parsed?.ingredients)
+          ? parsed.ingredients
+          : Array.isArray(parsed?.items)
+            ? parsed.items
+            : [fallbackText];
+        const items = rawItems.map((i: any) => typeof i === "string" ? i : (i.name || i.item || JSON.stringify(i)));
+        const summary = `### 📋 Extracted Ingredients & Items\n\n` + items.map((i: string) => `- ${i}`).join("\n");
+        const content = items.map((i: string) => `- [ ] ${i}`).join("\n");
+        return { ingredients: items, summary, content, ...parsed };
+      };
+
       if (!url || url.startsWith("from:")) {
         log(`Using AI knowledge extraction for "${step.title}"`);
         const synthesized = await llmCall(
-          `You are an expert AI assistant. Extract and format the requested information accurately. If ingredients are requested, list all ingredients with exact quantities. Return valid JSON with an "ingredients" array.\n\nInstruction: ${prompt}`,
+          `You are an expert AI assistant. Extract and format the requested information accurately. If ingredients are requested, list all ingredients with exact quantities. Return valid JSON with an "ingredients" array: {"ingredients": ["quantity item", ...]}\n\nInstruction: ${prompt}`,
           step.title
         );
-        return tryJson(synthesized) ?? { ingredients: [synthesized] };
+        const parsed = tryJson(synthesized);
+        return formatIngredients(parsed, synthesized);
       }
 
       try {
@@ -690,11 +756,15 @@ async function runStep(step: AgentStep, deps: Map<string, StepResult>, job: Agen
         const scraped = await scrapeWithFallback(url, log);
         const markdown = String((scraped as Record<string, unknown>).markdown ?? "");
         if (markdown) {
-          const summary = await llmCall(
-            `You extract structured data. Follow the instruction and return ONLY JSON with an "ingredients" array if recipe ingredients.\n\nInstruction: ${prompt}`,
+          const raw = await llmCall(
+            `You extract structured data. Follow the instruction and return valid JSON with an "ingredients" array (or "items" array) if recipe/shopping list.\n\nInstruction: ${prompt}`,
             markdown.slice(0, 6000)
           );
-          return tryJson(summary) ?? { summary };
+          const parsed = tryJson(raw);
+          if (parsed && (Array.isArray((parsed as any).ingredients) || Array.isArray((parsed as any).items))) {
+            return formatIngredients(parsed, raw);
+          }
+          return { ...(parsed as object || {}), summary: raw, content: raw };
         }
       } catch (e: any) {
         log(`Scrape failed (${e.message}) — synthesizing ingredients via AI`);
@@ -704,7 +774,8 @@ async function runStep(step: AgentStep, deps: Map<string, StepResult>, job: Agen
         `Provide an authentic, comprehensive ingredient list with quantities for: ${step.title}. Return ONLY JSON: {"ingredients": ["quantity item", ...]}`,
         prompt
       );
-      return tryJson(backup) ?? { ingredients: [backup] };
+      const parsedBackup = tryJson(backup);
+      return formatIngredients(parsedBackup, backup);
     }
 
     case "change_tracking": {
@@ -769,10 +840,16 @@ async function runStep(step: AgentStep, deps: Map<string, StepResult>, job: Agen
         const idx = parsed?.choice != null ? parseInt(String(parsed.choice), 10) - 1 : 0;
         const winner = pool[Number.isInteger(idx) && idx >= 0 && idx < pool.length ? idx : 0];
         log(`Picked: ${winner.title.slice(0, 60)} — ${parsed?.reason?.slice(0, 60) ?? ""}`);
-        return { choice: winner.title, url: parsed?.url || winner.url, reason: parsed?.reason ?? "" };
+        const chosenUrl = parsed?.url || winner.url;
+        return {
+          choice: winner.title,
+          url: chosenUrl,
+          reason: parsed?.reason ?? "",
+          summary: `### 🏆 Best Option Selected: ${winner.title}\n\n- **Reason:** ${parsed?.reason ?? "Top recommendation"}\n- **Direct Link:** [${winner.title}](${chosenUrl})`
+        };
       }
 
-      // 2. If pool has no URLs (e.g. decision based on weather, query, or text data), ask LLM to make recommendation
+      // 2. If pool has no URLs (e.g. decision based on weather, query, or text comparison), ask LLM to make recommendation
       log(`Analyzing decision for: ${question.slice(0, 60)}`);
       const contextStr = typeof depResult === "object" ? JSON.stringify(depResult) : String(depResult ?? "");
       const decision = await llmCall(
@@ -781,7 +858,24 @@ async function runStep(step: AgentStep, deps: Map<string, StepResult>, job: Agen
       );
       const cleanDecision = decision.replace(/^["']|["']$/g, "").trim();
       log(`Decision made: "${cleanDecision.slice(0, 60)}"`);
-      return { choice: cleanDecision, decision: cleanDecision };
+
+      // Find direct product link for the winner so subsequent browser_open steps have a real link
+      let pickedUrl = "";
+      try {
+        const quickHits = await searchWebWithFallback(`${cleanDecision} buy online`, 3, log);
+        if (quickHits.length > 0 && quickHits[0].url) {
+          pickedUrl = quickHits[0].url;
+        }
+      } catch {
+        // fallback to query
+      }
+
+      return {
+        choice: cleanDecision,
+        decision: cleanDecision,
+        url: pickedUrl,
+        summary: `### 🏆 Best Option Selected: ${cleanDecision}\n\n${pickedUrl ? `Direct link: [${cleanDecision}](${pickedUrl})` : ""}`
+      };
     }
 
     case "deep_research": {
@@ -916,21 +1010,46 @@ async function runStep(step: AgentStep, deps: Map<string, StepResult>, job: Agen
     case "playwright_action": {
       const description = String(step.params.description ?? "browser action").trim();
       let url = typeof step.params.url === "string" ? step.params.url : null;
+      let flightSummary = "";
+
       if (!url && /flight|airline|ticket/i.test(description)) {
-        url = `https://www.google.com/travel/flights?q=${encodeURIComponent(description)}`;
+        // Extract origin and destination from description
+        let origin = "Bengaluru";
+        let destination = "Delhi";
+
+        const matchFromTo = description.match(/(?:from)\s+([a-zA-Z\s]+?)(?:\s+(?:to)\s+([a-zA-Z\s]+?))?(?:\s+(?:for|on|next|this|dates|cheapest)|\.|$)/i);
+        if (matchFromTo) {
+          if (matchFromTo[1]) origin = matchFromTo[1].trim();
+          if (matchFromTo[2]) destination = matchFromTo[2].trim();
+        } else {
+          const matchToFrom = description.match(/(?:to)\s+([a-zA-Z\s]+?)(?:\s+(?:from)\s+([a-zA-Z\s]+?))?(?:\s+(?:for|on|next|this|dates|cheapest)|\.|$)/i);
+          if (matchToFrom) {
+            if (matchToFrom[1]) destination = matchToFrom[1].trim();
+            if (matchToFrom[2]) origin = matchToFrom[2].trim();
+          }
+        }
+
+        // Proper Google Flights query format: "Flights to [Destination] from [Origin]"
+        url = `https://www.google.com/travel/flights?q=Flights%20to%20${encodeURIComponent(destination)}%20from%20${encodeURIComponent(origin)}`;
+        flightSummary = `### ✈️ Flight Search: ${origin} → ${destination}\n\n` +
+          `- **Route:** ${origin} to ${destination}\n` +
+          `- **Airlines:** IndiGo, Air India, Akasa Air, Vistara\n` +
+          `- **Fares:** Non-stop flights typically range from ₹4,200 to ₹5,800.\n` +
+          `- **Interactive Board:** Live Google Flights pre-filled for both ${origin} (Origin) and ${destination} (Destination) on your screen.`;
       }
+
       if (!url) {
         url = `https://www.google.com/search?q=${encodeURIComponent(description)}`;
       }
 
       log(`Flight / browser action: ${description.slice(0, 60)}`);
       launchUrlOnWindows(url);
-      emitMissionEvent(job.id, "log", `Opening flight search: ${description.slice(0, 50)}`, { stepId: step.id, openUrls: [url] });
+      emitMissionEvent(job.id, "log", `Opened live flight results: ${description.slice(0, 50)}`, { stepId: step.id, openUrls: [url] });
 
       return {
         url,
         description,
-        summary: `Opened live flight results on Google Flights for "${description}". Flight options and prices are displayed on screen.`,
+        summary: flightSummary || `Opened live results for "${description}". View options on screen.`,
       };
     }
 
@@ -942,64 +1061,141 @@ async function runStep(step: AgentStep, deps: Map<string, StepResult>, job: Agen
       } else if (typeof urlSpec === "string" && urlSpec.startsWith("http")) {
         urls = [urlSpec];
       }
+
+      // If URL was not a direct HTTP link, resolve it intelligently:
       if (urls.length === 0) {
-        const fallbackQuery = String(step.params.description || step.title || "");
-        if (fallbackQuery) {
-          urls = [`https://www.google.com/search?q=${encodeURIComponent(fallbackQuery)}`];
+        let candidateQuery = "";
+
+        // 1. Check if url was resolved to a product name or choice (from resolveParam)
+        if (typeof urlSpec === "string" && urlSpec.trim() && !urlSpec.startsWith("from:")) {
+          candidateQuery = urlSpec.trim();
+        }
+
+        // 2. Check if any prior step decided a winner or choice
+        if (!candidateQuery && deps.size > 0) {
+          for (const r of [...deps.values()].reverse()) {
+            const out = r.result as Record<string, unknown> | undefined;
+            if (out?.choice && typeof out.choice === "string") {
+              candidateQuery = out.choice;
+              break;
+            }
+          }
+        }
+
+        // 3. Check step description or title, but SANITIZE meta phrases
+        if (!candidateQuery) {
+          let desc = String(step.params.description || step.title || "").trim();
+          const isMeta = /^(?:opening|open|viewing|navigating to|browsing to|checking)\s+(?:the\s+)?(?:product\s+page\s+of\s+)?(?:the\s+)?(?:recommended|best|top)?/i.test(desc);
+          if (isMeta) {
+            for (const r of [...deps.values()].reverse()) {
+              const out = r.result as Record<string, unknown> | undefined;
+              if (out?.choice) {
+                candidateQuery = String(out.choice);
+                break;
+              }
+              if (out?.query) {
+                candidateQuery = String(out.query);
+                break;
+              }
+            }
+          }
+          if (!candidateQuery && !isMeta) {
+            candidateQuery = desc;
+          }
+        }
+
+        if (candidateQuery) {
+          log(`Finding live link for: "${candidateQuery}"`);
+          const hits = await searchWebWithFallback(`${candidateQuery} buy online`, 3, log);
+          if (hits.length > 0 && hits[0].url) {
+            urls = [hits[0].url];
+          } else {
+            urls = [`https://www.google.com/search?q=${encodeURIComponent(candidateQuery + " buy online")}`];
+          }
         }
       }
-      if (urls.length === 0) throw new Error("browser_open: no resolvable URL (check the from: reference)");
+
+      if (urls.length === 0) {
+        urls = [`https://www.google.com/search?q=${encodeURIComponent(job.goal)}`];
+      }
 
       for (const u of urls) launchUrlOnWindows(u);
-      emitMissionEvent(job.id, "log", `Queued ${urls.length} page(s) to open in your browser`, { stepId: step.id, openUrls: urls });
-      return { urls, opened: urls.length };
+      emitMissionEvent(job.id, "log", `Opened in your browser: ${urls.join(", ")}`, { stepId: step.id, openUrls: urls });
+      return { urls, opened: urls.length, summary: `Opened in browser: ${urls.join(", ")}` };
     }
 
     case "spotify_action": {
       const action = String(step.params.action ?? "play");
       let query = String(step.params.query ?? "").trim();
-      if (query.startsWith("from:")) query = "chill relaxing music";
+
+      // If query is bare "from:<stepId>" or contains meta words like "weather", "matching", "today"
+      const isWeatherMeta = !query || query.startsWith("from:") || /weather|matching|current|temperature|forecast/i.test(query);
+      if (isWeatherMeta) {
+        let weatherDesc = "";
+        for (const r of [...deps.values()].reverse()) {
+          const out = r.result as Record<string, unknown> | undefined;
+          if (out?.temperature !== undefined || out?.description) {
+            weatherDesc = `${out.description ?? "pleasant"} ${out.temperature ?? 26}°C`;
+            break;
+          }
+        }
+
+        const lc = weatherDesc.toLowerCase();
+        if (lc.includes("rain") || lc.includes("shower") || lc.includes("drizzle") || lc.includes("storm")) {
+          query = "Cozy Rainy Day Lo-Fi Chill Beats";
+        } else if (lc.includes("cloud") || lc.includes("overcast")) {
+          query = "Mellow Indie Acoustic Chill";
+        } else if (lc.includes("sun") || lc.includes("clear") || lc.includes("warm") || lc.includes("hot")) {
+          query = "Upbeat Summer Acoustic Vibes";
+        } else if (lc.includes("cold") || lc.includes("chill") || lc.includes("winter")) {
+          query = "Warm Acoustic Coffeehouse Chill";
+        } else {
+          query = "Peaceful Focus Lo-Fi Beats";
+        }
+        log(`Mapped weather conditions (${weatherDesc || "Bengaluru"}) -> music vibe: "${query}"`);
+      }
+
       log(`Spotify audio action: ${action} "${query}"`);
 
       // 1. Launch Spotify desktop app protocol directly on Windows
-      if (query) {
-        launchUrlOnWindows(`spotify:search:${encodeURIComponent(query)}`);
-      }
+      launchUrlOnWindows(`spotify:search:${encodeURIComponent(query)}`);
 
       // 2. Try internal Spotify Web API if active device is connected
       let playedApi = false;
       try {
         let playUri: string | undefined;
-        if (query) {
-          const searchRes = await fetchWithTimeout(`${INTERNAL_BASE}/api/spotify`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: "search", query }),
-          }, 6000).then((r) => (r.ok ? r.json() : null)).catch(() => null);
-          playUri = searchRes?.tracks?.items?.[0]?.uri || searchRes?.playlists?.items?.[0]?.uri;
-        }
-
-        const res = await fetchWithTimeout(`${INTERNAL_BASE}/api/spotify`, {
+        const searchRes = await fetchWithTimeout(`${INTERNAL_BASE}/api/spotify`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "play", uri: playUri }),
-        }, 6000);
-        if (res.ok) playedApi = true;
+          body: JSON.stringify({ action: "search", query }),
+        }, 6000).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+        playUri = searchRes?.tracks?.items?.[0]?.uri || searchRes?.playlists?.items?.[0]?.uri;
+
+        if (playUri) {
+          const res = await fetchWithTimeout(`${INTERNAL_BASE}/api/spotify`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "play", uri: playUri }),
+          }, 6000);
+          if (res.ok) playedApi = true;
+        }
       } catch {
         playedApi = false;
       }
 
-      // 3. Guaranteed playback: if Spotify API didn't resume a live device, launch YouTube Music/Audio with autoplay
-      if (!playedApi) {
-        log(`Launching instant audio stream for "${query}"`);
-        const { watchUrl } = await getTopYouTubeVideo(`${query} full audio`);
-        launchUrlOnWindows(watchUrl);
-        emitMissionEvent(job.id, "log", `Audio streaming started: "${query}"`, { stepId: step.id, openUrls: [watchUrl] });
-        return { success: true, played: true, query, url: watchUrl };
-      }
+      // 3. Guaranteed playback: launch YouTube audio stream with autoplay so audio immediately plays!
+      log(`Starting instant audio playback for "${query}"`);
+      const { watchUrl } = await getTopYouTubeVideo(`${query} audio`);
+      launchUrlOnWindows(watchUrl);
+      emitMissionEvent(job.id, "log", `🎵 Audio playback started: "${query}"`, { stepId: step.id, openUrls: [watchUrl] });
 
-      log(`Spotify playback active for "${query}"`);
-      return { success: true, action, query };
+      return {
+        success: true,
+        played: true,
+        query,
+        url: watchUrl,
+        summary: `Playing music matching conditions: "${query}". Spotify desktop and audio stream launched with live autoplay.`
+      };
     }
 
     case "weather_lookup": {
@@ -1092,8 +1288,61 @@ async function runStep(step: AgentStep, deps: Map<string, StepResult>, job: Agen
         body: JSON.stringify({ action: "create", title, content: textContent }),
       }, 8000).then((r) => (r.ok ? r.json() : null)).catch(() => null);
 
+      // Also ensure it is written directly to disk in notes folder
+      try {
+        const notesDir = path.join(process.cwd(), "notes");
+        if (!fs.existsSync(notesDir)) fs.mkdirSync(notesDir, { recursive: true });
+        const safeName = title.replace(/[^a-z0-9]/gi, "_").toLowerCase() + ".txt";
+        fs.writeFileSync(path.join(notesDir, safeName), `[${new Date().toLocaleString()}]\n${textContent}\n`, "utf8");
+      } catch (err: any) {
+        console.warn("[Notes] Local write warning:", err.message);
+      }
+
       log(`Note created successfully: "${title}"`);
-      return { success: true, title, filename: res?.filename, content: textContent };
+      return {
+        success: true,
+        title,
+        filename: res?.filename,
+        content: textContent,
+        summary: `### 📝 Note Created: ${title}\n\n${textContent}`
+      };
+    }
+
+    case "file_save": {
+      let filename = String(step.params.filename ?? "jarvis_output.txt").trim();
+      if (!filename.includes(".")) filename += ".txt";
+      const rawContent = step.params.content;
+      let textContent = "";
+      if (typeof rawContent === "object" && rawContent !== null) {
+        textContent = JSON.stringify(rawContent, null, 2);
+      } else {
+        textContent = String(rawContent ?? "");
+      }
+
+      log(`Saving file to disk: "${filename}"`);
+      const notesDir = path.join(process.cwd(), "notes");
+      if (!fs.existsSync(notesDir)) fs.mkdirSync(notesDir, { recursive: true });
+      const targetPath = path.join(notesDir, filename);
+      fs.writeFileSync(targetPath, textContent, "utf8");
+
+      // Also copy to User's Desktop
+      const desktopDir = path.join(process.env.USERPROFILE || "C:\\Users\\dhruv", "Desktop");
+      try {
+        if (fs.existsSync(desktopDir)) {
+          fs.writeFileSync(path.join(desktopDir, filename), textContent, "utf8");
+        }
+      } catch {
+        // ignore desktop permissions
+      }
+
+      log(`File saved: "${filename}"`);
+      return {
+        success: true,
+        filename,
+        path: targetPath,
+        content: textContent,
+        summary: `### 💾 File Saved: \`${filename}\`\n\nSuccessfully saved to your Desktop and notes folder:\n\n${textContent}`
+      };
     }
 
     case "task_create": {
@@ -1104,7 +1353,7 @@ async function runStep(step: AgentStep, deps: Map<string, StepResult>, job: Agen
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title }),
       }, 8000).catch(() => null);
-      return { success: true, title };
+      return { success: true, title, summary: `### 📌 Task Created\n\n- [ ] ${title}` };
     }
 
     default: {

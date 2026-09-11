@@ -98,6 +98,7 @@ const KIND_ICON: Record<string, React.ReactNode> = {
   youtube_open: <Video className="w-3 h-3" />,
   notes_create: <FileText className="w-3 h-3" />,
   task_create: <CheckSquare className="w-3 h-3" />,
+  file_save: <Save className="w-3 h-3" />,
 };
 
 interface LiveFeedItem {
@@ -385,16 +386,24 @@ export default function MissionControlPanel({ isOpen, onClose }: MissionControlP
     if (el) el.scrollTop = el.scrollHeight;
   }, [feed]);
 
-  // Latest llm_summarize / notify output — the "report" block.
+  // All step findings / summaries — the "Mission findings" report block.
   const summaryResult = useMemo(() => {
     if (!job) return null;
-    for (const r of [...job.results].reverse()) {
+    const blocks: string[] = [];
+    for (const r of job.results) {
       if (r.status !== "ok") continue;
       const out = r.result as Record<string, unknown> | undefined;
       const s = out?.summary;
-      if (typeof s === "string" && s.trim()) return { stepId: r.stepId, summary: s };
+      if (typeof s === "string" && s.trim()) {
+        blocks.push(s.trim());
+      } else if (out?.content && typeof out.content === "string" && out.content.trim()) {
+        blocks.push(out.content.trim());
+      } else if (Array.isArray(out?.ingredients)) {
+        blocks.push(`### 📋 Ingredients\n\n` + out.ingredients.map((i: any) => `- ${typeof i === "string" ? i : JSON.stringify(i)}`).join("\n"));
+      }
     }
-    return null;
+    if (blocks.length === 0) return null;
+    return { stepId: "all", summary: blocks.join("\n\n---\n\n") };
   }, [job]);
 
   return (
