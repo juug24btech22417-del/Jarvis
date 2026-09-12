@@ -278,10 +278,60 @@ Write-Output "muted"
       description = `Opening folder: ${url}`;
     }
 
-    // 6. Kill a process by name
+    // 6. Kill a process by name with alias support
     else if (command === "kill_app" && app) {
-      shellCmd = `taskkill /IM "${app}.exe" /F`;
-      description = `Killing process: ${app}`;
+      const clean = app.trim().toLowerCase().replace(/\.exe$/i, "");
+      const ALIASES: Record<string, string> = {
+        zoom: "Zoom",
+        chrome: "chrome",
+        googlechrome: "chrome",
+        code: "Code",
+        vscode: "Code",
+        node: "node",
+        spotify: "Spotify",
+        teams: "ms-teams",
+        discord: "Discord",
+        notion: "Notion",
+        firefox: "firefox",
+        edge: "msedge",
+      };
+      const exeName = (ALIASES[clean] || clean) + ".exe";
+      shellCmd = `taskkill /IM "${exeName}" /F`;
+      description = `Terminating process: ${exeName}`;
+    }
+
+    // 6b. PC Telemetry / Status (CPU, RAM, Battery, Foreground window)
+    else if (command === "pc_status" || command === "telemetry") {
+      const script = [
+        "$cpu = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average",
+        "$os = Get-CimInstance Win32_OperatingSystem",
+        "$totalMem = [math]::Round($os.TotalVisibleMemorySize / 1024, 0)",
+        "$freeMem = [math]::Round($os.FreePhysicalMemory / 1024, 0)",
+        "$usedMem = $totalMem - $freeMem",
+        "$memPercent = [math]::Round(($usedMem / $totalMem) * 100, 1)",
+        "$batt = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue",
+        "$battPercent = if ($batt) { [int]$batt.EstimatedChargeRemaining } else { -1 }",
+        "$battCharging = if ($batt) { [bool]($batt.BatteryStatus -eq 2) } else { $false }",
+        "$procs = Get-Process | Sort-Object CPU -Descending | Select-Object -First 3 ProcessName",
+        "$data = @{",
+        "  cpuPercent = [int]$cpu",
+        "  totalMemMb = [int]$totalMem",
+        "  usedMemMb = [int]$usedMem",
+        "  memPercent = $memPercent",
+        "  batteryPercent = $battPercent",
+        "  isCharging = $battCharging",
+        "  topProcesses = ($procs.ProcessName -join ', ')",
+        "}",
+        "$data | ConvertTo-Json -Compress",
+      ].join("\r\n");
+
+      tempScriptPath = path.join(
+        os.tmpdir(),
+        `jarvis_status_${Date.now()}_${Math.random().toString(36).slice(2)}.ps1`
+      );
+      await fs.writeFile(tempScriptPath, script, "utf8");
+      shellCmd = `powershell -NonInteractive -ExecutionPolicy Bypass -File "${tempScriptPath}"`;
+      description = "PC telemetry status collected";
     }
 
     // 7. Wake screen — mouse-move + power request. The mouse-jiggle

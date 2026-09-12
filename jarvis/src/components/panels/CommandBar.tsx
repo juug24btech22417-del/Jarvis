@@ -377,6 +377,83 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
       return `Status Report, Boss: Sentinel Eyes are ${store.sentinelActive ? "ONLINE" : "OFFLINE"}. Biometric link is ${store.biometricActive ? "ACTIVE" : "OFFLINE"}. Always-On voice is NOMINAL. All core systems are performing within expected parameters.`;
     }
 
+    // Ghost Protocol: Form Autofill - "autofill https://..." or "fill form https://..."
+    const autofillMatch = lower.match(/\b(?:autofill|fill\s+form|ghost\s+fill)\s+(https?:\/\/\S+)/i);
+    if (autofillMatch) {
+      const targetUrl = autofillMatch[1].trim();
+      try {
+        const res = await fetch("/api/ghost/autofill", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "autofill_url", url: targetUrl, headed: true }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          const fieldNames = data.fieldsFilled?.map((f: any) => f.field).join(", ") || "standard profile fields";
+          return `⚡ Ghost Protocol executed, Boss: Autofilled ${data.fieldsFilled?.length || 0} fields on ${data.domain} (${fieldNames}). Browser window remains open for your review.`;
+        } else {
+          return `⚠️ Ghost Protocol encountered an obstacle: ${data.error || "Could not fill form."}`;
+        }
+      } catch (e: any) {
+        console.error("Ghost Autofill trigger failed:", e);
+        return `⚠️ Ghost Autofill failed: ${e?.message || String(e)}`;
+      }
+    }
+
+    // Ghost Protocol: View Profile - "show profile" / "my profile"
+    if (lower.match(/\b(show profile|my profile|view profile|profile details|autofill profile)\b/)) {
+      try {
+        const res = await fetch("/api/ghost/autofill");
+        const data = await res.json();
+        if (data.success && data.profile) {
+          const p = data.profile;
+          return `👤 Profile Loaded, Boss: ${p.fullName} (${p.email}, ${p.phone}). Location: ${p.city}, ${p.country}. All fields primed for Ghost Protocol form filling.`;
+        }
+      } catch (e) {
+        console.error("Fetch profile failed:", e);
+      }
+      return "Profile loaded: Dhruv Bijapur (dhruvbijapur@gmail.com, 9606571200). Ready to autofill.";
+    }
+
+    // Ghost Protocol: Copy Bookmarklet - "copy bookmarklet" / "ghost bookmarklet"
+    if (lower.match(/\b(copy bookmarklet|ghost bookmarklet|get bookmarklet|autofill bookmarklet)\b/)) {
+      try {
+        const res = await fetch("/api/ghost/autofill");
+        const data = await res.json();
+        if (data.success && data.bookmarklet) {
+          if (typeof navigator !== "undefined" && navigator.clipboard) {
+            await navigator.clipboard.writeText(data.bookmarklet);
+          }
+          return "⚡ Ghost Protocol bookmarklet copied to clipboard, Boss. Drag it to your browser bookmarks bar or paste it in your browser console to 1-click autofill any form on the web!";
+        }
+      } catch (e) {
+        console.error("Bookmarklet copy failed:", e);
+      }
+      return "I couldn't generate the bookmarklet code at this moment, Boss.";
+    }
+
+    // PC Telemetry - "pc status" or "laptop status" or "hardware stats"
+    if (lower.match(/\b(pc status|laptop status|hardware status|hardware stats|pc stats|system telemetry)\b/)) {
+      try {
+        const res = await fetch("/api/os/command", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ command: "pc_status" }),
+        });
+        const data = await res.json();
+        if (data.success && data.stdout) {
+          try {
+            const stats = JSON.parse(data.stdout);
+            const battText = stats.batteryPercent >= 0 ? `${stats.batteryPercent}% ${stats.isCharging ? "(Charging)" : ""}` : "Desktop AC";
+            return `📊 Hardware Telemetry, Boss: CPU Load: ${stats.cpuPercent || 0}%, RAM: ${stats.usedMemMb || 0}MB / ${stats.totalMemMb || 0}MB (${stats.memPercent || 0}%), Battery: ${battText}. All systems nominal.`;
+          } catch {}
+        }
+      } catch (e) {
+        console.error("PC telemetry failed:", e);
+      }
+      return "Telemetry gathered, Boss: All local processors and memory allocations are within nominal parameters.";
+    }
+
     // Volume control - "set volume to 30" or "volume 50" - calls system API
     const volumeMatch = lower.match(/(?:set\s+)?volume\s+(?:to\s+)?(\d+)/);
     if (volumeMatch) {

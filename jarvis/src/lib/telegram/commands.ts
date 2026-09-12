@@ -217,6 +217,41 @@ async function routeSlash(chatId: number, text: string): Promise<ReplyPlan> {
       return { kind: "research", payload: { query: args } };
     }
 
+    case "status":
+    case "pc":
+    case "stats":
+    case "telemetry":
+      return { kind: "execute_os", payload: { command: "pc_status", params: {} } };
+
+    case "fill":
+    case "autofill": {
+      if (!args) {
+        return {
+          kind: "reply",
+          text: "Usage: /fill <url>\n\nExample: /fill https://example.com/register\n\nJARVIS will open the form on your laptop, fill it with your profile, and send you the verification photo.",
+        };
+      }
+      return { kind: "execute_os", payload: { command: "autofill", params: { url: args } } };
+    }
+
+    case "profile": {
+      const { getUserProfile } = await import("@/lib/profile/userProfile");
+      const p = await getUserProfile();
+      return {
+        kind: "reply",
+        text:
+          `👤 <b>JARVIS Profile (Ghost Protocol)</b>\n\n` +
+          `• <b>Name:</b> ${p.fullName}\n` +
+          `• <b>Email:</b> ${p.email}\n` +
+          `• <b>Phone:</b> ${p.countryCode} ${p.phone}\n` +
+          `• <b>Location:</b> ${p.city}, ${p.state}, ${p.country}\n` +
+          `• <b>Address:</b> ${p.address1}\n` +
+          `• <b>ZIP:</b> ${p.postalCode}\n` +
+          `• <b>Company:</b> ${p.company || "N/A"}`,
+        opts: { parseMode: "HTML" },
+      };
+    }
+
     case "lock":
     case "sleep":
     case "screenshot":
@@ -544,13 +579,15 @@ const HELP_TEXT =
   `/remind in 5 min <text> — set a reminder\n` +
   `/reminders — list pending\n` +
   `/cancel <id> — cancel a reminder\n\n` +
-  `*Laptop control*\n` +
-  `/status · /lock · /sleep · /screenshot\n` +
+  `*Laptop control & Ghost Protocol*\n` +
+  `/status — live laptop telemetry (CPU, RAM, Battery, Window)\n` +
+  `/fill <url> — Ghost Protocol: remote form autofill + photo verification\n` +
+  `/profile — view current autofill profile\n` +
+  `/lock · /sleep · /screenshot · /wake\n` +
   `/shutdown · /restart · /cancel_shutdown\n` +
   `/vol <0-100|up|down|mute> — or say "increase volume"\n` +
   `/brightness <0-100|up|down> — or say "dim the screen"\n` +
-  `/open <app|url> · /kill <app> · /search <q>\n` +
-  `/wake — wake screen + chime\n\n` +
+  `/open <app|url> · /kill <app> · /search <q>\n\n` +
   `*Tasks*\n` +
   `/tasks — list pending\n` +
   `/task <title> — add a task\n` +

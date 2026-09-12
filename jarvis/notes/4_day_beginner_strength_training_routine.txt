@@ -1,0 +1,23 @@
+[11/9/2026, 4:20:59 pm]
+```json
+{
+  "days": [
+    {
+      "day": "Day 1 - Upper",
+      "exercises": []
+    },
+    {
+      "day": "Day 2 - Lower",
+      "exercises": []
+    },
+    {
+      "day": "Day 3 - Upper",
+      "exercises": []
+    },
+    {
+      "day": "Day 4 - Lower",
+      "exercises": []
+    }
+  ]
+}
+```

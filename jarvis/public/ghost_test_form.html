@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JARVIS Ghost Protocol Test - Google Forms Simulation</title>
+  
+  <!-- React CDN (to simulate React-controlled inputs like Google Forms) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  
+  <style>
+    :root {
+      --gf-bg: #f0ebfb;
+      --gf-card: #ffffff;
+      --gf-purple: #673ab7;
+      --gf-purple-light: #ede7f6;
+      --gf-input-border: #80868b;
+      --gf-input-focus: #673ab7;
+      --gf-text: #202124;
+      --gf-label: #5f6368;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: "Google Sans", Roboto, Arial, sans-serif;
+      background: var(--gf-bg);
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .form-container {
+      max-width: 640px;
+      margin: 0 auto;
+    }
+
+    .form-header {
+      background: var(--gf-card);
+      border-radius: 8px;
+      border-top: 10px solid var(--gf-purple);
+      padding: 24px;
+      margin-bottom: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+
+    .form-header h1 {
+      font-size: 26px;
+      font-weight: 400;
+      color: var(--gf-text);
+      margin-bottom: 8px;
+    }
+
+    .form-header p {
+      color: var(--gf-label);
+      font-size: 14px;
+    }
+
+    .form-card {
+      background: var(--gf-card);
+      border-radius: 8px;
+      padding: 24px;
+      margin-bottom: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+
+    /* Google Forms Question Style */
+    .freebirdFormviewerComponentsQuestionBaseRoot {
+      margin-bottom: 8px;
+    }
+
+    .freebirdFormviewerComponentsQuestionBaseTitle {
+      font-size: 15px;
+      font-weight: 400;
+      color: var(--gf-text);
+      margin-bottom: 16px;
+    }
+
+    .freebirdFormviewerComponentsQuestionBaseTitle .required {
+      color: #d32f2f;
+      margin-left: 4px;
+    }
+
+    /* Input wrapper */
+    .input-wrapper {
+      position: relative;
+      margin-bottom: 4px;
+    }
+
+    .gf-input {
+      width: 100%;
+      border: none;
+      border-bottom: 1px solid var(--gf-input-border);
+      padding: 8px 0 6px;
+      font-size: 16px;
+      color: var(--gf-text);
+      background: transparent;
+      outline: none;
+      transition: border-color 0.2s;
+      font-family: inherit;
+    }
+
+    .gf-input:focus {
+      border-bottom: 2px solid var(--gf-input-focus);
+    }
+
+    .submit-btn {
+      background: var(--gf-purple);
+      color: white;
+      border: none;
+      padding: 10px 24px;
+      border-radius: 4px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      margin-top: 16px;
+      transition: background 0.2s, box-shadow 0.2s;
+    }
+
+    .submit-btn:hover {
+      background: #5e35b1;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    }
+
+    /* Success state */
+    .success-message {
+      display: none;
+      text-align: center;
+      padding: 40px;
+      background: white;
+      border-radius: 8px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+
+    .success-message.visible {
+      display: block;
+    }
+
+    .success-icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+
+    /* JARVIS Ghost Protocol result panel */
+    .ghost-result {
+      display: none;
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      z-index: 999999;
+      background: #0a0e17;
+      border: 1px solid #00f3ff;
+      border-radius: 10px;
+      padding: 16px 20px;
+      box-shadow: 0 0 30px rgba(0, 243, 255, 0.4);
+      font-family: 'Courier New', monospace;
+      font-size: 13px;
+      color: #00f3ff;
+      max-width: 320px;
+    }
+
+    .ghost-result.visible {
+      display: block;
+    }
+
+    .ghost-result-title {
+      font-weight: bold;
+      font-size: 14px;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .ghost-result-item {
+      display: flex;
+      justify-content: space-between;
+      padding: 3px 0;
+      border-bottom: 1px solid rgba(0, 243, 255, 0.15);
+      font-size: 12px;
+    }
+
+    .ghost-result-item:last-child {
+      border-bottom: none;
+    }
+
+    .ghost-result-field {
+      color: rgba(0, 243, 255, 0.7);
+    }
+
+    .ghost-result-value {
+      color: #a8ffef;
+      max-width: 150px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* Test Buttons */
+    .test-controls {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+    }
+
+    .test-btn {
+      padding: 10px 20px;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      border: 1px solid;
+      transition: all 0.2s;
+    }
+
+    .test-btn-ghost {
+      background: #0a0e17;
+      color: #00f3ff;
+      border-color: #00f3ff;
+    }
+
+    .test-btn-ghost:hover {
+      background: rgba(0, 243, 255, 0.1);
+      box-shadow: 0 0 12px rgba(0, 243, 255, 0.3);
+    }
+
+    .test-btn-clear {
+      background: white;
+      color: #5f6368;
+      border-color: #dadce0;
+    }
+
+    .test-btn-clear:hover {
+      background: #f8f9fa;
+    }
+
+    .info-banner {
+      background: linear-gradient(135deg, #0a0e17, #1a1f35);
+      border: 1px solid #00f3ff;
+      border-radius: 8px;
+      padding: 16px 20px;
+      margin-bottom: 20px;
+      color: #00f3ff;
+      font-size: 13px;
+    }
+
+    .info-banner h3 {
+      font-size: 15px;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .info-banner p {
+      opacity: 0.8;
+      line-height: 1.5;
+    }
+
+    .filled-highlight {
+      outline: 2px solid #00f3ff !important;
+      box-shadow: 0 0 8px rgba(0, 243, 255, 0.4) !important;
+      background-color: rgba(0, 243, 255, 0.05) !important;
+      transition: all 0.3s ease;
+    }
+  </style>
+</head>
+<body>
+
+<!-- JARVIS Info Banner -->
+<div class="form-container">
+  <div class="info-banner">
+    <h3>⚡ JARVIS Ghost Protocol — Google Forms Simulation Test</h3>
+    <p>This page mirrors Google Forms' exact DOM structure including <code>aria-labelledby</code>, <code>data-params</code>, and React-controlled inputs. Click "🤖 Ghost Autofill" to trigger JARVIS autofill, or use the bookmarklet from the JARVIS dashboard.</p>
+  </div>
+
+  <div class="test-controls">
+    <button class="test-btn test-btn-ghost" onclick="triggerGhostAutofill()">
+      ⚡ Ghost Autofill (JARVIS API)
+    </button>
+    <button class="test-btn test-btn-clear" onclick="clearForm()">
+      ✕ Clear Form
+    </button>
+  </div>
+
+  <!-- Form Header (Google Forms style) -->
+  <div class="form-header">
+    <h1>Registration Form</h1>
+    <p>This form simulates a real Google Form with identical DOM structure. JARVIS Ghost Protocol supports this format.</p>
+    <br>
+    <p style="color:#d32f2f; font-size:13px;">* Required</p>
+  </div>
+
+  <!-- Question 1: Full Name (Google Forms exact DOM) -->
+  <div class="form-card">
+    <div class="freebirdFormviewerComponentsQuestionBaseRoot" data-params="%.@.['full_name','1234567890',null,0,[[1234567890,null,0]],0,1,null,null,null,null,null,null,null,null,null,null,null,null,[]]" jsmodel="CP1oW">
+      <div class="freebirdFormviewerComponentsQuestionBaseHeader">
+        <div id="i1" class="freebirdFormviewerComponentsQuestionBaseTitle" role="heading" aria-level="3">
+          Full Name <span class="required" aria-label="Required">*</span>
+        </div>
+      </div>
+      <div class="freebirdFormviewerComponentsQuestionTextRoot">
+        <div class="input-wrapper">
+          <input 
+            class="gf-input"
+            type="text" 
+            aria-labelledby="i1"
+            aria-required="true"
+            id="name-input"
+            jsname="YPqjbf"
+            placeholder=""
+          >
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Question 2: Email -->
+  <div class="form-card">
+    <div class="freebirdFormviewerComponentsQuestionBaseRoot" data-params="%.@.['email','9876543210']">
+      <div class="freebirdFormviewerComponentsQuestionBaseHeader">
+        <div id="i2" class="freebirdFormviewerComponentsQuestionBaseTitle" role="heading" aria-level="3">
+          Email Address <span class="required" aria-label="Required">*</span>
+        </div>
+      </div>
+      <div class="input-wrapper">
+        <input 
+          class="gf-input"
+          type="email" 
+          aria-labelledby="i2"
+          aria-required="true"
+          id="email-input"
+          jsname="YPqjbf"
+          placeholder=""
+        >
+      </div>
+    </div>
+  </div>
+
+  <!-- Question 3: Phone -->
+  <div class="form-card">
+    <div class="freebirdFormviewerComponentsQuestionBaseRoot" data-params="%.@.['phone','1111111111']">
+      <div class="freebirdFormviewerComponentsQuestionBaseHeader">
+        <div id="i3" class="freebirdFormviewerComponentsQuestionBaseTitle" role="heading" aria-level="3">
+          Phone / Mobile Number
+        </div>
+      </div>
+      <div class="input-wrapper">
+        <input 
+          class="gf-input"
+          type="tel" 
+          aria-labelledby="i3"
+          id="phone-input"
+          jsname="YPqjbf"
+          placeholder=""
+        >
+      </div>
+    </div>
+  </div>
+
+  <!-- Question 4: City -->
+  <div class="form-card">
+    <div class="freebirdFormviewerComponentsQuestionBaseRoot" data-params="%.@.['city','2222222222']">
+      <div class="freebirdFormviewerComponentsQuestionBaseHeader">
+        <div id="i4" class="freebirdFormviewerComponentsQuestionBaseTitle" role="heading" aria-level="3">
+          City
+        </div>
+      </div>
+      <div class="input-wrapper">
+        <input 
+          class="gf-input"
+          type="text" 
+          aria-labelledby="i4"
+          id="city-input"
+          jsname="YPqjbf"
+          placeholder=""
+        >
+      </div>
+    </div>
+  </div>
+
+  <!-- Question 5: State -->
+  <div class="form-card">
+    <div class="freebirdFormviewerComponentsQuestionBaseRoot" data-params="%.@.['state','3333333333']">
+      <div class="freebirdFormviewerComponentsQuestionBaseHeader">
+        <div id="i5" class="freebirdFormviewerComponentsQuestionBaseTitle" role="heading" aria-level="3">
+          State / Province
+        </div>
+      </div>
+      <div class="input-wrapper">
+        <input 
+          class="gf-input"
+          type="text" 
+          aria-labelledby="i5"
+          id="state-input"
+          jsname="YPqjbf"
+          placeholder=""
+        >
+      </div>
+    </div>
+  </div>
+
+  <!-- Question 6: Address -->
+  <div class="form-card">
+    <div class="freebirdFormviewerComponentsQuestionBaseRoot" data-params="%.@.['address','4444444444']">
+      <div class="freebirdFormviewerComponentsQuestionBaseHeader">
+        <div id="i6" class="freebirdFormviewerComponentsQuestionBaseTitle" role="heading" aria-level="3">
+          Address
+        </div>
+      </div>
+      <div class="input-wrapper">
+        <textarea 
+          class="gf-input"
+          aria-labelledby="i6"
+          id="address-input"
+          jsname="YPqjbf"
+          rows="3"
+          style="resize:none; border: 1px solid #80868b; border-radius: 4px; padding: 8px;"
+        ></textarea>
+      </div>
+    </div>
+  </div>
+
+  <!-- Submit -->
+  <div class="form-card" style="display:flex; justify-content: space-between; align-items: center;">
+    <button class="submit-btn" onclick="submitForm()">Submit</button>
+    <span style="color:#5f6368; font-size:12px;">Never submit passwords through Google Forms.</span>
+  </div>
+
+  <!-- Success Message -->
+  <div class="success-message" id="success-msg">
+    <div class="success-icon">✅</div>
+    <h2 style="font-size:24px; font-weight:400; margin-bottom:8px;">Your response has been recorded.</h2>
+    <p style="color:#5f6368;">Thank you for submitting the form.</p>
+  </div>
+</div>
+
+<!-- Ghost Protocol Result Panel -->
+<div class="ghost-result" id="ghost-result-panel">
+  <div class="ghost-result-title">
+    ⚡ Ghost Protocol Active
+  </div>
+  <div id="ghost-result-list"></div>
+</div>
+
+<script>
+  // ============================================================
+  // JARVIS Ghost Protocol - Client-side autofill
+  // (same logic as the bookmarklet + server-side service)
+  // ============================================================
+  
+  const profile = {
+    fullName: 'Dhruv Bijapur',
+    firstName: 'Dhruv',
+    lastName: 'Bijapur',
+    email: 'dhruvbijapur@gmail.com',
+    phone: '9606571200',
+    address: 'Indiranagar, 100 Feet Road',
+    city: 'Bengaluru',
+    state: 'Karnataka',
+    zip: '560038',
+    country: 'India',
+    company: 'Personal Projects',
+  };
+
+  // Native value setter (React/Angular compatible)
+  const nIS = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+  const nTS = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+
+  function setNativeValue(el, val) {
+    const setter = el.tagName === 'TEXTAREA' ? nTS : nIS;
+    if (setter) setter.call(el, val);
+    else el.value = val;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+    el.dispatchEvent(new Event('blur', { bubbles: true }));
+  }
+
+  function resolveLabel(el) {
+    const lb = el.getAttribute('aria-labelledby');
+    if (lb) {
+      return lb.split(/\s+/).map(id => {
+        const e = document.getElementById(id);
+        return e ? e.textContent : '';
+      }).join(' ').toLowerCase();
+    }
+    const fl = el.id ? document.querySelector(`label[for="${el.id}"]`) : null;
+    if (fl) return (fl.textContent || '').toLowerCase();
+    const pl = el.closest('label');
+    if (pl) return (pl.textContent || '').toLowerCase();
+    const c = el.closest('[data-params],[jsmodel],.freebirdFormviewerComponentsQuestionBaseRoot');
+    if (c) {
+      const t = c.querySelector('.freebirdFormviewerComponentsQuestionBaseTitle,[role="heading"]');
+      if (t) return (t.textContent || '').toLowerCase();
+    }
+    return '';
+  }
+
+  function triggerGhostAutofill() {
+    const results = [];
+    const inputs = document.querySelectorAll('input:not([type="hidden"]):not([type="submit"]), textarea, select');
+    
+    inputs.forEach(el => {
+      const type = (el.getAttribute('type') || '').toLowerCase();
+      if (['radio', 'checkbox', 'file', 'image', 'reset', 'button', 'submit'].includes(type)) return;
+      
+      const name = (el.name || '').toLowerCase();
+      const id = (el.id || '').toLowerCase();
+      const ph = (el.placeholder || '').toLowerCase();
+      const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+      const lbl = resolveLabel(el);
+      const blob = [name, id, ph, aria, lbl].join(' ');
+      
+      let val = '';
+      let fieldKey = '';
+      
+      if (type === 'email' || /\b(email|e-mail|mail)\b/.test(blob)) { val = profile.email; fieldKey = 'Email'; }
+      else if (type === 'tel' || /\b(phone|mobile|cell|telephone|whatsapp)\b/.test(blob)) { val = profile.phone; fieldKey = 'Phone'; }
+      else if (/\b(full.?name|your.?name)\b/.test(blob)) { val = profile.fullName; fieldKey = 'Full Name'; }
+      else if (/\b(first.?name|fname)\b/.test(blob)) { val = profile.firstName; fieldKey = 'First Name'; }
+      else if (/\b(last.?name|lname|surname)\b/.test(blob)) { val = profile.lastName; fieldKey = 'Last Name'; }
+      else if (/\bname\b/.test(blob)) { val = profile.fullName; fieldKey = 'Name'; }
+      else if (/\b(city|town)\b/.test(blob)) { val = profile.city; fieldKey = 'City'; }
+      else if (/\b(state|province)\b/.test(blob)) { val = profile.state; fieldKey = 'State'; }
+      else if (/\b(address|street)\b/.test(blob)) { val = profile.address; fieldKey = 'Address'; }
+      else if (/\b(postal|pin|zip)\b/.test(blob)) { val = profile.zip; fieldKey = 'PIN Code'; }
+      
+      if (val) {
+        el.focus();
+        setNativeValue(el, val);
+        el.classList.add('filled-highlight');
+        results.push({ field: fieldKey, value: val });
+      }
+    });
+    
+    // Show Ghost Protocol result panel
+    const panel = document.getElementById('ghost-result-panel');
+    const list = document.getElementById('ghost-result-list');
+    list.innerHTML = results.map(r => `
+      <div class="ghost-result-item">
+        <span class="ghost-result-field">${r.field}</span>
+        <span class="ghost-result-value">${r.value}</span>
+      </div>
+    `).join('');
+    panel.classList.add('visible');
+    
+    // Auto-hide after 6 seconds
+    setTimeout(() => panel.classList.remove('visible'), 6000);
+    
+    console.log('🤖 JARVIS Ghost Protocol: ' + results.length + ' fields autofilled', results);
+  }
+
+  function clearForm() {
+    document.querySelectorAll('input, textarea').forEach(el => {
+      el.value = '';
+      el.classList.remove('filled-highlight');
+    });
+    document.getElementById('ghost-result-panel').classList.remove('visible');
+  }
+
+  function submitForm() {
+    const allFilled = Array.from(document.querySelectorAll('[aria-required="true"]'))
+      .every(el => el.value && el.value.trim() !== '');
+    
+    if (!allFilled) {
+      alert('Please fill all required fields first. Use Ghost Autofill to fill them automatically!');
+      return;
+    }
+    
+    document.querySelector('.form-container').style.display = 'none';
+    document.getElementById('success-msg').classList.add('visible');
+    document.getElementById('success-msg').style.display = 'block';
+  }
+</script>
+
+</body>
+</html>

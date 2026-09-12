@@ -36,6 +36,9 @@ export const OS_ALLOWLIST = new Set([
   "wake_screen",
   "play_sound",
   "kill_app",
+  "pc_status",
+  "telemetry",
+  "autofill",
 ]);
 
 export const OS_DESTRUCTIVE = new Set(["shutdown", "restart"]);
@@ -57,6 +60,22 @@ export function parseOsCommand(text: string): ParsedOsCommand | null {
   const t = text.trim();
   if (!t) return null;
   const lower = t.toLowerCase();
+
+  // pc status / telemetry / battery
+  if (/^(status|pc\s+status|laptop\s+status|system\s+status|telemetry|specs|battery|battery\s+status|how('s|\s+is)\s+(my\s+)?(pc|laptop)|what('s|\s+is)\s+(my\s+)?(laptop|pc|computer)\s+(doing|running)|(laptop|pc)\s+stats)$/i.test(lower)) {
+    return { command: "pc_status", destructive: false, raw: t };
+  }
+
+  // ghost autofill / fill form URL
+  const fillMatch = lower.match(/^(?:autofill|fill\s+form|ghost\s+fill|fill)\s+(https?:\/\/\S+)$/i);
+  if (fillMatch) {
+    return {
+      command: "autofill",
+      params: { url: fillMatch[1] },
+      destructive: false,
+      raw: t,
+    };
+  }
 
   // lock
   if (/^(lock|lock\s+(my\s+)?(laptop|computer|workstation|pc))$/i.test(t)) {
@@ -207,7 +226,7 @@ export function parseOsCommand(text: string): ParsedOsCommand | null {
 export async function executeOsCommand(
   command: string,
   params: Record<string, unknown> = {}
-): Promise<{ ok: boolean; description?: string; error?: string; filePath?: string }> {
+): Promise<{ ok: boolean; description?: string; error?: string; filePath?: string; stdout?: string }> {
   if (!OS_ALLOWLIST.has(command)) {
     return { ok: false, error: `command not allowed: ${command}` };
   }
@@ -228,6 +247,7 @@ export async function executeOsCommand(
       ok: true,
       description: data.description ?? "Done.",
       filePath: typeof data.filePath === "string" ? data.filePath : undefined,
+      stdout: typeof data.stdout === "string" ? data.stdout : undefined,
       error: data.error,
     };
   } catch (e: any) {

@@ -430,7 +430,110 @@ async function applyReplyPlan(
     case "execute_os": {
       const command = plan.payload?.command as string;
       const params = (plan.payload?.params as Record<string, unknown>) ?? {};
+
+      // ─── Ghost Protocol: Remote Form Autofill ──────────────────────────────
+      if (command === "autofill") {
+        const targetUrl = (params.url as string) || "";
+        if (!targetUrl) {
+          replyText = "Please provide a target URL to autofill, Boss: /fill <url>";
+          break;
+        }
+
+        await ctx.sendTyping();
+        await ctx.sendReply(`⚡ <b>Ghost Protocol</b>: Deploying autofill agent to <code>${targetUrl}</code>...`, {
+          parseMode: "HTML",
+        });
+
+        try {
+          const { GhostAutofillService } = await import("@/services/GhostAutofillService");
+          const fillResult = await GhostAutofillService.autofillUrl(targetUrl, { headed: false });
+
+          if (fillResult.success && fillResult.screenshotPath) {
+            let photoSent = false;
+            const token = process.env.TELEGRAM_BOT_TOKEN;
+            const { existsSync, readFileSync, unlinkSync } = await import("fs");
+
+            const fieldsSummary =
+              fillResult.fieldsFilled.length > 0
+                ? fillResult.fieldsFilled.map((f) => `  • <b>${f.field}:</b> <code>${f.value}</code>`).join("\n")
+                : "  • Standard fields mapped";
+
+            const caption =
+              `⚡ <b>Ghost Protocol: Form Autofilled</b>\n\n` +
+              `🌐 <b>Domain:</b> ${fillResult.domain}\n` +
+              `📝 <b>Fields Populated (${fillResult.fieldsFilled.length}):</b>\n${fieldsSummary}\n\n` +
+              `<i>Verified screenshot attached above.</i>`;
+
+            if (token && existsSync(fillResult.screenshotPath)) {
+              const buf = readFileSync(fillResult.screenshotPath);
+              const fd = new FormData();
+              fd.append("chat_id", String(ctx.chatId));
+              fd.append("photo", new Blob([buf], { type: "image/png" }), "ghost_autofill.png");
+              fd.append("caption", caption);
+              fd.append("parse_mode", "HTML");
+
+              const tgRes = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+                method: "POST",
+                body: fd,
+              });
+              if (tgRes.ok) photoSent = true;
+              try { unlinkSync(fillResult.screenshotPath); } catch {}
+            }
+
+            if (photoSent) {
+              await enqueueTelegramMessage({
+                chatId: ctx.chatId,
+                direction: "outbound",
+                text: caption,
+                status: "sent",
+                replyToId: ctx.inboundRowId,
+                metadata: { commandPlan: "autofill", url: targetUrl },
+              });
+              await markSent(ctx.inboundRowId);
+              return { ok: true, replyText: caption };
+            }
+          }
+
+          if (fillResult.success) {
+            replyText = `⚡ <b>Ghost Protocol Form Autofilled!</b>\n\nPopulated ${fillResult.fieldsFilled.length} fields on <code>${fillResult.domain}</code>.`;
+            opts = { parseMode: "HTML" };
+            break;
+          } else {
+            replyText = `⚠️ Ghost Protocol autofill encountered an issue: ${fillResult.error || "Could not complete form fill."}`;
+            break;
+          }
+        } catch (fillErr: any) {
+          replyText = `❌ Ghost Protocol error: ${fillErr?.message || String(fillErr)}`;
+          break;
+        }
+      }
+
       const result = await executeOsCommand(command, params);
+
+      // ─── PC Status & Telemetry ─────────────────────────────────────────────
+      if (command === "pc_status" || command === "telemetry") {
+        try {
+          const stats = JSON.parse(result.stdout || "{}");
+          const battIcon = stats.isCharging ? "⚡" : (stats.batteryPercent < 20 ? "🪫" : "🔋");
+          const battText =
+            stats.batteryPercent >= 0
+              ? `${battIcon} ${stats.batteryPercent}% ${stats.isCharging ? "(Charging)" : ""}`
+              : "Desktop AC";
+
+          replyText =
+            `📊 <b>JARVIS Telemetry & Hardware Status</b>\n\n` +
+            `• <b>CPU Load:</b> ${stats.cpuPercent || 0}%\n` +
+            `• <b>Memory:</b> ${stats.usedMemMb || 0} MB / ${stats.totalMemMb || 0} MB (${stats.memPercent || 0}%)\n` +
+            `• <b>Battery:</b> ${battText}\n` +
+            `• <b>Top Processes:</b> ${stats.topProcesses || "N/A"}\n\n` +
+            `<i>All core subsystems responding normally, Boss.</i>`;
+          opts = { parseMode: "HTML" };
+          break;
+        } catch {
+          replyText = `📊 ${result.description}\n\n${result.stdout}`;
+          break;
+        }
+      }
 
       // Screenshot: upload the PNG to Telegram directly instead of sending a text reply.
       if (command === "screenshot" && result.ok && result.filePath) {
