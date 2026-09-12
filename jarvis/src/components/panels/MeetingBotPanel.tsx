@@ -18,6 +18,9 @@ import {
   FileText,
   ExternalLink,
   BookOpen,
+  User,
+  Mail,
+  Phone,
 } from "lucide-react";
 
 export default function MeetingBotPanel() {
@@ -27,7 +30,11 @@ export default function MeetingBotPanel() {
     url: "",
     id: "",
     password: "",
+    name: "Dhruv",
+    email: "dhruvbijapur@gmail.com",
+    phone: "9606571200",
   });
+  const [showUserDetails, setShowUserDetails] = useState(false);
   const [chatMessage, setChatMessage] = useState("");
   const [botActive, setBotActive] = useState(false);
   const [captionsCount, setCaptionsCount] = useState(0);
@@ -103,6 +110,8 @@ export default function MeetingBotPanel() {
     ? "Zoom"
     : null;
 
+  const isWebinar = formData.url.toLowerCase().includes("webinar");
+
   const handleJoin = async () => {
     const cleanUrl = formData.url.trim();
     const cleanId = formData.id.trim().replace(/[\s-]+/g, "");
@@ -127,6 +136,9 @@ export default function MeetingBotPanel() {
           credentials: {
             id: cleanId,
             password: cleanPassword,
+            name: formData.name.trim() || 'Dhruv',
+            email: formData.email.trim() || 'dhruvbijapur@gmail.com',
+            phone: formData.phone.trim() || '9606571200',
           },
         }),
       });
@@ -144,7 +156,7 @@ export default function MeetingBotPanel() {
           setResult({ success: true, message: data.message });
           setBotActive(true);
           setStatusMessage("Joining meeting and enabling captions...");
-          setFormData({ url: "", id: "", password: "" });
+          setFormData((prev) => ({ ...prev, url: "", id: "", password: "" }));
         }
       } else {
         setNeedsSignIn(false);
@@ -374,6 +386,73 @@ export default function MeetingBotPanel() {
                 />
               </div>
             </div>
+          </div>
+
+          {/* Participant / Webinar Registration Details */}
+          <div className="pt-2 border-t border-white/5 space-y-2">
+            <button
+              type="button"
+              onClick={() => setShowUserDetails(!showUserDetails)}
+              className="flex items-center justify-between w-full text-xs text-cyan-400/90 hover:text-cyan-300 font-medium transition-colors py-1"
+            >
+              <span className="flex items-center gap-1.5">
+                <User className="w-3.5 h-3.5 text-cyan-400" />
+                {isWebinar ? "Webinar Registration Details (Auto-fill)" : "Webinar / Participant Details"}
+              </span>
+              <span className="text-[10px] text-white/40 hover:text-white/60">
+                {showUserDetails || isWebinar ? "▲ Collapse" : "▼ Edit Name, Email & Phone"}
+              </span>
+            </button>
+
+            {(showUserDetails || isWebinar) && (
+              <motion.div
+                initial={{ opacity: 0, y: -4 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1"
+              >
+                <div className="space-y-1">
+                  <label className="text-[11px] text-white/50 font-medium ml-1">Your Name</label>
+                  <div className="relative">
+                    <User className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-white/30" />
+                    <input
+                      type="text"
+                      value={formData.name}
+                      onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                      placeholder="Dhruv"
+                      className="w-full pl-8 pr-3 py-2 bg-black/20 border border-white/10 rounded-xl text-white placeholder-white/30 focus:border-cyan-500/50 focus:outline-none text-xs transition-all"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[11px] text-white/50 font-medium ml-1">Email Address</label>
+                  <div className="relative">
+                    <Mail className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-white/30" />
+                    <input
+                      type="email"
+                      value={formData.email}
+                      onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                      placeholder="dhruvbijapur@gmail.com"
+                      className="w-full pl-8 pr-3 py-2 bg-black/20 border border-white/10 rounded-xl text-white placeholder-white/30 focus:border-cyan-500/50 focus:outline-none text-xs transition-all"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[11px] text-white/50 font-medium ml-1">Mobile / Phone</label>
+                  <div className="relative">
+                    <Phone className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-white/30" />
+                    <input
+                      type="tel"
+                      value={formData.phone}
+                      onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
+                      placeholder="9606571200"
+                      className="w-full pl-8 pr-3 py-2 bg-black/20 border border-white/10 rounded-xl text-white placeholder-white/30 focus:border-cyan-500/50 focus:outline-none text-xs transition-all"
+                    />
+                  </div>
+                </div>
+              </motion.div>
+            )}
           </div>
         </div>
       )}

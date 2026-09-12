@@ -164,11 +164,18 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
   /**
    * Normalizes URLs and IDs for direct browser joining.
    * Transforms Zoom meetings into direct Zoom Web Client URLs (/wc/...) to bypass native app redirects.
+   * Zoom webinar registration URLs (/webinar/register/...) are passed through unchanged — the
+   * handleZoomJoin flow handles the registration form and post-confirmation join.
    */
   private normalizeMeetingTarget(rawUrl?: string, credentials?: { id?: string; password?: string }) {
     let url = (rawUrl || '').trim();
     let cleanId = credentials?.id ? credentials.id.replace(/[\s-]+/g, '') : '';
     let password = credentials?.password ? credentials.password.trim() : '';
+
+    // Zoom Webinar registration links — keep them intact; the join handler fills the form.
+    if (url.match(/zoom\.us\/webinar\/(register|join)/i)) {
+      return { url, platform: 'zoom' as const, cleanId, password };
+    }
 
     // If no URL provided but ID is present, format as Zoom Web Client
     if (!url && cleanId) {
@@ -242,7 +249,7 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
     }
   }
 
-  async joinMeeting(rawUrl: string, credentials?: { id?: string; password?: string }) {
+  async joinMeeting(rawUrl: string, credentials?: { id?: string; password?: string; name?: string; email?: string; phone?: string }) {
     const { url, platform, cleanId, password } = this.normalizeMeetingTarget(rawUrl, credentials);
     console.log(`JARVIS: Attempting to join meeting (${platform}) at ${url}...`);
 
@@ -309,7 +316,11 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
         if (res?.needsSignIn) needsSignIn = true;
       } else if (platform === 'zoom') {
         this.state.statusMessage = 'Joining Zoom via Web Client...';
-        await this.handleZoomJoin(page, cleanId, password);
+        await this.handleZoomJoin(page, cleanId, password, {
+          name: credentials?.name || 'Dhruv',
+          email: credentials?.email || 'dhruvbijapur@gmail.com',
+          phone: credentials?.phone || '9606571200',
+        });
       }
 
       this.state.statusMessage = joinNotice || 'In meeting — Transcribing dialogue and chat...';
@@ -486,7 +497,14 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
     }
   }
 
-  private async handleZoomJoin(page: Page, meetingId?: string, password?: string) {
+  private async handleZoomJoin(page: Page, meetingId?: string, password?: string, userInfo?: { name: string; email: string; phone: string }) {
+    const userName = userInfo?.name || 'Dhruv';
+    const userEmail = userInfo?.email || 'dhruvbijapur@gmail.com';
+    const userPhone = userInfo?.phone || '9606571200';
+    // Split name into first/last
+    const nameParts = userName.trim().split(/\s+/);
+    const firstName = nameParts[0] || 'Dhruv';
+    const lastName = nameParts.slice(1).join(' ') || 'Bijapur';
     try {
       console.log("JARVIS: Handling Zoom join flow...");
       await page.waitForTimeout(2000);
@@ -500,27 +518,143 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
         }
       } catch {}
 
-      // 2. Handle Webinar Registration Form (if URL was a webinar link)
+      // 2. Handle Webinar Registration Form (fills real user info for Dhruv)
       try {
+        // Detect registration forms — both standard /webinar/register/ and any in-meeting forms
         const emailInput = page.locator('input[type="email"], input[name*="email" i], #question_email').first();
-        if (await emailInput.isVisible({ timeout: 2500 })) {
-          console.log("JARVIS: Webinar registration page detected. Auto-filling...");
-          const firstName = page.locator('input[name*="first" i], #question_first_name').first();
-          if (await firstName.isVisible()) {
-            await firstName.fill('JARVIS');
-          }
-          const lastName = page.locator('input[name*="last" i], #question_last_name').first();
-          if (await lastName.isVisible()) {
-            await lastName.fill('Assistant');
-          }
-          await emailInput.fill('dhruvbijapur@gmail.com');
+        if (await emailInput.isVisible({ timeout: 3000 })) {
+          console.log("JARVIS: Webinar registration page detected. Auto-filling with Dhruv's details...");
 
-          const registerBtn = page.locator('button:has-text("Register"), button:has-text("Join")').first();
-          await registerBtn.click({ force: true });
-          console.log("JARVIS: Submitted webinar registration.");
-          await page.waitForTimeout(4000);
+          // First name
+          const firstNameSels = [
+            'input[name*="first" i]',
+            '#question_first_name',
+            'input[id*="first" i]',
+            'input[placeholder*="first" i]',
+          ];
+          for (const sel of firstNameSels) {
+            try {
+              const el = page.locator(sel).first();
+              if (await el.isVisible({ timeout: 1500 })) {
+                await el.fill(firstName);
+                console.log(`JARVIS: Filled first name: ${firstName}`);
+                break;
+              }
+            } catch {}
+          }
+
+          // Last name (optional — some webinars skip it)
+          const lastNameSels = [
+            'input[name*="last" i]',
+            '#question_last_name',
+            'input[id*="last" i]',
+            'input[placeholder*="last" i]',
+          ];
+          for (const sel of lastNameSels) {
+            try {
+              const el = page.locator(sel).first();
+              if (await el.isVisible({ timeout: 1500 })) {
+                await el.fill(lastName);
+                console.log(`JARVIS: Filled last name: ${lastName}`);
+                break;
+              }
+            } catch {}
+          }
+
+          // Email
+          await emailInput.fill(userEmail);
+          console.log(`JARVIS: Filled email: ${userEmail}`);
+
+          // Phone / Mobile (some webinars ask for this)
+          const phoneSels = [
+            'input[type="tel"]',
+            'input[name*="phone" i]',
+            'input[name*="mobile" i]',
+            '#question_phone',
+            'input[id*="phone" i]',
+            'input[placeholder*="phone" i]',
+            'input[placeholder*="mobile" i]',
+          ];
+          for (const sel of phoneSels) {
+            try {
+              const el = page.locator(sel).first();
+              if (await el.isVisible({ timeout: 1500 })) {
+                await el.fill(userPhone);
+                console.log(`JARVIS: Filled phone: ${userPhone}`);
+                break;
+              }
+            } catch {}
+          }
+
+          // Click Register / Submit
+          const registerBtnSels = [
+            'button[type="submit"]',
+            'input[type="submit"]',
+            'button:has-text("Register")',
+            'button:has-text("Submit")',
+            'button:has-text("Join")',
+            '#btnSubmit',
+          ];
+          for (const sel of registerBtnSels) {
+            try {
+              const btn = page.locator(sel).first();
+              if (await btn.isVisible({ timeout: 2000 })) {
+                await btn.click({ force: true });
+                console.log(`JARVIS: Submitted webinar registration (button: "${sel}").`);
+                break;
+              }
+            } catch {}
+          }
+
+          // Wait for confirmation page
+          console.log("JARVIS: Waiting for registration confirmation...");
+          await page.waitForTimeout(5000);
+
+          // After registration, Zoom shows a confirmation page with "Join Webinar" / "Add to Calendar" buttons.
+          // The confirmation page also contains the actual /wc/join or /s/ webinar link.
+          const afterUrl = page.url();
+          console.log(`JARVIS: Post-registration URL: ${afterUrl}`);
+
+          // Try to click "Join Webinar" if visible on confirmation page
+          const joinWebinarSels = [
+            'a:has-text("Join Webinar")',
+            'button:has-text("Join Webinar")',
+            'a:has-text("Start Webinar")',
+            'a[href*="/wc/"]',
+            'a[href*="/s/"]',
+            'a[href*="zoom.us/j/"]',
+          ];
+          let joinedFromConfirmation = false;
+          for (const sel of joinWebinarSels) {
+            try {
+              const el = page.locator(sel).first();
+              if (await el.isVisible({ timeout: 3000 })) {
+                const href = await el.getAttribute('href').catch(() => null);
+                console.log(`JARVIS: Found join link on confirmation page: ${href || sel}`);
+                await el.click();
+                joinedFromConfirmation = true;
+                console.log("JARVIS: Clicked Join Webinar from confirmation page.");
+                await page.waitForTimeout(4000);
+                break;
+              }
+            } catch {}
+          }
+
+          // If the page has a direct /wc/ or /s/ URL embedded, navigate there
+          if (!joinedFromConfirmation) {
+            const pageContent = await page.content().catch(() => '');
+            const wcMatch = pageContent.match(/https:\/\/[\w.]*zoom\.us\/(?:wc|s)\/(\d+\/join[^"'\s]*|[^"'\s]+)/i);
+            if (wcMatch) {
+              const webinarJoinUrl = wcMatch[0].replace(/&amp;/g, '&');
+              console.log(`JARVIS: Extracted webinar join URL: ${webinarJoinUrl}`);
+              await page.goto(webinarJoinUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+              await page.waitForTimeout(3000);
+            }
+          }
         }
-      } catch {}
+      } catch (regErr: any) {
+        console.warn("JARVIS: Webinar registration flow note:", regErr.message);
+      }
 
       // 3. If on Zoom Web Client (/wc/): Enter name & password, then click Join
       const isWebClient = page.url().includes('/wc/');
