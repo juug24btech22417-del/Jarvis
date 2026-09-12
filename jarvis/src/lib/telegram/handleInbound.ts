@@ -446,7 +446,7 @@ async function applyReplyPlan(
 
         try {
           const { GhostAutofillService } = await import("@/services/GhostAutofillService");
-          const fillResult = await GhostAutofillService.autofillUrl(targetUrl, { headed: false });
+          const fillResult = await GhostAutofillService.autofillUrl(targetUrl, { headed: false, source: "telegram" });
 
           if (fillResult.success && fillResult.screenshotPath) {
             let photoSent = false;
@@ -730,6 +730,214 @@ async function applyReplyPlan(
         `Query: _${query}_\n\n` +
         `I'm searching, scraping, and synthesizing. This usually takes 1–3 minutes. ` +
         `I'll send you the full report when it's ready, Boss.`;
+      break;
+    }
+
+    // ─── Macro List ──────────────────────────────────────────────────────
+    case "macro_list": {
+      const { listMacros } = await import("@/lib/ghost/macroStore");
+      const macros = await listMacros({ limit: 15 });
+      if (macros.length === 0) {
+        replyText = "No macros saved yet, Boss.\n\nUse /record <url> to start recording one.";
+      } else {
+        const lines = macros.map((m, i) => {
+          const steps = m.steps.length;
+          const replays = m.replayCount;
+          const lastPlayed = m.lastReplayedAt
+            ? `last played ${new Date(m.lastReplayedAt).toLocaleDateString()}`
+            : "never played";
+          return `${i + 1}. *${m.name}*\n   ${steps} steps · ${replays} replays · ${lastPlayed}`;
+        });
+        replyText = `🎬 *Saved Macros* (${macros.length})\n\n${lines.join("\n\n")}\n\n_Replay: /replay <name>_`;
+      }
+      break;
+    }
+
+    // ─── Macro Replay ────────────────────────────────────────────────────
+    case "macro_replay": {
+      const query = (plan.payload?.query as string) || "";
+      if (!query) {
+        replyText = "Usage: /replay <macro name or id>";
+        break;
+      }
+
+      await ctx.sendTyping();
+      await ctx.sendReply(`🎬 Replaying macro: _${query}_...`, { parseMode: "MarkdownV2" });
+
+      const { getMacro, getMacroByName } = await import("@/lib/ghost/macroStore");
+      let macro = await getMacro(query);
+      if (!macro) macro = await getMacroByName(query);
+
+      if (!macro) {
+        replyText = `Macro not found: _${query}_\n\nUse /macros to list saved macros.`;
+        break;
+      }
+
+      try {
+        const { replayMacro } = await import("@/services/MacroRecorderService");
+        const result = await replayMacro(macro.id, { headed: false });
+
+        if (result.success) {
+          replyText =
+            `✅ *Macro Replay Complete*\n\n` +
+            `🎬 ${result.macroName}\n` +
+            `📝 ${result.stepsCompleted}/${result.totalSteps} steps\n` +
+            `⏱ ${Math.round(result.durationMs / 1000)}s`;
+        } else {
+          replyText =
+            `⚠️ *Macro Replay Partial*\n\n` +
+            `🎬 ${result.macroName}\n` +
+            `✅ ${result.stepsCompleted} done\n` +
+            `❌ ${result.stepsFailed} failed\n` +
+            `⏱ ${Math.round(result.durationMs / 1000)}s`;
+        }
+
+        // Send screenshot if available
+        if (result.screenshotPath) {
+          const { existsSync, readFileSync, unlinkSync } = await import("fs");
+          const token = process.env.TELEGRAM_BOT_TOKEN;
+          if (token && existsSync(result.screenshotPath)) {
+            const buf = readFileSync(result.screenshotPath);
+            const fd = new FormData();
+            fd.append("chat_id", String(ctx.chatId));
+            fd.append("photo", new Blob([buf], { type: "image/png" }), "macro_result.png");
+            fd.append("caption", `🎬 ${result.macroName} — replay result`);
+            await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+              method: "POST",
+              body: fd,
+            }).catch(() => {});
+            try { unlinkSync(result.screenshotPath); } catch {}
+          }
+        }
+      } catch (err: any) {
+        replyText = `❌ Replay failed: ${err?.message || String(err)}`;
+      }
+      break;
+    }
+
+    // ─── Macro Record ────────────────────────────────────────────────────
+    case "macro_record": {
+      const url = (plan.payload?.url as string) || "";
+      if (!url) {
+        replyText = "Usage: /record <url>\n\nExample: /record https://docs.google.com/forms/...";
+        break;
+      }
+
+      await ctx.sendTyping();
+
+      try {
+        const { startRecording } = await import("@/services/MacroRecorderService");
+        const result = await startRecording(url, { headed: false });
+
+        // Store session info in metadata for /stop to use
+        replyText =
+          `🎬 *Recording Started*\n\n` +
+          `🌐 URL: ${url}\n` +
+          `📋 Session: ${result.sessionId}\n` +
+          `🆔 Macro ID: ${result.macroId}\n\n` +
+          `_JARVIS is now watching your actions. When you're done, send /stop to save the macro._`;
+
+        // Store the session-to-chat mapping so /stop can find it
+        // We use a simple in-memory map for this
+        if (typeof globalThis !== "undefined") {
+          if (!(globalThis as any).__macroSessions) {
+            (globalThis as any).__macroSessions = new Map();
+          }
+          (globalThis as any).__macroSessions.set(ctx.chatId, result.sessionId);
+        }
+      } catch (err: any) {
+        replyText = `❌ Recording failed to start: ${err?.message || String(err)}`;
+      }
+      break;
+    }
+
+    // ─── Macro Stop ──────────────────────────────────────────────────────
+    case "macro_stop": {
+      await ctx.sendTyping();
+
+      // Find the active session for this chat
+      const sessions = (typeof globalThis !== "undefined" && (globalThis as any).__macroSessions)
+        ? (globalThis as any).__macroSessions as Map<number, string>
+        : null;
+      const sessionId = sessions?.get(ctx.chatId);
+
+      if (!sessionId) {
+        replyText = "No active recording session.\n\nUse /record <url> to start one.";
+        break;
+      }
+
+      try {
+        const { stopRecording } = await import("@/services/MacroRecorderService");
+        const result = await stopRecording(sessionId);
+        sessions?.delete(ctx.chatId);
+
+        if (!result) {
+          replyText = "Recording session already stopped or not found.";
+          break;
+        }
+
+        replyText =
+          `🎬 *Recording Stopped & Saved*\n\n` +
+          `📝 *${result.macro.name}*\n` +
+          `🔢 ${result.totalSteps} steps captured\n` +
+          `🆔 Macro ID: ${result.macro.id}\n\n` +
+          `_Replay anytime with /replay ${result.macro.name}_`;
+      } catch (err: any) {
+        replyText = `❌ Stop failed: ${err?.message || String(err)}`;
+      }
+      break;
+    }
+
+    // ─── Form Fill History ───────────────────────────────────────────────
+    case "form_history": {
+      try {
+        const { getFormHistory } = await import("@/lib/ghost/formHistory");
+        const history = await getFormHistory({ limit: 10 });
+
+        if (history.length === 0) {
+          replyText = "No form fills recorded yet, Boss.";
+        } else {
+          const lines = history.map((h) => {
+            const date = new Date(h.timestamp).toLocaleDateString("en-IN");
+            const fields = h.fieldsFilled.length;
+            const icon = h.success ? "✅" : "❌";
+            return `${icon} ${date} — *${h.domain}* (${fields} fields) via ${h.source}`;
+          });
+          replyText = `📋 *Recent Form Fills*\n\n${lines.join("\n")}`;
+        }
+      } catch (err: any) {
+        replyText = `❌ History unavailable: ${err?.message || String(err)}`;
+      }
+      break;
+    }
+
+    // ─── Form Analytics ──────────────────────────────────────────────────
+    case "form_analytics": {
+      try {
+        const { getFormFillAnalytics } = await import("@/lib/ghost/formHistory");
+        const a = await getFormFillAnalytics();
+
+        const topDomains = a.topDomains
+          .slice(0, 5)
+          .map((d) => `  • ${d.domain}: ${d.count}`)
+          .join("\n");
+        const topFields = a.topFields
+          .slice(0, 5)
+          .map((f) => `  • ${f.field}: ${f.count}`)
+          .join("\n");
+
+        replyText =
+          `📊 *Ghost Protocol Analytics*\n\n` +
+          `📈 *Total Fills:* ${a.totalFills}\n` +
+          `✅ *Success Rate:* ${a.successRate}%\n` +
+          `📅 *Today:* ${a.fillsToday} | *This Week:* ${a.fillsThisWeek} | *This Month:* ${a.fillsThisMonth}\n` +
+          `📝 *Avg Fields/Form:* ${a.avgFieldsPerForm}\n` +
+          `❓ *Error Rate:* ${a.errorRate}%\n\n` +
+          `🌐 *Top Domains:*\n${topDomains || "  None yet"}\n\n` +
+          `🏷 *Top Fields:*\n${topFields || "  None yet"}`;
+      } catch (err: any) {
+        replyText = `❌ Analytics unavailable: ${err?.message || String(err)}`;
+      }
       break;
     }
 

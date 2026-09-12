@@ -7,6 +7,7 @@ export interface UserProfile {
   lastName: string;
   email: string;
   altEmail?: string;
+  collegeEmail?: string;
   phone: string;
   countryCode: string;
   address1: string;
@@ -15,6 +16,13 @@ export interface UserProfile {
   state: string;
   postalCode: string;
   country: string;
+  // Home / permanent address (separate from current city)
+  homeAddress?: string;
+  homeCity?: string;
+  homeState?: string;
+  homePinCode?: string;
+  // Academic
+  usn?: string;
   company?: string;
   jobTitle?: string;
   bio?: string;
@@ -26,14 +34,23 @@ export const DEFAULT_USER_PROFILE: UserProfile = {
   lastName: "Bijapur",
   email: "dhruvbijapur@gmail.com",
   altEmail: "dhruvbijapur67@gmail.com",
+  collegeEmail: "juug24btech22417@jainuniversity.ac.in",
   phone: "9606571200",
   countryCode: "+91",
-  address1: "Indiranagar",
-  address2: "100 Feet Road",
-  city: "Bengaluru",
+  // Current / mailing address
+  address1: "Saraf Bazar",
+  address2: "Guledgudd",
+  city: "Bagalkot",
   state: "Karnataka",
-  postalCode: "560038",
+  postalCode: "587203",
   country: "India",
+  // Home / permanent address
+  homeAddress: "Saraf Bazar, Guledgudd",
+  homeCity: "Bagalkot",
+  homeState: "Karnataka",
+  homePinCode: "587203",
+  // Academic
+  usn: "24BTRCA059",
   company: "Personal Projects",
   jobTitle: "Software Developer & AI Engineer",
   bio: "Building JARVIS autonomous systems.",

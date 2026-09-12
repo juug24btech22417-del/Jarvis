@@ -123,7 +123,7 @@ interface JarvisStore {
   pulseReactor: () => void;
 
   // UI
-  activePanel: "chat" | "tasks" | "memory" | "notes" | "code" | "skill-trainer" | "image-generator" | "summarizer" | "web-scraper" | "firecrawl" | "playwright" | "whatsapp" | "instagram" | "telegram" | "security" | "vault" | "dungeon" | "habits" | "time-capsule" | "voice-notes" | "nasa" | "huggingface" | "ifttt" | "browser" | "local-llm" | "vision" | "automation" | "price-tracker" | "transcription" | "proxy" | "agent" | "mission" | null;
+  activePanel: "chat" | "tasks" | "memory" | "notes" | "code" | "skill-trainer" | "image-generator" | "summarizer" | "web-scraper" | "firecrawl" | "playwright" | "whatsapp" | "instagram" | "telegram" | "security" | "vault" | "dungeon" | "habits" | "time-capsule" | "voice-notes" | "nasa" | "huggingface" | "ifttt" | "browser" | "local-llm" | "vision" | "automation" | "price-tracker" | "transcription" | "proxy" | "agent" | "mission" | "analytics" | "macros" | null;
   setActivePanel: (panel: JarvisStore["activePanel"]) => void;
   /** Goal typed/voiced elsewhere that Mission Control should run on open. */
   pendingMissionGoal: string | null;

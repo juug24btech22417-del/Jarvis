@@ -490,6 +490,41 @@ AVAILABLE INTENTS AND EXAMPLES:
   "params": { "url": "website url", "fields": "json of fields to fill" }
 }
 {
+  "intent": "macro_open",
+  "examples": ["open macros", "open macro panel", "macros panel", "show macros", "record and replay", "open record and replay", "macro recorder"],
+  "params": {}
+}
+{
+  "intent": "macro_list",
+  "examples": ["list macros", "show my macros", "what macros do i have", "my saved macros"],
+  "params": {}
+}
+{
+  "intent": "macro_record",
+  "examples": ["record macro", "start recording", "record from url", "macro from https://..."],
+  "params": { "url": "optional url to record from" }
+}
+{
+  "intent": "macro_stop",
+  "examples": ["stop recording", "stop macro", "macro stop"],
+  "params": {}
+}
+{
+  "intent": "macro_replay",
+  "examples": ["replay macro", "replay my macro", "run macro", "execute macro"],
+  "params": { "query": "macro name or id" }
+}
+{
+  "intent": "analytics_open",
+  "examples": ["open analytics", "show analytics", "ghost analytics", "form analytics", "open ghost analytics"],
+  "params": {}
+}
+{
+  "intent": "form_analytics",
+  "examples": ["form stats", "fill stats", "how many forms filled", "form fill history"],
+  "params": {}
+}
+{
   "intent": "chat",
   "examples": ["how are you", "hello", "what can you do", "tell me about", "i'm feeling sad", "i had a bad day", "write a poem", "let's talk"],
   "params": { "message": "user's message" }

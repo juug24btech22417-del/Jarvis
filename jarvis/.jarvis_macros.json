@@ -1,0 +1,80 @@
+[
+  {
+    "id": "macro_1789227160452_m2u4",
+    "createdAt": "2026-09-12T15:32:40.452Z",
+    "updatedAt": "2026-09-12T15:32:40.452Z",
+    "replayCount": 0,
+    "name": "Recording 9:02:40 pm",
+    "description": "Auto-recorded session on example.com",
+    "steps": [],
+    "isFormFill": false,
+    "targetUrl": "https://example.com",
+    "tags": [
+      "recorded"
+    ]
+  },
+  {
+    "id": "macro_1789228124025_a51h",
+    "createdAt": "2026-09-12T15:48:44.025Z",
+    "updatedAt": "2026-09-12T15:48:44.025Z",
+    "replayCount": 0,
+    "name": "Recording 9:18:44 pm",
+    "description": "Auto-recorded session on example.com",
+    "steps": [],
+    "isFormFill": false,
+    "targetUrl": "https://example.com",
+    "tags": [
+      "recorded"
+    ]
+  },
+  {
+    "id": "macro_1789228147127_u1sx",
+    "createdAt": "2026-09-12T15:49:07.127Z",
+    "updatedAt": "2026-09-12T15:49:22.959Z",
+    "replayCount": 1,
+    "name": "unknown — 0 steps",
+    "description": "Recorded 0 steps on unknown. Duration: 16s",
+    "steps": [],
+    "isFormFill": false,
+    "targetUrl": "https://example.com",
+    "tags": [
+      "recorded"
+    ],
+    "lastReplayedAt": "2026-09-12T15:49:35.563Z"
+  },
+  {
+    "id": "macro_1789228188617_eghz",
+    "createdAt": "2026-09-12T15:49:48.617Z",
+    "updatedAt": "2026-09-12T15:49:48.617Z",
+    "replayCount": 1,
+    "name": "Test Navigation Macro",
+    "description": "Navigate to example.com and verify page loads",
+    "steps": [
+      {
+        "id": "step_1",
+        "action": "goto",
+        "target": "https://example.com",
+        "description": "Navigate to example.com"
+      },
+      {
+        "id": "step_2",
+        "action": "wait",
+        "target": "h1",
+        "description": "Wait for heading to appear"
+      },
+      {
+        "id": "step_3",
+        "action": "click",
+        "target": "h1",
+        "description": "Click the heading"
+      }
+    ],
+    "isFormFill": false,
+    "targetUrl": "https://example.com",
+    "tags": [
+      "test",
+      "navigation"
+    ],
+    "lastReplayedAt": "2026-09-12T15:50:02.533Z"
+  }
+]

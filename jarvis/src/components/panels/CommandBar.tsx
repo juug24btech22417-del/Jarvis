@@ -10,6 +10,7 @@ import { buildSystemPrompt, buildMorningBriefing, JARVISContext } from "@/lib/ja
 import { useVolumeControl, useClipboard, useBatteryStatus, useNetworkStatus } from "@/lib/system";
 import { addHoverScale, createRipple, animateTyping } from "@/lib/animations/gsap";
 import PersonaSwitcher from "@/components/ui/PersonaSwitcher";
+import type { Macro } from "@/lib/ghost/macroTypes";
 
 /**
  * Tier 2A v3 — detect natural-language web missions that should be routed
@@ -1382,7 +1383,9 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
     }
 
     // VOICE NOTES COMMANDS (Tier 1)
-    if (lower.includes("voice note") || lower.includes("voice memo") || lower.includes("record") || lower.includes("recording")) {
+    // Skip if this is a macro command ("record macro", "stop recording" for macro, etc.)
+    const isMacroCommand = /\b(?:record\s+macro|macro\s+(?:record|stop|replay)|stop\s+recording|record\s+(?:from|https))\b/.test(lower);
+    if (!isMacroCommand && (lower.includes("voice note") || lower.includes("voice memo") || lower.includes("record") || lower.includes("recording"))) {
       if (lower.includes("open") || lower.includes("show") || lower.includes("start") || lower.includes("record") || lower.includes("new")) {
         onOpenVoiceNotes?.();
         return "Opening Voice Notes. Prepare to be recorded, Boss.";
@@ -2464,6 +2467,110 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
       return "I couldn't list voice memos, Boss.";
     }
 
+    // ─── Record & Replay Macros (direct regex) ───────────────────────────────
+    // Open the Macro panel
+    if (lower.match(/\b(open\s+(?:the\s+)?(?:macros?|record\s*&?\s*replay|macros?\s+panel)|macros?\s+panel|show\s+macros?)\b/)) {
+      setActivePanel("macros");
+      return "Opening Record & Replay, Boss.";
+    }
+
+    // List saved macros
+    if (lower.match(/\b(list\s+macros?|show\s+macros?|my\s+macros?|macros?\s+list)\b/)) {
+      try {
+        const res = await fetch("/api/ghost/macros");
+        const data = await res.json();
+        if (data.success && data.macros?.length > 0) {
+          const list = data.macros
+            .slice(0, 5)
+            .map((m: Macro, i: number) => `${i + 1}. ${m.name} (${m.steps.length} steps, ${m.replayCount} replays)`)
+            .join("\n");
+          return `Saved Macros:\n${list}\n\nOpen the Macro panel to replay, Boss.`;
+        }
+        return "No macros saved yet, Boss. Use 'record macro' to create one.";
+      } catch {
+        return "I couldn't fetch the macros, Boss.";
+      }
+    }
+
+    // Record a macro from a URL
+    const macroRecordMatch = lower.match(/\brecord\s+(?:macro\s+)?(?:from\s+)?(https?:\/\/\S+)/i);
+    if (macroRecordMatch) {
+      const url = macroRecordMatch[1];
+      try {
+        const res = await fetch("/api/ghost/macros/record", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "start", url }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          setActivePanel("macros");
+          return `Recording started on ${url}. Interact with the page — JARVIS is watching. Say 'stop recording' when done.`;
+        }
+        return `Failed to start recording: ${data.error}`;
+      } catch (e: any) {
+        return `Recording failed: ${e?.message || String(e)}`;
+      }
+    }
+    // Record macro without URL — open the panel
+    if (lower.match(/\brecord\s+macro\b/i) && !macroRecordMatch) {
+      setActivePanel("macros");
+      return "Opening Macro panel — paste a URL there to start recording, Boss.";
+    }
+
+    // Stop recording
+    if (lower.match(/\b(stop\s+recording|stop\s+macro|macro\s+stop)\b/)) {
+      try {
+        const res = await fetch("/api/ghost/macros/stop", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        });
+        const data = await res.json();
+        if (data.success) {
+          return `Recording stopped! ${data.totalSteps} steps captured and saved as '${data.macro?.name || 'macro'}'.`;
+        }
+        return "No active recording session, Boss.";
+      } catch (e: any) {
+        return `Stop failed: ${e?.message || String(e)}`;
+      }
+    }
+
+    // Replay a macro by name or id
+    const replayMatch = lower.match(/\breplay\s+(?:macro\s+)?(.+)/i);
+    if (replayMatch) {
+      const query = replayMatch[1].trim();
+      try {
+        const listRes = await fetch("/api/ghost/macros");
+        const listData = await listRes.json();
+        const match = listData.macros?.find((m: Macro) =>
+          m.name.toLowerCase().includes(query) || m.id === query
+        );
+        if (match) {
+          setActivePanel("macros");
+          const res = await fetch("/api/ghost/macros/replay", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ macroId: match.id }),
+          });
+          const data = await res.json();
+          if (data.success) {
+            return `Replayed '${match.name}': ${data.result.stepsCompleted}/${data.result.totalSteps} steps in ${(data.result.durationMs / 1000).toFixed(1)}s.`;
+          }
+          return `Replay failed: ${data.error}`;
+        }
+        return `Macro not found: ${query}`;
+      } catch (e: any) {
+        return `Replay failed: ${e?.message || String(e)}`;
+      }
+    }
+
+    // Ghost Analytics / Form History
+    if (lower.match(/\b(open\s+(?:the\s+)?(?:analytics|ghost\s+analytics|form\s+analytics)|analytics\s+panel|show\s+analytics)\b/)) {
+      setActivePanel("analytics");
+      return "Opening Ghost Analytics, Boss.";
+    }
+
     return null;
   };
 
@@ -3341,6 +3448,116 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
         case "calendar_view": {
           onOpenCalendar?.();
           return "Opening Calendar, Boss.";
+        }
+
+        // ─── Record & Replay Macros ────────────────────────────────────────
+        case "macro_open":
+          setActivePanel("macros");
+          return "Opening Record & Replay, Boss.";
+
+        case "macro_list": {
+          try {
+            const res = await fetch("/api/ghost/macros");
+            const data = await res.json();
+            if (data.success && data.macros?.length > 0) {
+              const list = data.macros
+                .slice(0, 5)
+                .map((m: Macro, i: number) => `${i + 1}. ${m.name} (${m.steps.length} steps, ${m.replayCount} replays)`)
+                .join("\n");
+              return `Saved Macros:\n${list}\n\nOpen the Macro panel to replay, Boss.`;
+            }
+            return "No macros saved yet, Boss. Use 'record macro' to create one.";
+          } catch {
+            return "I couldn't fetch the macros, Boss.";
+          }
+        }
+
+        case "macro_record": {
+          const url = parsed?.params?.url as string;
+          if (url) {
+            try {
+              const res = await fetch("/api/ghost/macros/record", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "start", url }),
+              });
+              const data = await res.json();
+              if (data.success) {
+                setActivePanel("macros");
+                return `Recording started on ${url}. Interact with the page — JARVIS is watching. Say 'stop recording' when done.`;
+              }
+              return `Failed to start recording: ${data.error}`;
+            } catch (e: any) {
+              return `Recording failed: ${e?.message || String(e)}`;
+            }
+          }
+          setActivePanel("macros");
+          return "Opening Macro panel — paste a URL there to start recording, Boss.";
+        }
+
+        case "macro_stop": {
+          try {
+            const res = await fetch("/api/ghost/macros/stop", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({}),
+            });
+            const data = await res.json();
+            if (data.success) {
+              return `Recording stopped! ${data.totalSteps} steps captured and saved as '${data.macro?.name || 'macro'}'.`;
+            }
+            return "No active recording session, Boss.";
+          } catch (e: any) {
+            return `Stop failed: ${e?.message || String(e)}`;
+          }
+        }
+
+        case "macro_replay": {
+          const query = parsed?.params?.query as string;
+          if (query) {
+            try {
+              const listRes = await fetch("/api/ghost/macros");
+              const listData = await listRes.json();
+              const match = listData.macros?.find((m: Macro) =>
+                m.name.toLowerCase().includes(query.toLowerCase()) || m.id === query
+              );
+              if (match) {
+                const res = await fetch("/api/ghost/macros/replay", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ macroId: match.id }),
+                });
+                const data = await res.json();
+                if (data.success) {
+                  return `Replayed '${match.name}': ${data.result.stepsCompleted}/${data.result.totalSteps} steps in ${(data.result.durationMs / 1000).toFixed(1)}s.`;
+                }
+                return `Replay failed: ${data.error}`;
+              }
+              return `Macro not found: ${query}`;
+            } catch (e: any) {
+              return `Replay failed: ${e?.message || String(e)}`;
+            }
+          }
+          return "Which macro should I replay, Boss? Say 'replay [name]'.";
+        }
+
+        // ─── Form Analytics ─────────────────────────────────────────────────
+        case "analytics_open":
+          setActivePanel("analytics");
+          return "Opening Ghost Analytics, Boss.";
+
+        case "form_analytics": {
+          try {
+            const res = await fetch("/api/ghost/history?action=analytics");
+            const data = await res.json();
+            if (data.success) {
+              const a = data.analytics;
+              return `Ghost Protocol Stats: ${a.totalFills} total fills, ${a.successRate}% success rate. Today: ${a.fillsToday}. Top domain: ${a.topDomains[0]?.domain || 'none'}.`;
+            }
+          } catch {
+            return "Analytics unavailable, Boss.";
+          }
+          return null;
         }
 
         default:

@@ -1,5 +1,6 @@
 import { chromium, Page } from "playwright";
 import { getUserProfile, UserProfile } from "@/lib/profile/userProfile";
+import { recordFormFill } from "@/lib/ghost/formHistory";
 import path from "path";
 import os from "os";
 import fs from "fs/promises";
@@ -25,13 +26,15 @@ export class GhostAutofillService {
       firstName: profile.firstName,
       lastName: profile.lastName,
       email: profile.email,
+      collegeEmail: profile.collegeEmail || "",
       phone: profile.phone,
-      address: profile.address1,
+      address: `${profile.address1}${profile.address2 ? ", " + profile.address2 : ""}`,
       city: profile.city,
       state: profile.state,
       zip: profile.postalCode,
       country: profile.country,
       company: profile.company || "",
+      usn: profile.usn || "",
     });
 
     return `javascript:(function(){
@@ -55,18 +58,20 @@ export class GhostAutofillService {
         const lbl = resolveLabel(el);
         const blob = [name, id, ph, ac, aria, lbl].join(' ');
         let val = '';
-        if (t === 'email' || /\\b(email|e-mail|mail)\\b/.test(blob)) val = p.email;
-        else if (t === 'tel' || /\\b(phone|mobile|contact.*num|cell|telephone|whatsapp)\\b/.test(blob)) val = p.phone;
-        else if (/\\b(full.?name|your.?name|applicant.?name)\\b/.test(blob)) val = p.fullName;
+        if (/\\b(usn|university.*serial|univ.*serial|enrollment.*num|enroll.*no|student.*id|roll.*no|roll.*num|reg.*num|reg.*no|registration.*num)\\b/.test(blob)) val = p.usn;
+        else if (/college.*mail|university.*mail|institutional.*mail|official.*mail|jain.*mail|inst.*email/.test(blob)) val = p.collegeEmail;
+        else if (t === 'email' || /\\b(email|e-mail|mail)\\b/.test(blob)) val = p.email;
+        else if (t === 'tel' || /\\b(phone|mobile|mob|cell|telephone|whatsapp|ph[. ]?no|ph[. ]?num)\\b/.test(blob) || /\\b(contact|contact.*num|contact.*number|mobile.*num|mob.*num|phone.*num|mobile.*number|mob.*number|number)\\b/.test(blob) || /contact.*number|phone.*number|mobile.*number/.test(blob)) val = p.phone;
+        else if (/\\b(full.?name|your.?name|applicant.?name|candidate.?name|student.?name)\\b/.test(blob)) val = p.fullName;
         else if (/\\b(first.?name|fname|given.?name)\\b/.test(blob)) val = p.firstName;
         else if (/\\b(last.?name|lname|surname|family.?name)\\b/.test(blob)) val = p.lastName;
         else if (/\\bname\\b/.test(blob)) val = p.fullName;
         else if (/\\b(postal|pincode|pin.?code|zip)\\b/.test(blob)) val = p.zip;
-        else if (/\\b(city|town|district)\\b/.test(blob)) val = p.city;
+        else if (/\\b(city|town|district|taluk)\\b/.test(blob)) val = p.city;
         else if (/\\b(state|province|region)\\b/.test(blob)) val = p.state;
         else if (/\\b(country|nation)\\b/.test(blob)) val = p.country;
-        else if (/\\b(address|street|addr|line1)\\b/.test(blob)) val = p.address;
-        else if (/\\b(company|organization|org)\\b/.test(blob)) val = p.company;
+        else if (/\\b(address|street|addr|line1|locality|area)\\b/.test(blob)) val = p.address;
+        else if (/\\b(company|organization|org|college|institution|university|school)\\b/.test(blob)) val = p.company;
         if (val) {
           el.focus();
           setVal(el, val);
@@ -164,11 +169,15 @@ export class GhostAutofillService {
       }
 
       function matchValue(blob: string, type: string): { fieldKey: string; val: string } | null {
-        if (type === "email" || /\b(email|e-mail|mail)\b/.test(blob)) {
+        if (/\b(usn|university.*serial|univ.*serial|enrollment.*num|enroll.*no|student.*id|roll.*no|roll.*num|reg.*num|reg.*no|registration.*num)\b/.test(blob)) {
+          return { fieldKey: "USN", val: p.usn || "" };
+        } else if (/college.*mail|university.*mail|institutional.*mail|official.*mail|jain.*mail|inst.*email/.test(blob)) {
+          return { fieldKey: "College Email", val: p.collegeEmail || p.email };
+        } else if (type === "email" || /\b(email|e-mail|mail)\b/.test(blob)) {
           return { fieldKey: "Email", val: p.email };
-        } else if (type === "tel" || /\b(phone|mobile|cell|telephone|contact.*num|whatsapp)\b/.test(blob)) {
+        } else if (type === "tel" || /\b(phone|mobile|mob|cell|telephone|whatsapp|ph[. ]?no|ph[. ]?num)\b/.test(blob) || /\b(contact|contact.*num|contact.*number|mobile.*num|mob.*num|phone.*num|mobile.*number|mob.*number)\b/.test(blob) || /contact.*number|phone.*number|mobile.*number/.test(blob)) {
           return { fieldKey: "Phone", val: p.phone };
-        } else if (/\b(full[-_\s]?name|your[-_\s]?name|applicant[-_\s]?name|complete[-_\s]?name)\b/.test(blob)) {
+        } else if (/\b(full[-_\s]?name|your[-_\s]?name|applicant[-_\s]?name|complete[-_\s]?name|candidate[-_\s]?name|student[-_\s]?name)\b/.test(blob)) {
           return { fieldKey: "Full Name", val: p.fullName };
         } else if (/\b(first[-_\s]?name|fname|given[-_\s]?name)\b/.test(blob)) {
           return { fieldKey: "First Name", val: p.firstName };
@@ -178,15 +187,15 @@ export class GhostAutofillService {
           return { fieldKey: "Full Name", val: p.fullName };
         } else if (/\b(postal|pincode|pin[-_\s]?code|zip[-_\s]?code?)\b/.test(blob)) {
           return { fieldKey: "Postal Code", val: p.postalCode };
-        } else if (/\b(city|town|district)\b/.test(blob)) {
+        } else if (/\b(city|town|district|taluk)\b/.test(blob)) {
           return { fieldKey: "City", val: p.city };
         } else if (/\b(state|province|region)\b/.test(blob)) {
           return { fieldKey: "State", val: p.state };
         } else if (/\b(country|nation)\b/.test(blob)) {
           return { fieldKey: "Country", val: p.country };
-        } else if (/\b(address|street|addr|line1)\b/.test(blob)) {
+        } else if (/\b(address|street|addr|line1|locality|area)\b/.test(blob)) {
           return { fieldKey: "Address", val: p.address1 };
-        } else if (/\b(company|organization|org)\b/.test(blob)) {
+        } else if (/\b(company|organization|org|college|institution|university|school)\b/.test(blob)) {
           return { fieldKey: "Company", val: p.company || "" };
         } else if (/\b(job|designation|title|role)\b/.test(blob)) {
           return { fieldKey: "Job Title", val: p.jobTitle || "" };
@@ -246,8 +255,9 @@ export class GhostAutofillService {
    */
   static async autofillUrl(
     url: string,
-    options: { headed?: boolean; customProfile?: Partial<UserProfile> } = {}
+    options: { headed?: boolean; customProfile?: Partial<UserProfile>; source?: "bookmarklet" | "telegram" | "api" | "playwright" } = {}
   ): Promise<AutofillResult> {
+    const startTime = Date.now();
     let domain = "";
     try {
       domain = new URL(url).hostname;
@@ -317,7 +327,7 @@ export class GhostAutofillService {
       const ssBuffer = await page.screenshot({ path: ssPath, fullPage: false });
       const base64 = ssBuffer.toString("base64");
 
-      return {
+      const result = {
         success: true,
         url,
         domain,
@@ -325,8 +335,33 @@ export class GhostAutofillService {
         screenshotPath: ssPath,
         screenshotBase64: base64,
       };
+
+      // Track in history
+      recordFormFill({
+        url,
+        domain,
+        fieldsFilled,
+        totalFields: fieldsFilled.length,
+        success: true,
+        source: options.source || "playwright",
+        durationMs: Date.now() - startTime,
+      }).catch(() => {}); // fire-and-forget
+
+      return result;
     } catch (err: any) {
       console.error("[GhostAutofillService] error:", err);
+
+      // Track error in history
+      recordFormFill({
+        url,
+        domain,
+        fieldsFilled: [],
+        totalFields: 0,
+        success: false,
+        error: err?.message || String(err),
+        source: options.source || "playwright",
+      }).catch(() => {});
+
       return {
         success: false,
         url,

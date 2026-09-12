@@ -36,7 +36,13 @@ export type ReplyKind =
   | "whoami"
   | "help"
   | "start"
-  | "research";         // deep-research via OracleResearchService
+  | "research"          // deep-research via OracleResearchService
+  | "macro_list"        // list saved macros
+  | "macro_replay"      // replay a macro by name/id
+  | "macro_record"      // start recording a macro
+  | "macro_stop"        // stop recording
+  | "form_history"      // show form fill history/stats
+  | "form_analytics";   // show form fill analytics
 
 export interface ReplyPlan {
   kind: ReplyKind;
@@ -216,6 +222,42 @@ async function routeSlash(chatId: number, text: string): Promise<ReplyPlan> {
       }
       return { kind: "research", payload: { query: args } };
     }
+
+    // ─── Macro & Form History commands ──────────────────────────────────
+    case "macros":
+    case "macro":
+      return { kind: "macro_list" };
+
+    case "replay": {
+      if (!args) {
+        return {
+          kind: "reply",
+          text: "Usage: /replay <macro name or id>\n\nExample: /replay google form attendance",
+        };
+      }
+      return { kind: "macro_replay", payload: { query: args } };
+    }
+
+    case "record": {
+      if (!args) {
+        return {
+          kind: "reply",
+          text: "Usage: /record <url>\n\nExample: /record https://docs.google.com/forms/...\n\nJARVIS will open the page and watch your actions. When done, send /stop.",
+        };
+      }
+      return { kind: "macro_record", payload: { url: args } };
+    }
+
+    case "stop":
+      return { kind: "macro_stop" };
+
+    case "history":
+    case "fills":
+      return { kind: "form_history" };
+
+    case "analytics":
+    case "stats":
+      return { kind: "form_analytics" };
 
     case "status":
     case "pc":
@@ -588,6 +630,14 @@ const HELP_TEXT =
   `/vol <0-100|up|down|mute> — or say "increase volume"\n` +
   `/brightness <0-100|up|down> — or say "dim the screen"\n` +
   `/open <app|url> · /kill <app> · /search <q>\n\n` +
+  `*Macros (Record & Replay)*\n` +
+  `/record <url> — start recording browser actions\n` +
+  `/stop — stop recording & save macro\n` +
+  `/macros — list saved macros\n` +
+  `/replay <name> — replay a macro\n\n` +
+  `*Form Analytics*\n` +
+  `/history — recent form fills\n` +
+  `/analytics — fill stats & top domains\n\n` +
   `*Tasks*\n` +
   `/tasks — list pending\n` +
   `/task <title> — add a task\n` +

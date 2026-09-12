@@ -47,6 +47,8 @@ import TranscriptionPanel from "@/components/panels/TranscriptionPanel";
 import ProxyPanel from "@/components/panels/ProxyPanel";
 import AgentPanel from "@/components/panels/AgentPanel";
 import MissionControlPanel from "@/components/panels/MissionControlPanel";
+import AnalyticsPanel from "@/components/panels/AnalyticsPanel";
+import MacroPanel from "@/components/panels/MacroPanel";
 import { useJarvisStore } from "@/store/jarvis.store";
 import { useTextToSpeech } from "@/hooks/useVoice";
 
@@ -667,6 +669,10 @@ export default function Home() {
   const [agentOpen, setAgentOpen] = useState(false);
   // Tier 2A v3: hybrid Firecrawl × Playwright mission control
   const [missionOpen, setMissionOpen] = useState(false);
+  // Ghost Analytics
+  const [analyticsOpen, setAnalyticsOpen] = useState(false);
+  // Record & Replay Macros
+  const [macroOpen, setMacroOpen] = useState(false);
 
   // Handle timer completion - speak notification
   const handleTimerComplete = useCallback((label: string) => {
@@ -697,6 +703,10 @@ export default function Home() {
     setPlaywrightOpen(false);
     setProxyOpen(false);
     setMissionOpen(false);
+    setMacroOpen(false);
+    setAnalyticsOpen(false);
+    setAgentOpen(false);
+    setTranscriptionOpen(false);
 
     // Open the requested panel
     switch (activePanel) {
@@ -771,6 +781,14 @@ export default function Home() {
       case "mission":
         setMissionOpen(true);
         recordPanelOpen("mission");
+        break;
+      case "analytics":
+        setAnalyticsOpen(true);
+        recordPanelOpen("analytics");
+        break;
+      case "macros":
+        setMacroOpen(true);
+        recordPanelOpen("macros");
         break;
       case "chat":
       case "tasks":
@@ -1430,6 +1448,38 @@ export default function Home() {
             isOpen={missionOpen}
             onClose={() => setMissionOpen(false)}
           />
+
+          {/* Ghost Analytics Panel */}
+          <AnimatePresence>
+            {analyticsOpen && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.9 }}
+                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+              >
+                <div className="w-full max-w-2xl h-[85vh]">
+                  <AnalyticsPanel onClose={() => setAnalyticsOpen(false)} />
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Record & Replay Macro Panel */}
+          <AnimatePresence>
+            {macroOpen && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.9 }}
+                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+              >
+                <div className="w-full max-w-2xl h-[85vh]">
+                  <MacroPanel onClose={() => setMacroOpen(false)} />
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
 
           {/* Sentinel Proactive Suggestion Widget */}
           <SentinelSuggestionWidget />
