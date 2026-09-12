@@ -45,25 +45,24 @@ export default function MeetingBotPanel() {
   const lastJoinParamsRef = useRef<{ url: string; id: string; password: string } | null>(null);
   const pollRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Check bot status on mount and poll while active
+  // Check bot status on mount and poll continuously
   useEffect(() => {
     checkBotStatus();
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (botActive) {
-      // Poll status every 3.5 seconds while bot is active
-      pollRef.current = setInterval(checkBotStatus, 3500);
-    } else {
-      if (pollRef.current) clearInterval(pollRef.current);
-    }
+    pollRef.current = setInterval(checkBotStatus, botActive ? 2000 : 3500);
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, [botActive]);
+
+  const handleBringToFront = async () => {
+    try {
+      await fetch("/api/meeting", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "bring-to-front" }),
+      });
+    } catch {}
+  };
 
   const checkBotStatus = async () => {
     try {
@@ -334,6 +333,36 @@ export default function MeetingBotPanel() {
         </motion.div>
       )}
 
+      {/* CAPTCHA / Action Notification Banner */}
+      {statusMessage && statusMessage.includes("CAPTCHA") && (
+        <motion.div
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="rounded-2xl bg-amber-500/15 border border-amber-500/50 p-4 space-y-3 shadow-lg shadow-amber-500/10"
+        >
+          <div className="flex items-start gap-3">
+            <div className="text-2xl">🤖</div>
+            <div className="space-y-1">
+              <p className="text-sm font-semibold text-amber-300">Security Verification Required</p>
+              <p className="text-xs text-amber-200/90 leading-relaxed">
+                Zoom presented a security verification for this webinar. The Chrome window has been brought to your screen.
+              </p>
+              <p className="text-xs text-amber-200/80 leading-relaxed">
+                Please complete the verification checkbox/puzzle in the Zoom window. JARVIS will automatically detect when it's done and enter the room!
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={handleBringToFront}
+            type="button"
+            className="w-full py-2.5 px-3 rounded-xl bg-amber-500/20 border border-amber-500/50 text-amber-300 text-xs font-bold hover:bg-amber-500/30 transition-all flex items-center justify-center gap-1.5 shadow-lg shadow-amber-500/10"
+          >
+            <ExternalLink className="w-4 h-4 text-amber-400" />
+            Bring Zoom Window to Front
+          </button>
+        </motion.div>
+      )}
+
       {/* Join Form (only show when bot is NOT active) */}
       {!botActive && (
         <div className="space-y-4">
@@ -476,6 +505,15 @@ export default function MeetingBotPanel() {
                 )}
               </div>
             </div>
+            <button
+              onClick={handleBringToFront}
+              type="button"
+              className="px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-white/70 hover:text-white text-xs font-medium transition-all flex items-center gap-1.5 shadow-sm"
+              title="Bring meeting Chrome window to the foreground"
+            >
+              <ExternalLink className="w-3.5 h-3.5 text-cyan-400" />
+              Focus Window
+            </button>
           </div>
 
           <div className="p-4 rounded-2xl bg-white/5 border border-white/10 space-y-3">

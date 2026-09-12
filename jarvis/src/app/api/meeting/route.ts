@@ -36,6 +36,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(result);
     }
 
+    if (action === 'bring-to-front') {
+      const result = await meetingBot.bringWindowToFront();
+      return NextResponse.json(result);
+    }
+
     if (action === 'debug') {
       const debugInfo = await meetingBot.getPageDebugInfo();
       return NextResponse.json({ success: true, ...debugInfo });

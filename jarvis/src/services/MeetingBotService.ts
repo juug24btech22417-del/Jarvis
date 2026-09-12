@@ -249,6 +249,32 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
     }
   }
 
+  /**
+   * Focuses and brings the Chrome window to the absolute front of all desktop windows.
+   */
+  async bringWindowToFront(): Promise<{ success: boolean; message: string }> {
+    try {
+      if (this.state?.page) {
+        await this.state.page.bringToFront().catch(() => {});
+      }
+      if (process.platform === 'win32') {
+        const psCmd = `
+          $ws = New-Object -ComObject Wscript.Shell;
+          Get-Process -Name chrome -ErrorAction SilentlyContinue |
+            Where-Object { $_.MainWindowTitle -ne '' } |
+            ForEach-Object { $ws.AppActivate($_.Id) }
+        `;
+        execSync(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${psCmd.replace(/\n/g, ' ')}"`, {
+          timeout: 4000,
+          stdio: 'ignore',
+        });
+      }
+      return { success: true, message: 'Chrome window brought to foreground.' };
+    } catch (e: any) {
+      return { success: false, message: e.message };
+    }
+  }
+
   async joinMeeting(rawUrl: string, credentials?: { id?: string; password?: string; name?: string; email?: string; phone?: string }) {
     const { url, platform, cleanId, password } = this.normalizeMeetingTarget(rawUrl, credentials);
     console.log(`JARVIS: Attempting to join meeting (${platform}) at ${url}...`);
@@ -264,8 +290,7 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
       // so launchPersistentContext never hits the ProcessSingleton error.
       await this.prepareProfile();
 
-      // Launch a dedicated JARVIS meeting browser profile.
-      // On first run: Chrome opens — sign in to Google once, then it's permanent.
+      // Launch a dedicated JARVIS meeting browser profile with visible window.
       const context = await chromium.launchPersistentContext(JARVIS_PROFILE_DIR, {
         executablePath: CHROME_PATH,
         headless: false,
@@ -276,17 +301,18 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
           '--autoplay-policy=no-user-gesture-required',
           '--no-sandbox',
           '--disable-background-timer-throttling',
-          '--window-size=1280,720',
-          '--window-position=100,50',
+          '--start-maximized',
         ],
         ignoreDefaultArgs: ['--enable-automation'],  // No "controlled by automation" banner
-        viewport: { width: 1280, height: 720 },
+        viewport: null,                              // Full native window without artificial scaling/clipping
         permissions: ['microphone', 'camera'],
       });
 
       const pages = context.pages();
       const page = pages.length > 0 ? pages[0] : await context.newPage();
       page.setDefaultTimeout(35000);
+      await page.bringToFront().catch(() => {});
+      await this.bringWindowToFront();
 
       this.state = {
         context,
@@ -586,29 +612,63 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
             } catch {}
           }
 
-          // Click Register / Submit
-          const registerBtnSels = [
-            'button[type="submit"]',
-            'input[type="submit"]',
-            'button:has-text("Register")',
-            'button:has-text("Submit")',
-            'button:has-text("Join")',
-            '#btnSubmit',
-          ];
-          for (const sel of registerBtnSels) {
-            try {
-              const btn = page.locator(sel).first();
-              if (await btn.isVisible({ timeout: 2000 })) {
-                await btn.click({ force: true });
-                console.log(`JARVIS: Submitted webinar registration (button: "${sel}").`);
+          // Scroll down so reCAPTCHA and Register button are in view
+          await page.evaluate(() => window.scrollBy(0, 500)).catch(() => {});
+
+          // Try clicking reCAPTCHA anchor
+          try {
+            const recaptchaAnchor = page.frameLocator('iframe[title="reCAPTCHA"], iframe[src*="anchor"]').locator('#recaptcha-anchor, .recaptcha-checkbox-border').first();
+            if (await recaptchaAnchor.isVisible({ timeout: 2500 })) {
+              console.log("JARVIS: Clicking reCAPTCHA checkbox...");
+              await recaptchaAnchor.click({ force: true });
+              await page.waitForTimeout(2000);
+            }
+          } catch {}
+
+          // Ensure window is in foreground so user sees CAPTCHA if interactive challenge appears
+          await this.bringWindowToFront();
+
+          // Check if Register button is disabled (blocked by CAPTCHA)
+          const regBtnLocator = page.locator('button:has-text("Register and Join"), button:has-text("Register"), button[type="submit"], #btnSubmit').first();
+          let isBtnDisabled = await regBtnLocator.isDisabled({ timeout: 2000 }).catch(() => false);
+          if (isBtnDisabled) {
+            console.log("JARVIS: Registration button is disabled (CAPTCHA challenge). Prompting user & bringing Chrome to front...");
+            if (this.state) {
+              this.state.statusMessage = "🔔 CAPTCHA challenge in Zoom window — please complete it to join the webinar!";
+            }
+            await this.bringWindowToFront();
+
+            // Wait up to 60s for CAPTCHA resolution
+            for (let i = 0; i < 60; i++) {
+              await page.waitForTimeout(1000);
+              isBtnDisabled = await regBtnLocator.isDisabled().catch(() => false);
+              if (!isBtnDisabled) {
+                console.log("JARVIS: CAPTCHA completed! Register button is now active.");
                 break;
               }
-            } catch {}
+              const curUrl = page.url();
+              if (!curUrl.includes('register') && !curUrl.includes('registration')) {
+                console.log("JARVIS: Page redirected automatically.");
+                break;
+              }
+            }
           }
+
+          // Click Register / Submit
+          try {
+            if (await regBtnLocator.isVisible({ timeout: 2000 })) {
+              await regBtnLocator.click({ force: true });
+              console.log("JARVIS: Clicked Register and Join button.");
+              if (this.state) {
+                this.state.statusMessage = "Registration submitted! Connecting to webinar...";
+              }
+            }
+          } catch {}
 
           // Wait for confirmation page
           console.log("JARVIS: Waiting for registration confirmation...");
           await page.waitForTimeout(5000);
+          await this.bringWindowToFront();
 
           // After registration, Zoom shows a confirmation page with "Join Webinar" / "Add to Calendar" buttons.
           // The confirmation page also contains the actual /wc/join or /s/ webinar link.
@@ -620,9 +680,12 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
             'a:has-text("Join Webinar")',
             'button:has-text("Join Webinar")',
             'a:has-text("Start Webinar")',
+            'a:has-text("Click here to join")',
+            'a:has-text("join the webinar")',
             'a[href*="/wc/"]',
             'a[href*="/s/"]',
             'a[href*="zoom.us/j/"]',
+            'a[href*="zoom.us/w/"]',
           ];
           let joinedFromConfirmation = false;
           for (const sel of joinWebinarSels) {
@@ -673,8 +736,8 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
           try {
             const nameEl = page.locator(sel).first();
             if (await nameEl.isVisible({ timeout: 2500 })) {
-              await nameEl.fill('JARVIS (AI Assistant)');
-              console.log("JARVIS: Entered participant name in Zoom Web Client.");
+              await nameEl.fill(userName);
+              console.log(`JARVIS: Entered participant name (${userName}) in Zoom Web Client.`);
               break;
             }
           } catch {}
@@ -768,7 +831,7 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
         try {
           const nameInput = page.locator('#inputname, input[placeholder*="name" i], #input-for-name').first();
           if (await nameInput.isVisible({ timeout: 4000 })) {
-            await nameInput.fill('JARVIS (AI Assistant)');
+            await nameInput.fill(userName);
             const joinBtn = page.locator('button:has-text("Join"), #joinBtn').first();
             if (await joinBtn.isVisible({ timeout: 2000 })) {
               await joinBtn.click();
@@ -788,6 +851,8 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
           console.log("JARVIS: Connected computer audio in Zoom.");
         }
       } catch {}
+
+      await this.bringWindowToFront();
 
     } catch (e: any) {
       console.warn("JARVIS: Zoom join flow note:", e.message);
@@ -890,20 +955,20 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
       await page.waitForTimeout(500);
 
       const captionBtn = page.locator(
-        'button[aria-label*="caption" i], button:has-text("Captions"), button:has-text("Show Captions"), button:has-text("CC")'
+        'button[aria-label*="caption" i], button[aria-label*="live transcript" i], button:has-text("Captions"), button:has-text("Show Captions"), button:has-text("CC"), button:has-text("Live Transcript")'
       ).first();
 
-      if (await captionBtn.isVisible({ timeout: 3000 })) {
+      if (await captionBtn.isVisible({ timeout: 2500 })) {
         await captionBtn.click();
         console.log("JARVIS: Clicked Zoom Captions button.");
         return;
       }
 
-      const moreBtn = page.locator('button[aria-label*="More meeting control" i], button:has-text("More")').first();
+      const moreBtn = page.locator('button[aria-label*="More meeting control" i], button[aria-label*="More" i], button:has-text("More")').first();
       if (await moreBtn.isVisible({ timeout: 2000 })) {
         await moreBtn.click();
         await page.waitForTimeout(500);
-        const menuCc = page.locator('li:has-text("Captions"), button:has-text("Captions")').first();
+        const menuCc = page.locator('li:has-text("Captions"), button:has-text("Captions"), [role="menuitem"]:has-text("Captions"), [role="menuitem"]:has-text("Show Captions"), [role="menuitem"]:has-text("Live Transcript")').first();
         if (await menuCc.isVisible({ timeout: 2000 })) {
           await menuCc.click();
           console.log("JARVIS: Enabled Zoom captions via More menu.");
@@ -957,11 +1022,19 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
             return { status: 'home' };
           }
 
+          if (url.includes('/register') || url.includes('/registration')) {
+            return { status: 'register' };
+          }
+
           const isWaiting =
             bodyText.includes('asking to join') ||
             bodyText.includes('someone will let you in') ||
             bodyText.includes('waiting for the host') ||
             bodyText.includes('will let you in soon') ||
+            bodyText.includes('webinar will begin shortly') ||
+            bodyText.includes('please wait for the host') ||
+            bodyText.includes('waiting for host to start') ||
+            bodyText.includes('the host has another meeting in progress') ||
             bodyText.includes('no one can join a meeting unless invited');
 
           if (isWaiting) {
@@ -970,11 +1043,11 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
 
           const hasLeave =
             document.querySelector(
-              'button[aria-label*="Leave call" i], button[data-tooltip*="Leave call" i], button[jsname="CQylAd"]'
+              'button[aria-label*="Leave call" i], button[data-tooltip*="Leave call" i], button[jsname="CQylAd"], button.footer__leave-btn, button:has-text("Leave")'
             ) !== null;
           const hasInCallControls =
             document.querySelector(
-              'div[data-meeting-title], button[aria-label*="Meeting details" i], div[data-allocation-index]'
+              'div[data-meeting-title], button[aria-label*="Meeting details" i], div[data-allocation-index], #foot-bar, .meeting-client-inner, .footer__control-bar, button[aria-label*="Audio" i], button[aria-label*="Mute" i]'
             ) !== null;
 
           if (hasLeave || hasInCallControls) {
@@ -984,9 +1057,13 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
           return { status: 'unknown' };
         }).catch(() => ({ status: 'unknown' }));
 
+        if (roomState.status === 'register') {
+          this.state.statusMessage = "🔔 Completing webinar registration in Zoom Chrome window...";
+          return;
+        }
+
         if (roomState.status === 'waiting') {
-          this.state.statusMessage = "🔔 JARVIS is asking to join. Boss, please click 'Admit' in your Google Meet window!";
-          // Never scrape waiting room banner text!
+          this.state.statusMessage = "🔔 Waiting for host to start / admit to the meeting...";
           return;
         }
 
@@ -1059,15 +1136,30 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
             });
           }
 
-          // Zoom Web Client captions fallback
+          // Zoom Web Client captions, subtitles & live transcript fallback
           if (entries.length === 0) {
-            const zoomItems = document.querySelectorAll('.meeting-transcription-item, .caption-window, .cc-text');
+            const zoomItems = document.querySelectorAll(
+              '.meeting-transcription-item, .caption-window, .closed-caption-window, .cc-text, [class*="captionText"], [class*="caption-window"], [class*="transcript-item"], .live-transcript-item, .live-transcript-content'
+            );
             zoomItems.forEach(item => {
               if (isDialogOrMenu(item)) return;
-              const speaker = item.querySelector('.speaker-name, strong')?.textContent?.trim() || '';
-              const text = item.textContent?.replace(speaker, '').trim() || '';
+              const speakerEl = item.querySelector('.speaker-name, .meeting-transcription-speaker, strong, b');
+              const speaker = speakerEl?.textContent?.trim() || '';
+              const textEl = item.querySelector('.meeting-transcription-item-text, .caption-content, [class*="content"]') || item;
+              const rawText = textEl.textContent || '';
+              const text = (speaker ? rawText.replace(speaker, '') : rawText).trim();
               if (text.length > 1 && text.length < 500) {
                 entries.push({ speaker: speaker || 'Speaker', text });
+              }
+            });
+
+            // Zoom in-meeting chat fallback (if dialogue is typed or host shares info in chat)
+            const chatItems = document.querySelectorAll('.chat-item__chat-info-msg, .chat-message-item, .chat-message__text');
+            chatItems.forEach(item => {
+              const sender = item.querySelector('.chat-item__sender, .sender-name, strong')?.textContent?.trim() || 'Chat';
+              const msg = item.querySelector('.chat-item__chat-info, .message-content, [class*="message"]')?.textContent?.trim() || '';
+              if (msg.length > 1 && msg.length < 500) {
+                entries.push({ speaker: `${sender} (Chat)`, text: msg });
               }
             });
           }
