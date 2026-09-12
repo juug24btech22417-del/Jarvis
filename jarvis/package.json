@@ -50,6 +50,7 @@
     "qrcode": "^1.5.4",
     "react": "^18",
     "react-dom": "^18",
+    "screenshot-desktop": "^1.15.6",
     "systeminformation": "^5.31.6",
     "three": "^0.183.2",
     "uuid": "^14.0.0",

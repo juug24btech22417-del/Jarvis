@@ -36,11 +36,14 @@ export function useJarvisSentinel() {
           return;
         }
 
-        // 2. Analyze screen
+        // 2. Analyze screen or desktop context
         const analyzeRes = await fetch("/api/sentinel/analyze", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ imageBase64: captureData.image }),
+          body: JSON.stringify({
+            imageBase64: captureData.image,
+            desktopContext: captureData.desktopContext,
+          }),
         });
         const analyzeData = await analyzeRes.json();
 

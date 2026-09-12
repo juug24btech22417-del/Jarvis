@@ -13,6 +13,12 @@ const OPENROUTER_VISION_MODELS = [
   "openrouter/free",
 ];
 
+const OPENROUTER_TEXT_MODELS = [
+  "google/gemma-3-27b-it:free",
+  "google/gemma-4-26b-a4b-it:free",
+  "openrouter/free",
+];
+
 const SENTINEL_SYSTEM_PROMPT = `You are JARVIS Sentinel Eyes, an AI desktop assistant.
 Analyze the provided screenshot of the user's computer screen.
 Identify the active window, app, code editor, website, or document.
@@ -27,6 +33,28 @@ You MUST reply with ONLY a raw valid JSON object in this exact schema:
     "type": "task",
     "title": "Review active workspace",
     "details": "Active window observation and workspace verification complete.",
+    "metadata": {}
+  }
+}`;
+
+const SENTINEL_TEXT_PROMPT = `You are JARVIS Sentinel Eyes, an AI desktop assistant.
+The visual screen capture is unavailable, but you have been provided with a text-based snapshot of the user's desktop:
+- The foreground window title and process
+- A list of all visible windows
+- Top running processes by CPU/memory
+
+Analyze this information to understand what the user ("Boss") is currently doing.
+Provide a sharp, observant 1-2 sentence comment in JARVIS's polite, witty assistant persona (addressing the user as 'Boss').
+Also identify an optional proactive action (task, reminder, debug suggestion, or security risk).
+
+You MUST reply with ONLY a raw valid JSON object in this exact schema:
+{
+  "proactive": true,
+  "comment": "I see you have VS Code and Chrome open, Boss. Looks like a productive coding session.",
+  "action": {
+    "type": "task",
+    "title": "Workspace monitoring",
+    "details": "Desktop activity tracked via process analysis.",
     "metadata": {}
   }
 }`;
@@ -122,45 +150,95 @@ async function tryNvidiaVision(imageBase64: string): Promise<string> {
   return content;
 }
 
-function parseVisionResponse(rawText: string) {
-  // Strip code blocks if present
-  let cleaned = rawText.trim();
-  const codeBlockMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (codeBlockMatch) {
-    cleaned = codeBlockMatch[1].trim();
+/**
+ * Text-based analysis fallback when screen capture returns black/empty.
+ * Uses a text-only LLM to analyze active window/process info.
+ */
+async function tryTextAnalysis(desktopContext: string): Promise<string> {
+  if (!OPENROUTER_API_KEY || OPENROUTER_API_KEY === "your-api-key-here") {
+    throw new Error("OPENROUTER_API_KEY not configured");
   }
 
-  // Find first JSON structure
+  for (const model of OPENROUTER_TEXT_MODELS) {
+    try {
+      const res = await fetch(OPENROUTER_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+          "HTTP-Referer": "https://jarvis.local",
+          "X-Title": "JARVIS Sentinel",
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            {
+              role: "user",
+              content: `${SENTINEL_TEXT_PROMPT}\n\n--- DESKTOP SNAPSHOT ---\n${desktopContext}`,
+            },
+          ],
+          max_tokens: 450,
+          temperature: 0.2,
+        }),
+        signal: AbortSignal.timeout(16000),
+      });
+
+      if (!res.ok) continue;
+
+      const data = await res.json();
+      const content = data.choices?.[0]?.message?.content?.trim();
+      if (content) return content;
+    } catch {
+      continue;
+    }
+  }
+
+  throw new Error("All text models failed");
+}
+
+function parseVisionResponse(rawText: string) {
+  let cleaned = rawText.trim();
+
+  // Try to find first JSON structure
   const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
   if (jsonMatch) {
     try {
       const parsed = JSON.parse(jsonMatch[0]);
-      return {
-        proactive: true,
-        comment:
-          parsed.comment ||
-          "I have observed your active screen environment, Boss.",
-        action: parsed.action || {
-          type: "task",
-          title: "Workspace Observation",
-          details: "Screen analyzed and parameters recorded.",
-          metadata: {},
-        },
-      };
+      if (parsed && typeof parsed === "object") {
+        const comment = parsed.comment?.trim();
+        if (comment && comment.length > 3 && !comment.startsWith("```")) {
+          return {
+            proactive: true,
+            comment,
+            action: parsed.action || {
+              type: "task",
+              title: "Workspace Observation",
+              details: "Screen analyzed and parameters recorded.",
+              metadata: {},
+            },
+          };
+        }
+      }
     } catch {
-      // Fall through to plain text extraction
+      // Fall through to text cleanup
     }
   }
 
-  // Plain text response fallback: Clean up model thinking or preamble
-  const lines = cleaned
+  // Strip code blocks, markdown ticks, thinking tags
+  const withoutCodeBlocks = cleaned
     .replace(/<think>[\s\S]*?<\/think>/gi, "")
-    .trim()
+    .replace(/```(?:json)?/gi, "")
+    .replace(/```/g, "")
+    .trim();
+
+  const lines = withoutCodeBlocks
     .split("\n")
     .map((l) => l.trim())
-    .filter((l) => l.length > 0);
+    .filter((l) => l.length > 0 && !l.startsWith("{") && !l.startsWith("}") && !l.startsWith('"'));
 
-  const cleanComment = lines[0] || "I have analyzed your screen, Boss. Everything appears in order.";
+  const cleanComment =
+    lines.find((l) => l.length > 10) ||
+    "I have analyzed your active desktop, Boss. Everything appears in order.";
 
   return {
     proactive: true,
@@ -177,10 +255,48 @@ function parseVisionResponse(rawText: string) {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { imageBase64 } = body;
+    const { imageBase64, desktopContext } = body;
+
+    // If we have desktop context (text fallback from black screen), use text analysis
+    if (desktopContext && !imageBase64) {
+      console.log("[Sentinel] Using text-based analysis (screen capture unavailable)...");
+      try {
+        const rawOutput = await tryTextAnalysis(desktopContext);
+        const result = parseVisionResponse(rawOutput);
+        return NextResponse.json({
+          success: true,
+          proactive: true,
+          comment: result.comment,
+          action: result.action,
+          modelUsed: "text-fallback",
+          mode: "text",
+        });
+      } catch (textErr: any) {
+        console.warn("[Sentinel] Text analysis failed:", textErr?.message);
+        // Return a generic context-aware comment based on the raw context
+        const fgMatch = desktopContext.match(/FOREGROUND_WINDOW:\s*(.+)/i);
+        const fgProc = desktopContext.match(/FOREGROUND_PROCESS:\s*(.+)/i);
+        const fgWindow = fgMatch?.[1]?.trim() || "your desktop";
+        const fgApp = fgProc?.[1]?.trim() || "an application";
+
+        return NextResponse.json({
+          success: true,
+          proactive: true,
+          comment: `Boss, I can see you're working with ${fgApp}${fgWindow ? ` — "${fgWindow}"` : ""}. All systems nominal.`,
+          action: {
+            type: "task",
+            title: "Desktop Monitoring",
+            details: `Active application: ${fgApp}. Window: ${fgWindow}.`,
+            metadata: {},
+          },
+          modelUsed: "context-fallback",
+          mode: "text",
+        });
+      }
+    }
 
     if (!imageBase64) {
-      return NextResponse.json({ error: "Image required" }, { status: 400 });
+      return NextResponse.json({ error: "Image or desktop context required" }, { status: 400 });
     }
 
     let rawOutput: string | null = null;
@@ -228,6 +344,7 @@ export async function POST(req: NextRequest) {
       comment: result.comment,
       action: result.action,
       modelUsed: successfulModel,
+      mode: "vision",
     });
   } catch (error) {
     console.error("[Sentinel] Unexpected route error:", error);

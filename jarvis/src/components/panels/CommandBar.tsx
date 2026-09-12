@@ -349,7 +349,10 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
           const analyzeRes = await fetch("/api/sentinel/analyze", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ imageBase64: captureData.image }),
+            body: JSON.stringify({
+              imageBase64: captureData.image,
+              desktopContext: captureData.desktopContext,
+            }),
           });
           const analyzeData = await analyzeRes.json();
           if (analyzeData.success && analyzeData.comment) {
