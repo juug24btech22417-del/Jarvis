@@ -251,6 +251,9 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
 
   /**
    * Focuses and brings the Chrome window to the absolute front of all desktop windows.
+   * Uses Win32 EnumWindows + SwitchToThisWindow via PowerShell for 100% reliable foregrounding.
+   * Multi-process Chrome windows are top-level Chrome_WidgetWin_1 HWNDs that .NET's
+   * MainWindowHandle misses; EnumWindows finds and activates them properly.
    */
   async bringWindowToFront(): Promise<{ success: boolean; message: string }> {
     try {
@@ -258,20 +261,81 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
         await this.state.page.bringToFront().catch(() => {});
       }
       if (process.platform === 'win32') {
-        const psCmd = `
-          $ws = New-Object -ComObject Wscript.Shell;
-          Get-Process -Name chrome -ErrorAction SilentlyContinue |
-            Where-Object { $_.MainWindowTitle -ne '' } |
-            ForEach-Object { $ws.AppActivate($_.Id) }
-        `;
-        execSync(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${psCmd.replace(/\n/g, ' ')}"`, {
-          timeout: 4000,
+        const psScript = `
+Add-Type @"
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public class ChromeFocusHelper {
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
+
+    public static int FocusChromeWindows() {
+        var chromePids = new HashSet<uint>();
+        foreach (var p in System.Diagnostics.Process.GetProcessesByName("chrome")) {
+            chromePids.Add((uint)p.Id);
+        }
+        int count = 0;
+        EnumWindows((hWnd, lParam) => {
+            if (!IsWindowVisible(hWnd)) return true;
+            uint pid;
+            GetWindowThreadProcessId(hWnd, out pid);
+            if (chromePids.Contains(pid)) {
+                var sbClass = new StringBuilder(256);
+                GetClassName(hWnd, sbClass, 256);
+                if (sbClass.ToString() == "Chrome_WidgetWin_1") {
+                    ShowWindow(hWnd, 9); // SW_RESTORE
+                    SwitchToThisWindow(hWnd, true);
+                    SetForegroundWindow(hWnd);
+                    count++;
+                }
+            }
+            return true;
+        }, IntPtr.Zero);
+        return count;
+    }
+}
+"@
+[ChromeFocusHelper]::FocusChromeWindows()
+`;
+        const tmpPs1 = path.join(os.tmpdir(), 'jarvis-focus-chrome.ps1');
+        fs.writeFileSync(tmpPs1, psScript, 'utf8');
+        execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${tmpPs1}"`, {
+          timeout: 5000,
           stdio: 'ignore',
         });
+        try { fs.unlinkSync(tmpPs1); } catch {}
       }
       return { success: true, message: 'Chrome window brought to foreground.' };
     } catch (e: any) {
+      console.warn('JARVIS: bringWindowToFront note:', e.message);
       return { success: false, message: e.message };
+    }
+  }
+
+  /**
+   * Takes a screenshot of the current browser page for debugging.
+   * Returns the base64-encoded PNG.
+   */
+  async takeScreenshot(): Promise<{ success: boolean; screenshot?: string; url?: string; error?: string }> {
+    if (!this.state?.page) {
+      return { success: false, error: 'Bot not active — no browser page.' };
+    }
+    try {
+      const buffer = await this.state.page.screenshot({ type: 'png' });
+      const base64 = buffer.toString('base64');
+      const url = this.state.page.url();
+      return { success: true, screenshot: base64, url };
+    } catch (e: any) {
+      return { success: false, error: e.message };
     }
   }
 
@@ -311,6 +375,18 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
       const pages = context.pages();
       const page = pages.length > 0 ? pages[0] : await context.newPage();
       page.setDefaultTimeout(35000);
+
+      // Listen for any new popups or tabs (e.g. webinar join link opened in a new tab)
+      context.on('page', async (newPage) => {
+        console.log(`JARVIS: New browser tab/popup opened: ${newPage.url()}`);
+        if (this.state) {
+          this.state.page = newPage;
+          newPage.setDefaultTimeout(35000);
+          await newPage.bringToFront().catch(() => {});
+          await this.bringWindowToFront();
+        }
+      });
+
       await page.bringToFront().catch(() => {});
       await this.bringWindowToFront();
 
@@ -719,6 +795,11 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
         console.warn("JARVIS: Webinar registration flow note:", regErr.message);
       }
 
+      // Ensure we are operating on the active page/tab (in case registration opened a new tab)
+      if (this.state?.page) {
+        page = this.state.page;
+      }
+
       // 3. If on Zoom Web Client (/wc/): Enter name & password, then click Join
       const isWebClient = page.url().includes('/wc/');
       if (isWebClient) {
@@ -951,30 +1032,110 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
 
   private async enableZoomCaptions(page: Page) {
     try {
-      await page.mouse.move(500, 500);
-      await page.waitForTimeout(500);
+      const frames = page.frames();
+      const captionBtnSelectors = [
+        'button[aria-label="Show Captions"]',
+        'button[aria-label*="Show Caption" i]',
+        'button.new-lt-button',
+        'button[aria-label*="caption" i]',
+        'button[aria-label*="live transcript" i]',
+        'button[aria-label*="subtitle" i]',
+        'button[aria-label*="CC" i]',
+        'button:has-text("Show Captions")',
+        'button:has-text("Captions")',
+        'button:has-text("CC")',
+        'button:has-text("Live Transcript")',
+        'button:has-text("Show Subtitle")',
+        'button:has-text("Subtitle")',
+        '#captions button',
+        '[class*="caption-btn"]',
+        '[class*="subtitle-btn"]',
+        '[data-testid*="caption"]',
+      ];
 
-      const captionBtn = page.locator(
-        'button[aria-label*="caption" i], button[aria-label*="live transcript" i], button:has-text("Captions"), button:has-text("Show Captions"), button:has-text("CC"), button:has-text("Live Transcript")'
-      ).first();
+      for (const frame of frames) {
+        // Move mouse in frame to reveal bottom toolbar (Zoom auto-hides it)
+        try {
+          const vp = page.viewportSize() || { width: 960, height: 540 };
+          await page.mouse.move(vp.width / 2, vp.height - 50);
+          await page.waitForTimeout(400);
+        } catch {}
 
-      if (await captionBtn.isVisible({ timeout: 2500 })) {
-        await captionBtn.click();
-        console.log("JARVIS: Clicked Zoom Captions button.");
-        return;
-      }
+        // Check if captions are already active
+        try {
+          const alreadyOn = await frame.evaluate(() => {
+            const btn = document.querySelector(
+              'button[aria-label*="Hide Caption" i], button[aria-label*="Turn off caption" i], button[aria-pressed="true"][aria-label*="caption" i]'
+            );
+            return !!btn;
+          }).catch(() => false);
+          if (alreadyOn) {
+            return;
+          }
+        } catch {}
 
-      const moreBtn = page.locator('button[aria-label*="More meeting control" i], button[aria-label*="More" i], button:has-text("More")').first();
-      if (await moreBtn.isVisible({ timeout: 2000 })) {
-        await moreBtn.click();
-        await page.waitForTimeout(500);
-        const menuCc = page.locator('li:has-text("Captions"), button:has-text("Captions"), [role="menuitem"]:has-text("Captions"), [role="menuitem"]:has-text("Show Captions"), [role="menuitem"]:has-text("Live Transcript")').first();
-        if (await menuCc.isVisible({ timeout: 2000 })) {
-          await menuCc.click();
-          console.log("JARVIS: Enabled Zoom captions via More menu.");
+        for (const sel of captionBtnSelectors) {
+          try {
+            const btn = frame.locator(sel).first();
+            if (await btn.isVisible({ timeout: 1000 })) {
+              await btn.click({ force: true });
+              console.log(`JARVIS: Clicked Zoom Captions button in frame: ${sel}`);
+
+              // If a dropdown menu appears after clicking, pick the subtitle option
+              await page.waitForTimeout(500);
+              const subtitleOption = frame.locator(
+                '[role="menuitem"]:has-text("Show Subtitle"), [role="menuitem"]:has-text("Show Captions"), ' +
+                'li:has-text("Show Subtitle"), li:has-text("Show Captions"), a:has-text("Show Subtitle")'
+              ).first();
+              if (await subtitleOption.isVisible({ timeout: 1200 })) {
+                await subtitleOption.click();
+                console.log('JARVIS: Selected "Show Subtitle" from dropdown menu.');
+              }
+              return;
+            }
+          } catch {}
         }
+
+        // Fallback: Open "More" menu and look for caption options in frame
+        try {
+          const moreBtn = frame.locator(
+            'button[aria-label*="More meeting control" i], button[aria-label*="More" i], ' +
+            'button:has-text("More"), [class*="more-button"]'
+          ).first();
+          if (await moreBtn.isVisible({ timeout: 1000 })) {
+            await moreBtn.click();
+            await page.waitForTimeout(600);
+            const menuItems = [
+              'Captions', 'Show Captions', 'Live Transcript', 'Show Subtitle', 'Subtitle',
+            ];
+            for (const label of menuItems) {
+              const menuItem = frame.locator(
+                `li:has-text("${label}"), button:has-text("${label}"), [role="menuitem"]:has-text("${label}"), [role="option"]:has-text("${label}")`
+              ).first();
+              if (await menuItem.isVisible({ timeout: 1000 })) {
+                await menuItem.click();
+                console.log(`JARVIS: Enabled Zoom captions via More menu → "${label}".`);
+
+                await page.waitForTimeout(500);
+                const subOption = frame.locator(
+                  '[role="menuitem"]:has-text("Show Subtitle"), [role="menuitem"]:has-text("Show Captions")'
+                ).first();
+                if (await subOption.isVisible({ timeout: 800 })) {
+                  await subOption.click();
+                  console.log('JARVIS: Selected subtitle sub-option.');
+                }
+                return;
+              }
+            }
+            await page.keyboard.press('Escape');
+          }
+        } catch {}
       }
-    } catch {}
+
+      console.log('JARVIS: Could not find Zoom caption buttons — host may need to enable them for this webinar.');
+    } catch (e: any) {
+      console.warn('JARVIS: enableZoomCaptions note:', e.message);
+    }
   }
 
   private findNewText(oldStr: string, newStr: string): string {
@@ -1013,6 +1174,22 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
       this._captionBusy = true;
 
       try {
+        // If there are multiple tabs (e.g. registration page + webinar tab), ensure we are tracking the meeting tab
+        if (this.state?.context) {
+          const allPages = this.state.context.pages();
+          if (allPages.length > 1) {
+            const meetingPage = allPages.find(p => {
+              const u = p.url().toLowerCase();
+              return u.includes('/wc/') || u.includes('/s/') || (u.includes('/j/') && !u.includes('/register')) || (u.includes('meet.google.com/') && u !== 'https://meet.google.com/');
+            }) || allPages[allPages.length - 1];
+            if (meetingPage && meetingPage !== page) {
+              console.log(`JARVIS: Switching active meeting page to ${meetingPage.url()}`);
+              page = meetingPage;
+              this.state.page = meetingPage;
+            }
+          }
+        }
+
         // Step 1: Detect actual room state
         const roomState = await page.evaluate(() => {
           const bodyText = document.body.innerText.toLowerCase();
@@ -1022,8 +1199,12 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
             return { status: 'home' };
           }
 
+          // Only consider register state if the registration form is actually present
           if (url.includes('/register') || url.includes('/registration')) {
-            return { status: 'register' };
+            const hasForm = document.querySelector('input[type="email"], input[name*="email" i], #question_email, #btnSubmit');
+            if (hasForm) {
+              return { status: 'register' };
+            }
           }
 
           const isWaiting =
@@ -1041,21 +1222,30 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
             return { status: 'waiting' };
           }
 
+          // Safe CSS selector check without Playwright pseudo-classes
           const hasLeave =
             document.querySelector(
-              'button[aria-label*="Leave call" i], button[data-tooltip*="Leave call" i], button[jsname="CQylAd"], button.footer__leave-btn, button:has-text("Leave")'
-            ) !== null;
+              'button[aria-label*="Leave call" i], button[data-tooltip*="Leave call" i], button[jsname="CQylAd"], button.footer__leave-btn, button[aria-label*="Leave" i], [class*="leave-btn"], [class*="leave_btn"]'
+            ) !== null ||
+            Array.from(document.querySelectorAll('button')).some(b => {
+              const txt = b.textContent?.trim().toLowerCase();
+              return txt === 'leave' || txt === 'leave meeting' || txt === 'leave webinar';
+            });
+
           const hasInCallControls =
             document.querySelector(
-              'div[data-meeting-title], button[aria-label*="Meeting details" i], div[data-allocation-index], #foot-bar, .meeting-client-inner, .footer__control-bar, button[aria-label*="Audio" i], button[aria-label*="Mute" i]'
-            ) !== null;
+              'div[data-meeting-title], button[aria-label*="Meeting details" i], div[data-allocation-index], #foot-bar, .meeting-client-inner, .footer__control-bar, [class*="footer"], [class*="control-bar"], button[aria-label*="Audio" i], button[aria-label*="Mute" i], button[aria-label*="Captions" i], button[aria-label*="Subtitle" i], button[aria-label*="Chat" i], button[aria-label*="Raise Hand" i], button[aria-label*="Q&A" i]'
+            ) !== null ||
+            url.includes('/wc/') || url.includes('/s/') || (url.includes('/j/') && !url.includes('/register'));
 
           if (hasLeave || hasInCallControls) {
             return { status: 'in_call' };
           }
 
           return { status: 'unknown' };
-        }).catch(() => ({ status: 'unknown' }));
+        }).catch((e: any) => {
+          return { status: 'unknown' };
+        });
 
         if (roomState.status === 'register') {
           this.state.statusMessage = "🔔 Completing webinar registration in Zoom Chrome window...";
@@ -1072,7 +1262,7 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
           return;
         }
 
-        if (roomState.status === 'in_call') {
+        if (roomState.status === 'in_call' || roomState.status === 'unknown') {
           if (!this.state.statusMessage.startsWith('In meeting')) {
             this.state.statusMessage = 'In meeting — Transcribing dialogue and chat...';
           }
@@ -1084,88 +1274,148 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
           }
         }
 
-        // Step 2: Scrape live subtitles/captions
-        const scrapedCaptions = await page.evaluate(() => {
-          const entries: Array<{ speaker: string; text: string }> = [];
+        // Step 2: Scrape live subtitles/captions across all frames (Zoom embeds UI in an iframe)
+        const scrapedCaptions: Array<{ speaker: string; text: string }> = [];
+        const frames = page.frames();
 
-          // Never scrape inside modals, menus, settings, or dialogs!
-          const isDialogOrMenu = (el: Element) => {
-            return !!el.closest('[role="dialog"], [role="menu"], [role="listbox"], [aria-modal="true"], .VfPpkd-xl07Ob, aside');
-          };
+        for (const frame of frames) {
+          try {
+            const frameEntries = await frame.evaluate(() => {
+              const entries: Array<{ speaker: string; text: string }> = [];
 
-          // Google Meet dedicated subtitle containers
-          const meetContainers = document.querySelectorAll('div[jsname="tgaKEf"], div.nMxPwe');
+              // Never scrape inside modals, menus, settings, or dialogs!
+              const isDialogOrMenu = (el: Element) => {
+                return !!el.closest('[role="dialog"], [role="menu"], [role="listbox"], [aria-modal="true"], .VfPpkd-xl07Ob, aside');
+              };
 
-          meetContainers.forEach(container => {
-            if (isDialogOrMenu(container)) return;
+              // Google Meet dedicated subtitle containers
+              const meetContainers = document.querySelectorAll('div[jsname="tgaKEf"], div.nMxPwe');
+              meetContainers.forEach(container => {
+                if (isDialogOrMenu(container)) return;
 
-            const speakerEl = container.querySelector('.zs7s8d, [jsname="r4nke"], .NWp81d, [data-sender-name]');
-            const speaker = speakerEl?.textContent?.trim() || '';
+                const speakerEl = container.querySelector('.zs7s8d, [jsname="r4nke"], .NWp81d, [data-sender-name]');
+                const speaker = speakerEl?.textContent?.trim() || '';
 
-            // Strictly query the actual Google Meet spoken text nodes (NEVER generic 'span')
-            const textEls = container.querySelectorAll('.VbkSUe, [jsname="YSxPC"], .bh44bd');
-            let parts: string[] = [];
+                const textEls = container.querySelectorAll('.VbkSUe, [jsname="YSxPC"], .bh44bd');
+                let parts: string[] = [];
+                textEls.forEach(el => {
+                  if (speakerEl && (el === speakerEl || speakerEl.contains(el))) return;
+                  const t = el.textContent?.trim() || '';
+                  if (t && t.length > 0 && !parts.includes(t)) {
+                    parts.push(t);
+                  }
+                });
 
-            textEls.forEach(el => {
-              if (speakerEl && (el === speakerEl || speakerEl.contains(el))) return;
-              const t = el.textContent?.trim() || '';
-              if (t && t.length > 0 && !parts.includes(t)) {
-                parts.push(t);
+                const text = parts.join(' ').replace(/\s+/g, ' ').trim();
+                if (text.length > 1 && text.length < 500) {
+                  entries.push({ speaker: speaker || 'Speaker', text });
+                }
+              });
+
+              // Fallback: direct query for subtitle spans if outer container classes differ
+              if (entries.length === 0) {
+                const subtitleNodes = document.querySelectorAll('.VbkSUe, [jsname="YSxPC"]');
+                subtitleNodes.forEach(node => {
+                  if (isDialogOrMenu(node)) return;
+                  const parent = node.closest('div');
+                  const speakerEl = parent?.querySelector('.zs7s8d, [jsname="r4nke"], .NWp81d');
+                  const speaker = speakerEl?.textContent?.trim() || '';
+                  const text = node.textContent?.trim() || '';
+                  if (text && text.length > 1 && text.length < 500) {
+                    entries.push({ speaker: speaker || 'Speaker', text });
+                  }
+                });
               }
-            });
 
-            const text = parts.join(' ').replace(/\s+/g, ' ').trim();
-            // Discard language menus (usually hundreds of characters of language names)
-            if (text.length > 1 && text.length < 500) {
-              entries.push({ speaker: speaker || 'Speaker', text });
+              // Zoom Web Client active live subtitles (exact match from Zoom DOM)
+              const zoomLiveSubtitles = document.querySelectorAll('.live-transcription-subtitle__item, #live-transcription-subtitle, [class*="live-transcription-subtitle__item"]');
+              zoomLiveSubtitles.forEach(node => {
+                const text = node.textContent?.trim() || '';
+                if (text && text.length > 1 && text.length < 1000 && !text.includes('Show Captions') && !text.includes('Hide Captions')) {
+                  entries.push({ speaker: 'Speaker', text });
+                }
+              });
+
+              // Zoom Web Client captions, subtitles & live transcript fallback
+              if (entries.length === 0) {
+                const zoomSelectors = [
+                  '.live-transcription-subtitle__item',
+                  '#live-transcription-subtitle',
+                  '[class*="live-transcription-subtitle"]',
+                  '.caption-window', '.closed-caption-window', '.cc-text',
+                  '[class*="captionText"]', '[class*="caption-window"]',
+                  '[class*="closed-caption"]',
+                  '.meeting-transcription-item', '.live-transcript-item',
+                  '.live-transcript-content', '[class*="transcript-item"]',
+                  '[class*="transcript-message"]',
+                  '[class*="subtitle"]', '[class*="sub-title"]',
+                  '[aria-label*="caption" i]', '[aria-label*="transcript" i]',
+                  '[aria-label*="subtitle" i]',
+                  '[data-testid*="caption"]', '[data-testid*="transcript"]',
+                ];
+                const zoomItems = document.querySelectorAll(zoomSelectors.join(', '));
+                zoomItems.forEach(item => {
+                  if (isDialogOrMenu(item)) return;
+                  if (item.tagName === 'BUTTON' || item.closest('button') || item.getAttribute('role') === 'button') return;
+                  const speakerEl = item.querySelector(
+                    '.speaker-name, .meeting-transcription-speaker, strong, b, ' +
+                    '[class*="speaker"], [class*="sender"], [class*="name"]'
+                  );
+                  const speaker = speakerEl?.textContent?.trim() || '';
+                  const textEl = item.querySelector(
+                    '.meeting-transcription-item-text, .caption-content, ' +
+                    '[class*="content"], [class*="text"], [class*="message"], span'
+                  ) || item;
+                  const rawText = textEl.textContent || '';
+                  const text = (speaker ? rawText.replace(speaker, '') : rawText).trim();
+                  if (text.length > 1 && text.length < 500 && !text.includes('Show Captions')) {
+                    entries.push({ speaker: speaker || 'Speaker', text });
+                  }
+                });
+
+                // Zoom in-meeting chat fallback
+                const chatItems = document.querySelectorAll(
+                  '.chat-item__chat-info-msg, .chat-message-item, .chat-message__text, ' +
+                  '[class*="chat-message"], [class*="chatMessage"]'
+                );
+                chatItems.forEach(item => {
+                  const sender = item.querySelector('.chat-item__sender, .sender-name, strong, [class*="sender"]')?.textContent?.trim() || 'Chat';
+                  const msg = item.querySelector('.chat-item__chat-info, .message-content, [class*="message"], [class*="content"]')?.textContent?.trim() || '';
+                  if (msg.length > 1 && msg.length < 500) {
+                    entries.push({ speaker: `${sender} (Chat)`, text: msg });
+                  }
+                });
+              }
+
+              // ULTIMATE FALLBACK: Scan for visible bottom overlay divs (Zoom caption overlay)
+              if (entries.length === 0) {
+                const allDivs = document.querySelectorAll('div, span');
+                allDivs.forEach(div => {
+                  if (isDialogOrMenu(div)) return;
+                  if (div.tagName === 'BUTTON' || div.closest('button') || div.getAttribute('role') === 'button' || div.closest('#foot-bar, footer, .footer, [class*="footer"]')) return;
+                  const style = window.getComputedStyle(div);
+                  const isBottomOverlay =
+                    (style.position === 'absolute' || style.position === 'fixed') &&
+                    parseInt(style.bottom || '999') < 200 &&
+                    parseInt(style.fontSize || '0') >= 14;
+                  if (!isBottomOverlay) return;
+                  const text = div.textContent?.trim() || '';
+                  if (text.length > 2 && text.length < 500 && !text.includes('Leave') && !text.includes('Show Captions') && !text.includes('Mute')) {
+                    entries.push({ speaker: 'Speaker', text });
+                  }
+                });
+              }
+
+              return entries;
+            }).catch(() => []);
+
+            for (const entry of frameEntries) {
+              if (!scrapedCaptions.some(c => c.text === entry.text)) {
+                scrapedCaptions.push(entry);
+              }
             }
-          });
-
-          // Fallback: direct query for subtitle spans if outer container classes differ
-          if (entries.length === 0) {
-            const subtitleNodes = document.querySelectorAll('.VbkSUe, [jsname="YSxPC"]');
-            subtitleNodes.forEach(node => {
-              if (isDialogOrMenu(node)) return;
-              const parent = node.closest('div');
-              const speakerEl = parent?.querySelector('.zs7s8d, [jsname="r4nke"], .NWp81d');
-              const speaker = speakerEl?.textContent?.trim() || '';
-              const text = node.textContent?.trim() || '';
-              if (text && text.length > 1 && text.length < 500) {
-                entries.push({ speaker: speaker || 'Speaker', text });
-              }
-            });
-          }
-
-          // Zoom Web Client captions, subtitles & live transcript fallback
-          if (entries.length === 0) {
-            const zoomItems = document.querySelectorAll(
-              '.meeting-transcription-item, .caption-window, .closed-caption-window, .cc-text, [class*="captionText"], [class*="caption-window"], [class*="transcript-item"], .live-transcript-item, .live-transcript-content'
-            );
-            zoomItems.forEach(item => {
-              if (isDialogOrMenu(item)) return;
-              const speakerEl = item.querySelector('.speaker-name, .meeting-transcription-speaker, strong, b');
-              const speaker = speakerEl?.textContent?.trim() || '';
-              const textEl = item.querySelector('.meeting-transcription-item-text, .caption-content, [class*="content"]') || item;
-              const rawText = textEl.textContent || '';
-              const text = (speaker ? rawText.replace(speaker, '') : rawText).trim();
-              if (text.length > 1 && text.length < 500) {
-                entries.push({ speaker: speaker || 'Speaker', text });
-              }
-            });
-
-            // Zoom in-meeting chat fallback (if dialogue is typed or host shares info in chat)
-            const chatItems = document.querySelectorAll('.chat-item__chat-info-msg, .chat-message-item, .chat-message__text');
-            chatItems.forEach(item => {
-              const sender = item.querySelector('.chat-item__sender, .sender-name, strong')?.textContent?.trim() || 'Chat';
-              const msg = item.querySelector('.chat-item__chat-info, .message-content, [class*="message"]')?.textContent?.trim() || '';
-              if (msg.length > 1 && msg.length < 500) {
-                entries.push({ speaker: `${sender} (Chat)`, text: msg });
-              }
-            });
-          }
-
-          return entries;
-        }).catch(() => []);
+          } catch {}
+        }
 
         // Step 3: Filter against blacklist and deduplicate
         for (const entry of scrapedCaptions) {
@@ -1202,21 +1452,31 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
           console.log(`JARVIS 📝 [${logEntry.speaker}]: ${logEntry.text}`);
         }
 
-        // Step 4: Also scrape in-meeting chat messages if chat panel is open
-        const chatEntries = await page.evaluate(() => {
-          const msgs: Array<{ speaker: string; text: string }> = [];
-          document.querySelectorAll('div[data-message-text]').forEach(el => {
-            const text = el.textContent?.trim();
-            const parent = el.closest('[data-sender-name]');
-            const speaker = parent?.getAttribute('data-sender-name') || 'Chat User';
-            if (text) msgs.push({ speaker, text });
-          });
-          document.querySelectorAll('.chat-item__chat-info, .chat-message__text').forEach(el => {
-            const text = el.textContent?.trim();
-            if (text) msgs.push({ speaker: 'Chat User', text });
-          });
-          return msgs.slice(-5);
-        }).catch(() => []);
+        // Step 4: Also scrape in-meeting chat messages across all frames
+        const chatEntries: Array<{ speaker: string; text: string }> = [];
+        for (const frame of frames) {
+          try {
+            const frameMsgs = await frame.evaluate(() => {
+              const msgs: Array<{ speaker: string; text: string }> = [];
+              document.querySelectorAll('div[data-message-text]').forEach(el => {
+                const text = el.textContent?.trim();
+                const parent = el.closest('[data-sender-name]');
+                const speaker = parent?.getAttribute('data-sender-name') || 'Chat User';
+                if (text) msgs.push({ speaker, text });
+              });
+              document.querySelectorAll('.chat-item__chat-info, .chat-message__text').forEach(el => {
+                const text = el.textContent?.trim();
+                if (text) msgs.push({ speaker: 'Chat User', text });
+              });
+              return msgs.slice(-5);
+            }).catch(() => []);
+            for (const m of frameMsgs) {
+              if (!chatEntries.some(c => c.text === m.text)) {
+                chatEntries.push(m);
+              }
+            }
+          } catch {}
+        }
 
         if (chatEntries.length > 0) {
           for (const msg of chatEntries) {
@@ -1692,20 +1952,66 @@ ${transcript.slice(0, 30000)}`;
 
   async getPageDebugInfo(): Promise<any> {
     if (!this.state?.page) return { error: 'Bot not active' };
+    const page = this.state.page;
     try {
-      const debugInfo = await this.state.page.evaluate(() => ({
-        url: window.location.href,
-        title: document.title,
-        viewport: `${window.innerWidth}x${window.innerHeight}`,
-      }));
+      const frames = page.frames();
+      const frameInfo: any[] = [];
+      for (const frame of frames) {
+        try {
+          const info = await frame.evaluate(() => {
+            const buttons: any[] = [];
+            document.querySelectorAll('button, [role="button"], div, span, a').forEach(el => {
+              const text = el.textContent?.trim() || '';
+              const aria = el.getAttribute('aria-label') || '';
+              if (
+                text === 'Show Captions' || text === 'Captions' || text === 'CC' ||
+                aria.toLowerCase().includes('caption') ||
+                text === 'Chat' || text === 'Leave'
+              ) {
+                buttons.push({
+                  tagName: el.tagName,
+                  className: typeof el.className === 'string' ? el.className : '',
+                  ariaLabel: aria,
+                  text: text,
+                  outerHTML: el.outerHTML.substring(0, 150),
+                });
+              }
+            });
+            return {
+              url: window.location.href,
+              buttons,
+            };
+          }).catch((err: any) => ({ url: frame.url(), error: err.message }));
+          frameInfo.push(info);
+        } catch {}
+      }
+
       return {
-        ...debugInfo,
+        url: page.url(),
+        title: await page.title(),
+        frameCount: frames.length,
+        frameInfo,
         captionsCollected: this.state.captionLog.length,
         isRecording: this.state.isRecording,
       };
     } catch (e: any) {
       return { error: e.message };
     }
+  }
+
+  restartCaptionEngine(): { success: boolean; message: string } {
+    if (!this.state?.page) {
+      return { success: false, message: 'No active meeting session.' };
+    }
+    if (this.state.captionInterval) {
+      clearTimeout(this.state.captionInterval);
+      this.state.captionInterval = null;
+    }
+    this._captionActive = false;
+    this._captionBusy = false;
+    this.state.isRecording = true;
+    this.startSmartCaptionEngine(this.state.page);
+    return { success: true, message: 'Caption engine re-armed with latest selectors.' };
   }
 }
 
