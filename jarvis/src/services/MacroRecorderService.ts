@@ -63,21 +63,45 @@ function describeStep(action: string, target?: string, value?: string): string {
 }
 
 /**
+ * Clean up a dead session — remove it from the active map.
+ */
+function cleanupSession(sessionId: string, reason: string) {
+  const session = activeSessions.get(sessionId);
+  if (!session) return;
+  console.log(`[MacroRecorder] Cleaning up session ${sessionId}: ${reason}`);
+  session.isRecording = false;
+  activeSessions.delete(sessionId);
+}
+
+/**
  * Start recording browser actions.
  * Opens a new Playwright browser, navigates to the URL, and attaches
  * event listeners that capture user interactions as MacroSteps.
+ *
+ * By default opens a headed (visible) browser so the user can see and
+ * interact with the page. Pass { headed: false } for headless mode.
  */
 export async function startRecording(
   url: string,
   options: { headed?: boolean } = {}
 ): Promise<{ sessionId: string; macroId: string }> {
+  // Default to headed=true so user can see and interact with the page
+  const headless = options.headed === false ? true : false;
+
   const browser = await chromium.launch({
-    headless: !options.headed,
+    headless,
     args: [
       "--no-sandbox",
       "--disable-dev-shm-usage",
       "--disable-blink-features=AutomationControlled",
     ],
+  });
+
+  const sessionId = `session_${Date.now()}`;
+
+  // ─── Guard: if browser dies, clean up the session automatically ────
+  browser.on("disconnected", () => {
+    cleanupSession(sessionId, "browser disconnected");
   });
 
   const context = await browser.newContext({
@@ -87,10 +111,6 @@ export async function startRecording(
   });
 
   const page = await context.newPage();
-
-  // Navigate to the target URL
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
-  await page.waitForTimeout(1500);
 
   // Create macro in store (will be updated as steps are recorded)
   const macro = await saveMacro({
@@ -102,7 +122,6 @@ export async function startRecording(
     tags: ["recorded"],
   });
 
-  const sessionId = `session_${Date.now()}`;
   const session: RecordingSession = {
     id: sessionId,
     macroId: macro.id,
@@ -114,7 +133,35 @@ export async function startRecording(
     lastUrl: url,
   };
 
-  // ─── Attach event listeners via exposeFunction ──────────────────────────
+  // ─── Page error handlers — log but don't kill the session ──────────
+  page.on("crash", () => {
+    console.error(`[MacroRecorder] Page crashed in session ${sessionId}`);
+    cleanupSession(sessionId, "page crashed");
+  });
+
+  page.on("pageerror", (err) => {
+    console.warn(`[MacroRecorder] Page error in session ${sessionId}:`, err.message);
+    // Don't kill the session — page errors are common (JS errors on the site)
+  });
+
+  page.on("dialog", (dialog) => {
+    // Auto-dismiss alerts/confirms so they don't block interaction
+    console.log(`[MacroRecorder] Auto-dismissing dialog: ${dialog.type()}`);
+    dialog.dismiss().catch(() => {});
+  });
+
+  // ─── Navigate to the target URL ────────────────────────────────────
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+    // Give the page time to fully render (SPAs, WhatsApp Web, etc.)
+    await page.waitForTimeout(2000);
+  } catch (err: any) {
+    console.error(`[MacroRecorder] Failed to navigate to ${url}:`, err?.message);
+    // Don't abort — the user might still be able to interact if the page partially loaded
+    // Record the navigation attempt anyway
+  }
+
+  // ─── Attach event listeners via exposeFunction ─────────────────────
   // We inject a listener into the page context that calls back into Node.js
   // when clicks, inputs, and keydowns happen.
 
@@ -127,7 +174,9 @@ export async function startRecording(
       description: describeStep("click", selector),
     };
     session.steps.push(step);
-    await appendStep(macro.id, step);
+    await appendStep(macro.id, step).catch((e) =>
+      console.error("[MacroRecorder] appendStep error:", e)
+    );
   });
 
   await page.exposeFunction("__jarvisRecordInput", async (selector: string, value: string) => {
@@ -145,7 +194,9 @@ export async function startRecording(
         description: describeStep("type", selector, value),
       };
       session.steps.push(step);
-      await appendStep(macro.id, step);
+      await appendStep(macro.id, step).catch((e) =>
+        console.error("[MacroRecorder] appendStep error:", e)
+      );
     }
   });
 
@@ -162,7 +213,9 @@ export async function startRecording(
       description: describeStep("press", undefined, key),
     };
     session.steps.push(step);
-    await appendStep(macro.id, step);
+    await appendStep(macro.id, step).catch((e) =>
+      console.error("[MacroRecorder] appendStep error:", e)
+    );
   });
 
   // Inject the event listeners into the page
@@ -207,14 +260,16 @@ export async function startRecording(
         description: describeStep("goto", newUrl),
       };
       session.steps.push(step);
-      await appendStep(macro.id, step);
+      await appendStep(macro.id, step).catch((e) =>
+        console.error("[MacroRecorder] appendStep error:", e)
+      );
     }
   });
 
   activeSessions.set(sessionId, session);
 
   console.log(
-    `[MacroRecorder] Recording started: session=${sessionId} macro=${macro.id} url=${url}`
+    `[MacroRecorder] Recording started: session=${sessionId} macro=${macro.id} url=${url} headed=${!headless}`
   );
 
   return { sessionId, macroId: macro.id };
@@ -272,12 +327,20 @@ export async function stopRecording(
 
 /**
  * Get the current recording status.
+ * Also checks if the browser is still alive — cleans up dead sessions.
  */
 export function getRecordingStatus(
   sessionId: string
 ): { isRecording: boolean; stepsRecorded: number; durationMs: number } | null {
   const session = activeSessions.get(sessionId);
   if (!session) return null;
+
+  // Check if browser is still connected
+  if (!session.browser.isConnected()) {
+    cleanupSession(sessionId, "browser disconnected (detected on status check)");
+    return null;
+  }
+
   return {
     isRecording: session.isRecording,
     stepsRecorded: session.steps.length,
@@ -315,7 +378,7 @@ export async function replayMacro(
 
   try {
     browser = await chromium.launch({
-      headless: !options.headed,
+      headless: options.headed === false ? true : false,
       args: [
         "--no-sandbox",
         "--disable-dev-shm-usage",
@@ -501,6 +564,7 @@ export async function replayMacro(
 
 /**
  * List active recording sessions.
+ * Automatically cleans up sessions whose browsers have died.
  */
 export function getActiveSessions(): Array<{
   sessionId: string;
@@ -508,6 +572,13 @@ export function getActiveSessions(): Array<{
   stepsRecorded: number;
   durationMs: number;
 }> {
+  // Clean up dead sessions first
+  for (const [id, session] of activeSessions.entries()) {
+    if (!session.browser.isConnected()) {
+      cleanupSession(id, "browser disconnected (detected on list)");
+    }
+  }
+
   return Array.from(activeSessions.values()).map((s) => ({
     sessionId: s.id,
     macroId: s.macroId,

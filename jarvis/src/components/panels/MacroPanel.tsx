@@ -283,7 +283,7 @@ export default function MacroPanel({ onClose }: { onClose: () => void }) {
             </div>
             <div className="mt-2 flex items-center gap-2 flex-wrap">
               <p className="text-[10px] text-white/30">
-                Opens a browser at the URL — interact with the page and JARVIS records your actions
+                A browser window will open — interact with the page and JARVIS records your actions. Say "stop recording" or click Stop & Save when done.
               </p>
               <button
                 onClick={() => setRecordingUrl("https://example.com")}

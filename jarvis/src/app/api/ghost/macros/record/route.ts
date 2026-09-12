@@ -10,7 +10,7 @@ import {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { action, url, sessionId, headed = false } = body;
+    const { action, url, sessionId, headed = true } = body;
 
     if (action === "start") {
       if (!url) {
