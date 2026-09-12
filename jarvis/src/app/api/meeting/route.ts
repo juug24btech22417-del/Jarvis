@@ -51,45 +51,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(result);
     }
 
-    if (action === 'toggle-captions') {
-      if (meetingBot.state?.page) {
-        await (meetingBot as any).enableZoomCaptions(meetingBot.state.page);
-        return NextResponse.json({ success: true, message: 'Toggled Zoom captions' });
-      }
-      return NextResponse.json({ success: false, error: 'No active page' });
-    }
-
-    if (action === 'inspect-subtitle') {
-      if (!meetingBot.state?.page) return NextResponse.json({ error: 'No page' });
-      const frames = meetingBot.state.page.frames();
-      const results: any[] = [];
-      for (const frame of frames) {
-        try {
-          const res = await frame.evaluate(() => {
-            const els: any[] = [];
-            document.querySelectorAll('[class*="live-transcription"], [class*="subtitle"], [class*="caption"]').forEach(el => {
-              els.push({
-                tagName: el.tagName,
-                className: el.className,
-                text: el.textContent?.trim(),
-                outerHTML: el.outerHTML.substring(0, 300),
-              });
-            });
-            return els;
-          });
-          results.push({ frameUrl: frame.url(), els: res });
-        } catch (e: any) {
-          results.push({ error: e.message });
-        }
-      }
-      return NextResponse.json({ success: true, results });
-    }
-
-    if (action === 'restart-caption-engine') {
-      const result = meetingBot.restartCaptionEngine();
-      return NextResponse.json(result);
-    }
-
     return NextResponse.json({ success: false, error: 'Invalid action' }, { status: 400 });
   } catch (error: any) {
     console.error('Meeting Bot API Error:', error);

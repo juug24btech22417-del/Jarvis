@@ -276,7 +276,14 @@ public class ChromeFocusHelper {
     [DllImport("user32.dll")] public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
     [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
+
+    private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+    private static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
+    private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_NOMOVE = 0x0002;
+    private const uint SWP_SHOWWINDOW = 0x0040;
 
     public static int FocusChromeWindows() {
         var chromePids = new HashSet<uint>();
@@ -293,6 +300,10 @@ public class ChromeFocusHelper {
                 GetClassName(hWnd, sbClass, 256);
                 if (sbClass.ToString() == "Chrome_WidgetWin_1") {
                     ShowWindow(hWnd, 9); // SW_RESTORE
+                    // Pop to top-most (bypasses Windows foreground lock)
+                    SetWindowPos(hWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+                    // Drop back to normal top-level so it doesn't stay permanently pinned
+                    SetWindowPos(hWnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
                     SwitchToThisWindow(hWnd, true);
                     SetForegroundWindow(hWnd);
                     count++;
@@ -365,6 +376,8 @@ public class ChromeFocusHelper {
           '--autoplay-policy=no-user-gesture-required',
           '--no-sandbox',
           '--disable-background-timer-throttling',
+          '--window-position=50,50',
+          '--window-size=1280,800',
           '--start-maximized',
         ],
         ignoreDefaultArgs: ['--enable-automation'],  // No "controlled by automation" banner
