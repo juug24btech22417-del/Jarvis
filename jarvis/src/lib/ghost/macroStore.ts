@@ -5,7 +5,7 @@
 
 import fs from "fs/promises";
 import path from "path";
-import type { Macro, MacroStep } from "./macroTypes";
+import type { Macro, MacroStep, MacroVariable } from "./macroTypes";
 
 const MACRO_FILE = path.join(process.cwd(), ".jarvis_macros.json");
 const MAX_MACROS = 200;
@@ -53,7 +53,7 @@ export async function saveMacro(
 
 export async function updateMacro(
   id: string,
-  updates: Partial<Pick<Macro, "name" | "description" | "steps" | "tags" | "targetUrl" | "isFormFill">>
+  updates: Partial<Pick<Macro, "name" | "description" | "steps" | "tags" | "targetUrl" | "isFormFill" | "variables">>
 ): Promise<Macro | null> {
   await ensureLoaded();
   const idx = macros.findIndex((m) => m.id === id);
@@ -139,4 +139,77 @@ export async function incrementReplayCount(id: string): Promise<void> {
     macro.lastReplayedAt = new Date().toISOString();
     await persist();
   }
+}
+
+// ─── Variable interpolation ({{name}} placeholders) ───────────────────
+
+const VAR_RE = /\{\{\s*([\w.-]+)\s*\}\}/g;
+
+/**
+ * Substitute {{var}} placeholders in a string with runtime values.
+ * Unset placeholders are left as-is so the step fails loudly (and
+ * visibly) instead of silently typing an empty string.
+ */
+export function interpolateVars(
+  input: string | undefined,
+  vars: Record<string, string> | undefined
+): string {
+  if (!input) return input || "";
+  if (!vars || Object.keys(vars).length === 0) return input;
+  return input.replace(VAR_RE, (full, name: string) => {
+    const v = vars[name];
+    return v !== undefined && v !== null && String(v).trim() !== "" ? String(v) : full;
+  });
+}
+
+/**
+ * Deep-clone a step with every {{var}} placeholder replaced by the
+ * runtime value. Covers target, value, and semantic UIA fields.
+ */
+export function interpolateStep<T extends MacroStep>(
+  step: T,
+  vars?: Record<string, string>
+): T {
+  if (!vars || Object.keys(vars).length === 0) return step;
+  const uia = (step.options as any)?.uia
+    ? { ...(step.options as any).uia }
+    : undefined;
+  if (uia) {
+    uia.name = interpolateVars(uia.name, vars);
+    uia.process = interpolateVars(uia.process, vars);
+    uia.windowName = interpolateVars(uia.windowName, vars);
+  }
+  return {
+    ...step,
+    target: interpolateVars(step.target, vars),
+    value: interpolateVars(step.value, vars),
+    options: uia ? { ...(step.options as any), uia } : step.options,
+  } as T;
+}
+
+/**
+ * Find every {{var}} referenced by a step list so generators/recorders
+ * can auto-declare them as MacroVariables.
+ */
+export function extractMacroVariables(steps: MacroStep[]): MacroVariable[] {
+  const found = new Map<string, MacroVariable>();
+  const scan = (s: string | undefined) => {
+    if (!s) return;
+    VAR_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = VAR_RE.exec(s))) {
+      if (!found.has(m[1])) found.set(m[1], { name: m[1] });
+    }
+  };
+  for (const st of steps) {
+    scan(st.target);
+    scan(st.value);
+    const uia = (st.options as any)?.uia;
+    if (uia) {
+      scan(uia.name);
+      scan(uia.process);
+      scan(uia.windowName);
+    }
+  }
+  return Array.from(found.values());
 }

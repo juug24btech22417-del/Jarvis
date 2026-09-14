@@ -12,6 +12,8 @@ import {
   uiaDescribePoint,
   describeUiaTarget,
 } from "@/services/DesktopRecorderService";
+import { getMacro } from "@/lib/ghost/macroStore";
+import type { MacroVariable } from "@/lib/ghost/macroTypes";
 
 // POST /api/ghost/macros/desktop — start, add step, stop, status, or replay
 export async function POST(req: NextRequest) {
@@ -109,15 +111,39 @@ export async function POST(req: NextRequest) {
       }
 
       case "replay": {
-        const { macroId } = body;
+        const { macroId, vars } = body;
         if (!macroId) {
           return NextResponse.json(
             { success: false, error: "macroId is required" },
             { status: 400 }
           );
         }
+        // Check for unfilled {{variables}} before running — the panel asks
+        // the user for values instead of replaying with literal placeholders.
+        const macro = await getMacro(macroId);
+        if (!macro) {
+          return NextResponse.json({ success: false, error: "Macro not found" }, { status: 404 });
+        }
+        if (macro.variables?.length) {
+          const missing = macro.variables.filter(
+            (v: MacroVariable) => !(vars?.[v.name] ?? "").toString().trim() && !v.defaultValue
+          );
+          if (missing.length) {
+            return NextResponse.json({
+              success: false,
+              needsVars: true,
+              variables: macro.variables,
+              missing: missing.map((v: MacroVariable) => v.name),
+              error: `This macro needs input: ${missing.map((v: MacroVariable) => v.name).join(", ")}`,
+            });
+          }
+        }
+        const resolvedVars: Record<string, string> = {};
+        for (const v of macro.variables || []) {
+          resolvedVars[v.name] = (vars?.[v.name] ?? v.defaultValue ?? "").toString();
+        }
         console.log(`[ghost/macros/desktop] Replaying desktop macro ${macroId}...`);
-        const result = await replayDesktopMacro(macroId);
+        const result = await replayDesktopMacro(macroId, resolvedVars);
         return NextResponse.json({
           success: result.success,
           result,

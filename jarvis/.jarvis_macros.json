@@ -327,46 +327,6 @@
     "lastReplayedAt": "2026-09-13T11:14:34.837Z"
   },
   {
-    "id": "macro_1789291072801_n3k7",
-    "createdAt": "2026-09-13T09:17:52.801Z",
-    "updatedAt": "2026-09-13T09:18:03.564Z",
-    "replayCount": 2,
-    "name": "Desktop — 4 steps",
-    "description": "Recorded 4 desktop actions. Duration: 11s",
-    "steps": [
-      {
-        "id": "dstep_1789291073198_2jwp",
-        "action": "click",
-        "target": "500,300",
-        "description": "Click test"
-      },
-      {
-        "id": "dstep_1789291083162_p3h2",
-        "action": "type",
-        "value": "test input",
-        "description": "Type test input"
-      },
-      {
-        "id": "dstep_1789291083260_1436",
-        "action": "press",
-        "value": "Enter",
-        "description": "Press Enter"
-      },
-      {
-        "id": "dstep_1789291083376_pvsv",
-        "action": "wait",
-        "value": "500",
-        "description": "Wait 500ms"
-      }
-    ],
-    "isFormFill": false,
-    "tags": [
-      "desktop",
-      "recorded"
-    ],
-    "lastReplayedAt": "2026-09-13T10:35:27.888Z"
-  },
-  {
     "id": "macro_1789291544484_0ds5",
     "createdAt": "2026-09-13T09:25:44.484Z",
     "updatedAt": "2026-09-13T09:25:44.484Z",
@@ -640,99 +600,18 @@
     "lastReplayedAt": "2026-09-13T15:45:16.196Z"
   },
   {
-    "id": "macro_1789407194855_ms0e",
-    "createdAt": "2026-09-14T17:33:14.855Z",
-    "updatedAt": "2026-09-14T17:34:19.362Z",
-    "replayCount": 1,
-    "name": "Desktop — 6 steps",
-    "description": "Recorded 6 desktop actions (semantic). Duration: 64s",
+    "id": "macro_back_to_friends_restored",
+    "name": "Spotify — Play Back to Friends",
+    "description": "Opens Spotify, searches 'Back to friends' and plays the track (semantic UIA targets).",
     "steps": [
       {
-        "id": "dstep_1789407207986_894r",
-        "action": "launch",
-        "target": "Spotify",
-        "value": "",
-        "description": "Launch Spotify"
-      },
-      {
-        "id": "dstep_1789407217918_206n",
-        "action": "click",
-        "target": "678,40",
-        "value": "",
-        "description": "Pane element (comet)",
-        "options": {
-          "uia": {
-            "process": "comet",
-            "name": "",
-            "controlType": "Pane",
-            "automationId": "",
-            "className": "FrameGrabHandle",
-            "windowName": "JARVIS | Just A Rather Very Intelligent System - Comet"
-          }
-        }
-      },
-      {
-        "id": "dstep_1789407228586_03j1",
-        "action": "type",
-        "target": "",
-        "value": "Back to friends",
-        "description": "Type \"Back to friends\""
-      },
-      {
-        "id": "dstep_1789407236866_fd4u",
-        "action": "press",
-        "target": "",
-        "value": "Enter",
-        "description": "Press Enter"
-      },
-      {
-        "id": "dstep_1789407246182_ywlj",
-        "action": "wait",
-        "target": "",
-        "value": "",
-        "description": "Wait 1000ms"
-      },
-      {
-        "id": "dstep_1789407256249_7968",
-        "action": "click",
-        "target": "926,230",
-        "value": "",
-        "description": "Pane element (comet)",
-        "options": {
-          "uia": {
-            "process": "comet",
-            "name": "",
-            "controlType": "Pane",
-            "automationId": "",
-            "className": "Chrome_WidgetWin_1",
-            "windowName": "JARVIS | Just A Rather Very Intelligent System - Comet"
-          }
-        }
-      }
-    ],
-    "isFormFill": false,
-    "tags": [
-      "desktop",
-      "recorded"
-    ],
-    "lastReplayedAt": "2026-09-14T17:35:59.542Z"
-  },
-  {
-    "id": "macro_1789408874503_kpga",
-    "createdAt": "2026-09-14T18:01:14.503Z",
-    "updatedAt": "2026-09-14T18:01:15.460Z",
-    "replayCount": 5,
-    "name": "Desktop — 6 steps",
-    "description": "Recorded 6 desktop actions (semantic). Duration: 1s",
-    "steps": [
-      {
-        "id": "dstep_1789408874984_h1t8",
+        "id": "rst_1",
         "action": "launch",
         "target": "Spotify",
         "description": "Launch Spotify"
       },
       {
-        "id": "dstep_1789408875042_ojew",
+        "id": "rst_2",
         "action": "click",
         "description": "Click search box (Spotify)",
         "options": {
@@ -747,25 +626,25 @@
         }
       },
       {
-        "id": "dstep_1789408875106_621l",
+        "id": "rst_3",
         "action": "type",
         "value": "Back to friends",
         "description": "Type song name"
       },
       {
-        "id": "dstep_1789408875183_ovog",
+        "id": "rst_4",
         "action": "press",
         "value": "Enter",
-        "description": "Press Enter"
+        "description": "Submit search"
       },
       {
-        "id": "dstep_1789408875273_lc6r",
+        "id": "rst_5",
         "action": "wait",
-        "value": "800",
-        "description": "Wait 800ms"
+        "value": "1000",
+        "description": "Wait for results"
       },
       {
-        "id": "dstep_1789408875385_38qa",
+        "id": "rst_6",
         "action": "click",
         "description": "Click track (Spotify)",
         "options": {
@@ -780,11 +659,14 @@
         }
       }
     ],
-    "isFormFill": false,
+    "createdAt": "2026-09-15T00:00:00.000Z",
+    "updatedAt": "2026-09-15T00:00:00.000Z",
+    "replayCount": 2,
     "tags": [
       "desktop",
-      "recorded"
+      "restored"
     ],
-    "lastReplayedAt": "2026-09-14T18:17:16.029Z"
+    "isFormFill": false,
+    "lastReplayedAt": "2026-09-14T20:34:43.143Z"
   }
 ]

@@ -22,7 +22,7 @@
 
 import { execSync, spawn } from "child_process";
 import type { ChildProcess } from "child_process";
-import { saveMacro, appendStep, incrementReplayCount, getMacro } from "@/lib/ghost/macroStore";
+import { saveMacro, appendStep, incrementReplayCount, getMacro, interpolateStep } from "@/lib/ghost/macroStore";
 import type { Macro, MacroStep, MacroReplayResult } from "@/lib/ghost/macroTypes";
 
 /** Semantic UIA descriptor stored per step in step.options.uia */
@@ -116,13 +116,13 @@ const CS_SETFOREGROUND =
   'using System;using System.Runtime.InteropServices;public class Win32SF { [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow); }';
 
 const CS_MOUSE =
-  'using System;using System.Runtime.InteropServices;public class MouseOps { [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, IntPtr dwExtraInfo); }';
+  'using System;using System.Runtime.InteropServices;public class MouseOps { [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, IntPtr dwExtraInfo); [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, IntPtr dwExtraInfo); }';
 
 const CS_DPIA =
   'using System;using System.Runtime.InteropServices;public class DPIA { [DllImport("user32.dll")] public static extern bool SetProcessDPIAware(); }';
 
 const CS_FGPID =
-  'using System;using System.Runtime.InteropServices;public class Win32FG2 { [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId); }';
+  'using System;using System.Runtime.InteropServices;public class Win32FG2 { [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId); [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count); }';
 
 function psAddType(cs: string): string {
   return `Add-Type -TypeDefinition '${cs}'`;
@@ -598,10 +598,21 @@ async function launchApp(target: string): Promise<void> {
 async function focusWindow(processName: string): Promise<void> {
   await psAsync(`
     ${psAddType(CS_SETFOREGROUND)}
+    ${psAddType(CS_MOUSE)}
     $proc = Get-Process -Name "${psSafe(processName)}" -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } | Select-Object -First 1
+    if (-not $proc) {
+      # Store apps (Notepad/Calc) are frame-hosted by ApplicationFrameHost
+      $frameHost = Get-Process -Name "ApplicationFrameHost" -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -match [regex]::Escape('${psSafe(processName)}') } | Select-Object -First 1
+      if ($frameHost) { $proc = $frameHost }
+    }
     if ($proc) {
       [Win32SF]::ShowWindow($proc.MainWindowHandle, 9) | Out-Null
+      # Windows denies SetForegroundWindow to background processes —
+      # tapping Alt first grants the foreground-transfer right.
+      [MouseOps]::keybd_event(0x12, 0, 0, [IntPtr]::Zero)
+      Start-Sleep -Milliseconds 60
       [Win32SF]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
+      [MouseOps]::keybd_event(0x12, 0, 2, [IntPtr]::Zero)
     }
   `);
 }
@@ -662,6 +673,7 @@ async function verifiedMouseClick(x: number, y: number, targetProcess: string): 
     Start-Sleep -Milliseconds 50
     [MouseOps]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
     $fgname = ''
+    $fgtitle = ''
     if ('${want}') {
       $deadline = [DateTime]::UtcNow.AddMilliseconds(1200)
       while ([DateTime]::UtcNow -lt $deadline) {
@@ -670,11 +682,17 @@ async function verifiedMouseClick(x: number, y: number, targetProcess: string): 
         [Win32FG2]::GetWindowThreadProcessId($h, [ref]$wpid) | Out-Null
         $p = Get-Process -Id $wpid -ErrorAction SilentlyContinue
         if ($p) { $fgname = $p.Name }
-        if ($fgname -ieq '${want}') { break }
+        $sb = New-Object System.Text.StringBuilder 512
+        [Win32FG2]::GetWindowText($h, $sb, 512) | Out-Null
+        $fgtitle = $sb.ToString()
+        # Store apps (Notepad, Calculator...) are frame-hosted by
+        # ApplicationFrameHost — match the window title as well.
+        if ($fgname -ieq '${want}' -or $fgtitle.ToLower().Contains(('${want}').ToLower())) { break }
         Start-Sleep -Milliseconds 100
       }
     }
-    if (-not '${want}' -or $fgname -ieq '${want}') { Write-Output 'CLICK_OK' } else { Write-Output ('CLICK_MISS=' + $fgname) }
+    $ok = (-not '${want}') -or ($fgname -ieq '${want}') -or ($fgtitle.ToLower().Contains(('${want}').ToLower()))
+    if ($ok) { Write-Output 'CLICK_OK' } else { Write-Output ('CLICK_MISS=' + $fgname) }
   `;
   const raw = await psAsync(script, 6000);
   if ((raw || "").includes("CLICK_OK")) return;
@@ -692,10 +710,20 @@ async function verifiedMouseClick(x: number, y: number, targetProcess: string): 
  * ValuePattern — all in one PowerShell roundtrip (≤2s poll).
  */
 async function verifiedTypeText(text: string, targetProcess: string): Promise<void> {
-  const escaped = text.replace(/([+^%~(){}[\]])/g, "{$1}").replace(/"/g, '`"');
+  // Raw text embedded in a PowerShell single-quoted string ('' = literal ')
+  const psTyped = text.replace(/'/g, "''").slice(0, 300);
   const wantLower = psSafe(text).toLowerCase();
   const script = `
-    [System.Windows.Forms.SendKeys]::SendWait("${escaped}")
+    # Type char-by-char with tiny delays — after OCR self-heal clicks the
+    # field can still be initializing; a whole-string SendWait drops
+    # spaces (e.g. "Back to friends" → "Backtofriends").
+    $rawText = '${psTyped}'
+    foreach ($c in $rawText.ToCharArray()) {
+      $s = [string]$c
+      if ($s -match '[+^%~(){}[\]]') { $s = '{' + $s + '}' }
+      [System.Windows.Forms.SendKeys]::SendWait($s)
+      Start-Sleep -Milliseconds 25
+    }
     $want = '${wantLower}'
     $found = ''
     $fgname = ''
@@ -790,6 +818,127 @@ async function takeScreenshotBase64(filePath?: string): Promise<string> {
   } catch {
     return "";
   }
+}
+
+// ─── Self-healing: OCR fallback ───────────────────────────────────────
+// When the UIA tree no longer contains a recorded element (app redesign,
+// virtualized list, web view with no accessibility tree), OCR the screen
+// and click the text label itself. Runs in its own STA PowerShell process
+// (Windows Media OCR requires STA; the persistent worker is MTA).
+
+async function ocrFindText(
+  text: string,
+  processName?: string
+): Promise<string | null> {
+  const want = psSafe(text).toLowerCase().trim();
+  if (!want) return null;
+  // Bring the app to front so its pixels are actually on screen
+  // (also restores minimized windows — wait out the restore animation
+  // or the screenshot catches an empty frame)
+  if (processName) await focusWindow(processName);
+  await new Promise((r) => setTimeout(r, 900));
+
+  const script = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    "Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class DPICOCR { [DllImport(\"user32.dll\")] public static extern bool SetProcessDPIAware(); }'",
+    "[DPICOCR]::SetProcessDPIAware() | Out-Null",
+    "Add-Type -AssemblyName System.Windows.Forms",
+    "Add-Type -AssemblyName System.Drawing",
+    "Add-Type -AssemblyName System.Runtime.WindowsRuntime",
+    "[void][Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]",
+    "[void][Windows.Globalization.Language, Windows.Foundation, ContentType = WindowsRuntime]",
+    "[void][Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics.Imaging, ContentType = WindowsRuntime]",
+    "[void][Windows.Graphics.Imaging.SoftwareBitmap, Windows.Graphics.Imaging, ContentType = WindowsRuntime]",
+    "$ocr = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()",
+    "if (-not $ocr) { $ocr = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage([Windows.Globalization.Language,Windows.Foundation,ContentType=WindowsRuntime]::new('en-US')) }",
+    "if (-not $ocr) { Write-Output 'OCRDIAG=noengine' }",
+    "if ($ocr) {",
+    "  Write-Output ('OCRDIAG=engine-ok lang=' + $ocr.RecognitionLanguage.LanguageTag)",
+    "  $vs = [System.Windows.Forms.SystemInformation]::VirtualScreen",
+    "  $bmp = New-Object System.Drawing.Bitmap($vs.Width, $vs.Height)",
+    "  $gfx = [System.Drawing.Graphics]::FromImage($bmp)",
+    "  $gfx.CopyFromScreen($vs.X, $vs.Y, 0, 0, $vs.Size)",
+    "  $ms = New-Object System.IO.MemoryStream",
+    "  $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)",
+    "  $ms.Position = 0",
+    "  $asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]",
+    "  function Await($WinRtTask, $ResultType) {",
+    "    $asTask = $asTaskGeneric.MakeGenericMethod($ResultType)",
+    "    $netTask = $asTask.Invoke($null, @($WinRtTask))",
+    "    $netTask.Wait(-1) | Out-Null",
+    "    $netTask.Result",
+    "  }",
+    "  $ras = [System.IO.WindowsRuntimeStreamExtensions]::AsRandomAccessStream($ms)",
+    "  $decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($ras)) ([Windows.Graphics.Imaging.BitmapDecoder])",
+    "  $softBitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])",
+    "  $result = Await ($ocr.RecognizeAsync($softBitmap)) ([Windows.Media.Ocr.OcrResult])",
+    "  Write-Output ('OCRDIAG=lines=' + $result.Lines.Count)",
+    `  $needle = '${want}'`,
+    "  $words = @()",
+    "  if ($needle) { $words = ($needle -split '\\s+') | Where-Object { $_.Length -ge 4 } }",
+    "  $best = $null",
+    "  $bestScore = 0",
+    "  foreach ($line in $result.Lines) {",
+    "    $lt = $line.Text.ToLower()",
+    "    $score = 0",
+    "    if ($needle -and $lt.Contains($needle)) { $score = 100 }",
+    "    else { foreach ($w in $words) { if ($lt.Contains($w)) { $score++ } } }",
+    "    if ($score -gt $bestScore) {",
+    "      $minX = [double]::MaxValue; $minY = [double]::MaxValue; $maxX = 0.0; $maxY = 0.0",
+    "      foreach ($wd in $line.Words) {",
+    "        $wr = $wd.BoundingRect",
+    "        if ($wr.X -lt $minX) { $minX = $wr.X }",
+    "        if ($wr.Y -lt $minY) { $minY = $wr.Y }",
+    "        if (($wr.X + $wr.Width) -gt $maxX) { $maxX = $wr.X + $wr.Width }",
+    "        if (($wr.Y + $wr.Height) -gt $maxY) { $maxY = $wr.Y + $wr.Height }",
+    "      }",
+    "      $bestScore = $score",
+    "      $best = @(($vs.X + ($minX + $maxX)/2), ($vs.Y + ($minY + $maxY)/2))",
+    "    }",
+    "  }",
+    "  if ($best) { Write-Output ('OCR=' + [int]$best[0] + ',' + [int]$best[1] + ' SCORE=' + $bestScore) }",
+    "  $gfx.Dispose(); $bmp.Dispose()",
+    "}",
+  ].join("\n");
+
+  const raw = await new Promise<string>((resolve) => {
+    let out = "";
+    const p = spawn("powershell.exe", ["-NoProfile", "-NoLogo", "-STA", "-Command", script], {
+      windowsHide: true,
+    });
+    const timer = setTimeout(() => {
+      console.warn(`[DesktopRecorder] OCR timed out after 25s (partial out: ${out.length} chars)`);
+      try { p.kill(); } catch {}
+      resolve(out);
+    }, 25000);
+    p.stdout?.on("data", (d) => (out += d.toString()));
+    p.stderr?.on("data", (d) => {
+      const t = String(d).trim();
+      if (t) console.warn(`[DesktopRecorder] OCR stderr: ${t.slice(0, 300)}`);
+    });
+    p.on("exit", (code) => {
+      clearTimeout(timer);
+      console.log(`[DesktopRecorder] OCR process exit=${code} out=${out.length} chars`);
+      resolve(out);
+    });
+    p.on("error", (e) => {
+      clearTimeout(timer);
+      console.error(`[DesktopRecorder] OCR spawn error: ${e.message}`);
+      resolve(out);
+    });
+  });
+
+  const m = /OCR=(-?\d+),(-?\d+)/.exec(raw || "");
+  if (!m) {
+    console.warn(
+      `[DesktopRecorder] OCR self-heal found nothing for "${text}": ${(raw || "(no output)").trim().slice(0, 200)}`
+    );
+    return null;
+  }
+  const x = Number(m[1]);
+  const y = Number(m[2]);
+  if (!isFinite(x) || !isFinite(y) || (x === 0 && y === 0)) return null;
+  return `${x},${y}`;
 }
 
 // ─── Recording API ─────────────────────────────────────────────────────
@@ -920,7 +1069,8 @@ export function getDesktopRecordingStatus(
 const DESKTOP_STEP_TIMEOUT_MS = 45000;
 
 export async function replayDesktopMacro(
-  macroId: string
+  macroId: string,
+  vars?: Record<string, string>
 ): Promise<MacroReplayResult> {
   const macro = await getMacro(macroId);
   if (!macro) {
@@ -936,10 +1086,12 @@ export async function replayDesktopMacro(
   let stepsCompleted = 0;
   let stepsFailed = 0;
 
-  for (const step of macro.steps) {
+  for (const rawStep of macro.steps) {
+    const step = interpolateStep(rawStep, vars);
     const stepStart = Date.now();
     let stepSuccess = false;
     let stepError: string | undefined;
+    let resolvedBy: string | undefined;
 
     try {
       await Promise.race([
@@ -950,7 +1102,6 @@ export async function replayDesktopMacro(
               if (uia?.process) await focusAndWait(uia.process);
 
               let coords: string | null = null;
-              let resolvedBy = "";
 
               // 1. Semantic resolution — re-find the element in the live tree
               if (uia?.process) {
@@ -985,6 +1136,16 @@ export async function replayDesktopMacro(
                 }
               }
 
+              // 3. Self-heal — UIA lost the element? OCR the screen and click
+              // the text label itself (survives app UI overhauls).
+              if (!coords && uia?.name) {
+                const ocr = await ocrFindText(uia.name, uia.process);
+                if (ocr) {
+                  coords = ocr;
+                  resolvedBy = "ocr";
+                  console.log(`[DesktopRecorder] Self-healed via OCR: "${uia.name}" → ${ocr}`);
+                }
+              }
               if (!coords) throw new Error(`Could not resolve click target: ${uia ? describeUiaTarget(uia) : step.target}`);
               const [x, y] = coords.split(",").map(Number);
               const clickProc = uia?.process || (step.options as any)?.targetProcess || "";
@@ -1001,7 +1162,9 @@ export async function replayDesktopMacro(
               // If a semantic field target exists, focus it first
               if (uia?.process) {
                 await focusAndWait(uia.process);
-                const coords = await uiaResolveTarget(uia);
+                let coords = await uiaResolveTarget(uia);
+                // Self-heal: OCR fallback when UIA can't find the field
+                if (!coords && uia.name) coords = await ocrFindText(uia.name, uia.process);
                 if (coords) {
                   const [x, y] = coords.split(",").map(Number);
                   await verifiedMouseClick(x, y, uia.process);
@@ -1083,6 +1246,7 @@ export async function replayDesktopMacro(
       success: stepSuccess,
       error: stepError,
       durationMs: Date.now() - stepStart,
+      resolvedBy,
     });
 
     if (stepSuccess) {

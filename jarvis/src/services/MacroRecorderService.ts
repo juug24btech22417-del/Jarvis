@@ -12,7 +12,7 @@
  */
 
 import { chromium, type Page, type Browser } from "playwright";
-import { saveMacro, appendStep, incrementReplayCount, getMacro } from "@/lib/ghost/macroStore";
+import { saveMacro, appendStep, incrementReplayCount, getMacro, interpolateStep } from "@/lib/ghost/macroStore";
 import type { Macro, MacroStep, MacroReplayResult } from "@/lib/ghost/macroTypes";
 
 interface RecordingSession {
@@ -662,7 +662,7 @@ const STEP_TIMEOUT_MS = 25000;
 
 export async function replayMacro(
   macroId: string,
-  options: { headed?: boolean; stopOnFirstError?: boolean; keepOpen?: boolean } = {}
+  options: { headed?: boolean; stopOnFirstError?: boolean; keepOpen?: boolean; vars?: Record<string, string> } = {}
 ): Promise<MacroReplayResult> {
   const macro = await getMacro(macroId);
   if (!macro) {
@@ -672,6 +672,9 @@ export async function replayMacro(
       durationMs: 0, results: [],
     };
   }
+
+  // One macro, infinite uses: {{var}} placeholders get runtime values
+  const steps = macro.steps.map((s) => interpolateStep(s, options.vars));
 
   const startTime = Date.now();
   const stepResults: MacroReplayResult["results"] = [];
@@ -708,7 +711,7 @@ export async function replayMacro(
       return step.target || "";
     }
 
-    for (const step of macro.steps) {
+    for (const step of steps) {
       const stepStart = Date.now();
       let stepSuccess = false;
       let stepError: string | undefined;
@@ -726,7 +729,7 @@ export async function replayMacro(
                   console.log(`[MacroRecorder] Skipping destructive step during replay: ${step.target}`);
                   break;
                 }
-                await page.goto(step.target!, {
+                await page.goto((step.target || "").replace(/ /g, "%20"), {
                   waitUntil: "domcontentloaded",
                   timeout: 20000,
                 });

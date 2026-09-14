@@ -40,6 +40,7 @@ interface Macro {
     success?: boolean;
     error?: string;
     durationMs?: number;
+    resolvedBy?: string;
   }>;
   createdAt: string;
   updatedAt: string;
@@ -48,6 +49,7 @@ interface Macro {
   tags: string[];
   isFormFill: boolean;
   targetUrl?: string;
+  variables?: Array<{ name: string; description?: string; defaultValue?: string }>;
 }
 
 interface RecordingStatus {
@@ -69,6 +71,7 @@ interface ReplayResult {
     success: boolean;
     error?: string;
     durationMs: number;
+    resolvedBy?: string;
   }>;
 }
 
@@ -107,6 +110,14 @@ export default function MacroPanel({ onClose }: { onClose: () => void }) {
   }>>([]);
   const [screenshotBase64, setScreenshotBase64] = useState<string>("");
   const screenshotImgRef = useRef<HTMLImageElement>(null);
+
+  // NL → macro generator
+  const [genPrompt, setGenPrompt] = useState("");
+  const [generating, setGenerating] = useState(false);
+  const [showGenInput, setShowGenInput] = useState(false);
+  // Variable prompt state ({@link needsVars} from the replay APIs)
+  const [varsFor, setVarsFor] = useState<{ macroId: string; isDesktop: boolean; names: string[]; defaults: Record<string, string> } | null>(null);
+  const [varsValues, setVarsValues] = useState<Record<string, string>>({});
 
   const fetchMacros = useCallback(async () => {
     try {
@@ -361,21 +372,35 @@ export default function MacroPanel({ onClose }: { onClose: () => void }) {
 
   // ─── Replay ─────────────────────────────────────────────────────────
 
-  const handleReplay = async (macroId: string, isDesktop = false) => {
+  const handleReplay = async (macroId: string, isDesktop = false, vars?: Record<string, string>) => {
     setReplayingId(macroId);
     setLastResult(null);
     setError(null);
     try {
       const url = isDesktop ? "/api/ghost/macros/desktop" : "/api/ghost/macros/replay";
       const body = isDesktop
-        ? { action: "replay", macroId }
-        : { macroId };
+        ? { action: "replay", macroId, vars }
+        : { macroId, vars };
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
       const data = await res.json();
+      if (data.needsVars) {
+        // Ask the user for the macro's {{variables}} and retry on submit
+        setVarsFor({
+          macroId,
+          isDesktop,
+          names: data.missing || (data.variables || []).map((v: any) => v.name),
+          defaults: Object.fromEntries(
+            (data.variables || []).map((v: any) => [v.name, v.defaultValue || ""])
+          ),
+        });
+        setVarsValues({});
+        setReplayingId(null);
+        return;
+      }
       if (data.success && data.result) {
         setLastResult(data.result);
         fetchMacros();
@@ -387,6 +412,42 @@ export default function MacroPanel({ onClose }: { onClose: () => void }) {
     } finally {
       setReplayingId(null);
     }
+  };
+
+  const handleGenerate = async () => {
+    const prompt = genPrompt.trim();
+    if (!prompt) return;
+    setGenerating(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/ghost/macros/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setGenPrompt("");
+        setShowGenInput(false);
+        await fetchMacros();
+        // Surface the new macro at the top of the list, expanded
+        if (data.macro?.id) setExpandedId(data.macro.id);
+      } else {
+        setError(data.error || "Generation failed");
+      }
+    } catch (err: any) {
+      setError(err?.message || "Generation failed");
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const handleVarsSubmit = () => {
+    if (!varsFor) return;
+    const merged: Record<string, string> = { ...varsFor.defaults, ...varsValues };
+    const { macroId, isDesktop } = varsFor;
+    setVarsFor(null);
+    handleReplay(macroId, isDesktop, merged);
   };
 
   const handleDelete = async (macroId: string) => {
@@ -516,6 +577,47 @@ export default function MacroPanel({ onClose }: { onClose: () => void }) {
               <Monitor className="w-4 h-4" />
               Desktop App
             </button>
+          </div>
+        )}
+
+        {/* ✨ NL → macro generator */}
+        {!recording?.isRecording && !desktopRecording && (
+          <div className="mt-4 mb-3">
+            {showGenInput ? (
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={genPrompt}
+                  onChange={(e) => setGenPrompt(e.target.value)}
+                  placeholder='e.g. "play back to friends on youtube" →'
+                  className="flex-1 px-4 py-2.5 bg-black/20 border border-fuchsia-500/30 rounded-xl text-white placeholder-white/30 focus:border-fuchsia-400/60 focus:outline-none text-sm"
+                  onKeyDown={(e) => e.key === "Enter" && handleGenerate()}
+                  autoFocus
+                />
+                <button
+                  onClick={handleGenerate}
+                  disabled={generating || !genPrompt.trim()}
+                  className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-fuchsia-500 to-pink-500 text-white text-sm font-semibold flex items-center gap-2 disabled:opacity-50 transition-all"
+                >
+                  {generating ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+                  {generating ? "Dreaming it up…" : "Generate"}
+                </button>
+                <button
+                  onClick={() => setShowGenInput(false)}
+                  className="px-3 py-2.5 rounded-xl bg-white/5 border border-white/10 text-white/50 hover:text-white/80 text-sm"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setShowGenInput(true)}
+                className="w-full px-4 py-2.5 rounded-xl bg-fuchsia-500/10 border border-fuchsia-500/25 text-fuchsia-300 text-sm font-medium flex items-center justify-center gap-2 hover:bg-fuchsia-500/20 transition-all"
+              >
+                <Zap className="w-4 h-4" />
+                ✨ Describe a macro in words — JARVIS builds it
+              </button>
+            )}
           </div>
         )}
 
@@ -837,6 +939,51 @@ export default function MacroPanel({ onClose }: { onClose: () => void }) {
             </motion.div>
           )}
 
+          {/* Variable prompt — "one macro, infinite uses" */}
+          {varsFor && (
+            <motion.div
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="p-4 rounded-xl bg-fuchsia-500/10 border border-fuchsia-500/30 mb-4"
+            >
+              <p className="text-sm text-fuchsia-200 font-medium flex items-center gap-2 mb-3">
+                <Zap className="w-4 h-4" />
+                This macro needs your input:
+              </p>
+              <div className="space-y-2">
+                {varsFor.names.map((name) => (
+                  <div key={name} className="flex items-center gap-2">
+                    <span className="text-xs text-fuchsia-300/80 font-mono w-28 truncate">{"{" + name + "}"}</span>
+                    <input
+                      type="text"
+                      value={varsValues[name] ?? ""}
+                      onChange={(e) => setVarsValues((p) => ({ ...p, [name]: e.target.value }))}
+                      placeholder={varsFor.defaults[name] || `value for ${name}`}
+                      autoFocus={varsFor.names[0] === name}
+                      onKeyDown={(e) => e.key === "Enter" && handleVarsSubmit()}
+                      className="flex-1 px-3 py-2 bg-black/30 border border-white/10 rounded-lg text-white text-sm placeholder-white/25 focus:border-fuchsia-400/50 focus:outline-none"
+                    />
+                  </div>
+                ))}
+              </div>
+              <div className="flex gap-2 mt-3 justify-end">
+                <button
+                  onClick={() => setVarsFor(null)}
+                  className="px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-white/50 hover:text-white/80 text-xs"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleVarsSubmit}
+                  className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-fuchsia-500 to-pink-500 text-white text-xs font-semibold flex items-center gap-1.5"
+                >
+                  <Play className="w-3 h-3" />
+                  Run it
+                </button>
+              </div>
+            </motion.div>
+          )}
+
           {/* Last replay result — with step-by-step detail */}
           <AnimatePresence>
             {lastResult && (
@@ -943,6 +1090,16 @@ export default function MacroPanel({ onClose }: { onClose: () => void }) {
                         {macro.isFormFill && (
                           <span className="px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-300/70 text-[10px]">
                             form fill
+                          </span>
+                        )}
+                        {macro.tags?.includes("generated") && (
+                          <span className="px-2 py-0.5 rounded-full bg-fuchsia-500/10 text-fuchsia-300/70 text-[10px]">
+                            ✨ generated
+                          </span>
+                        )}
+                        {!!macro.variables?.length && (
+                          <span className="px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-300/70 text-[10px]">
+                            {"{" + macro.variables.map((v) => v.name).join(", ") + "}"}
                           </span>
                         )}
                       </div>

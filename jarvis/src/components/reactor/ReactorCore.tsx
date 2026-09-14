@@ -5,6 +5,7 @@ import { useFrame } from "@react-three/fiber";
 import { Sphere, Torus } from "@react-three/drei";
 import * as THREE from "three";
 import { useJarvisStore } from "@/store/jarvis.store";
+import { useAudioReactivity } from "@/hooks/useAudioReactivity";
 import { getThemeConfig, syncThemeToCSS } from "@/lib/theme";
 
 // === ICONIC BATMAN SYMBOL ===
@@ -200,15 +201,26 @@ function InnerReactor({ geometryType, themeConfig, state }: {
   state: string;
 }) {
   const groupRef = useRef<THREE.Group>(null);
+  const audioRef = useAudioReactivity();
   const [time, setTime] = useState(0);
 
   useFrame((_, delta) => {
+    // Music-reactive: when ANY app plays audio (Spotify, YouTube, browser),
+    // the reactor spins faster, thumps with the beat and glows on peaks.
+    const audio = audioRef.current;
+    const music = audio.musicPlaying ? audio.reactivity : 0;
     setTime(t => t + delta);
     if (groupRef.current) {
       const speed = themeConfig.effects.pulseSpeed;
-      groupRef.current.rotation.y += delta * 0.2 * speed;
+      groupRef.current.rotation.y += delta * (0.2 + music * 0.9) * speed;
       groupRef.current.rotation.z = Math.sin(time * speed * 0.5) * 0.03;
+      const beat = music * (0.35 + 0.3 * Math.abs(Math.sin(time * Math.PI * 2.3)));
+      groupRef.current.scale.setScalar(1 + beat);
     }
+    const boost = 1 + music * 1.6;
+    coreMaterial.emissiveIntensity = emissiveIntensity * themeConfig.typography.intensity * boost;
+    goldMaterial.emissiveIntensity = emissiveIntensity * 0.4 * boost;
+    copperMaterial.emissiveIntensity = emissiveIntensity * 0.2 * boost;
   });
 
   const emissiveIntensity = state === "sleep" ? 0.3 : state === "thinking" ? 1.5 : 0.8;

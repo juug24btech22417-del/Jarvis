@@ -56,6 +56,8 @@ export interface Macro {
   isFormFill: boolean;
   /** The URL this macro targets (if form fill) */
   targetUrl?: string;
+  /** Runtime parameters referenced as {{name}} inside steps */
+  variables?: MacroVariable[];
 }
 
 export interface MacroRecordingSession {
@@ -81,8 +83,21 @@ export interface MacroReplayResult {
     success: boolean;
     error?: string;
     durationMs: number;
+    /** How the click/type target was resolved (uia | ocr | window-relative | absolute) */
+    resolvedBy?: string;
   }>;
   screenshotPath?: string;
+}
+
+/**
+ * A named runtime parameter for a macro. Steps reference it as {{name}}
+ * (in step.value, step.target, or options.uia.name) and the value is
+ * substituted at replay time — one macro, infinite uses.
+ */
+export interface MacroVariable {
+  name: string;
+  description?: string;
+  defaultValue?: string;
 }
 
 /** Serialized form of a macro for storage/transport (no runtime refs). */
