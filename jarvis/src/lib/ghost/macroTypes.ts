@@ -16,7 +16,9 @@ export type StepAction =
   | "scroll"        // Scroll the page
   | "hover"         // Hover over an element
   | "autofill"      // Ghost Protocol autofill on current page
-  | "submit";       // Submit a form
+  | "submit"        // Submit a form
+  | "launch"        // Launch a desktop app or URL
+  | "focus";        // Bring a window to foreground
 
 export interface MacroStep {
   id: string;

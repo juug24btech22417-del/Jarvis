@@ -1,52 +1,9 @@
 [
   {
-    "id": "macro_1789227160452_m2u4",
-    "createdAt": "2026-09-12T15:32:40.452Z",
-    "updatedAt": "2026-09-12T15:32:40.452Z",
-    "replayCount": 0,
-    "name": "Recording 9:02:40 pm",
-    "description": "Auto-recorded session on example.com",
-    "steps": [],
-    "isFormFill": false,
-    "targetUrl": "https://example.com",
-    "tags": [
-      "recorded"
-    ]
-  },
-  {
-    "id": "macro_1789228124025_a51h",
-    "createdAt": "2026-09-12T15:48:44.025Z",
-    "updatedAt": "2026-09-12T15:48:44.025Z",
-    "replayCount": 0,
-    "name": "Recording 9:18:44 pm",
-    "description": "Auto-recorded session on example.com",
-    "steps": [],
-    "isFormFill": false,
-    "targetUrl": "https://example.com",
-    "tags": [
-      "recorded"
-    ]
-  },
-  {
-    "id": "macro_1789228147127_u1sx",
-    "createdAt": "2026-09-12T15:49:07.127Z",
-    "updatedAt": "2026-09-12T15:49:22.959Z",
-    "replayCount": 1,
-    "name": "unknown — 0 steps",
-    "description": "Recorded 0 steps on unknown. Duration: 16s",
-    "steps": [],
-    "isFormFill": false,
-    "targetUrl": "https://example.com",
-    "tags": [
-      "recorded"
-    ],
-    "lastReplayedAt": "2026-09-12T15:49:35.563Z"
-  },
-  {
     "id": "macro_1789228188617_eghz",
     "createdAt": "2026-09-12T15:49:48.617Z",
     "updatedAt": "2026-09-12T15:49:48.617Z",
-    "replayCount": 1,
+    "replayCount": 5,
     "name": "Test Navigation Macro",
     "description": "Navigate to example.com and verify page loads",
     "steps": [
@@ -75,62 +32,759 @@
       "test",
       "navigation"
     ],
-    "lastReplayedAt": "2026-09-12T15:50:02.533Z"
+    "lastReplayedAt": "2026-09-13T11:55:12.616Z"
   },
   {
-    "id": "macro_1789229118926_epsx",
-    "createdAt": "2026-09-12T16:05:18.926Z",
-    "updatedAt": "2026-09-12T16:05:18.926Z",
-    "replayCount": 0,
-    "name": "Recording 9:35:18 pm",
-    "description": "Auto-recorded session on web.whatsapp.com",
-    "steps": [],
+    "id": "macro_1789229695535_omz5",
+    "createdAt": "2026-09-12T16:14:55.535Z",
+    "updatedAt": "2026-09-12T16:15:09.079Z",
+    "replayCount": 4,
+    "name": "Recording 9:44:55 pm",
+    "description": "Auto-recorded session on chatgpt.com",
+    "steps": [
+      {
+        "id": "step_1789229699219_cstj",
+        "action": "type",
+        "target": "#mobile-composer-prompt",
+        "value": "hey",
+        "description": "Type \"hey\" into #mobile-composer-prompt"
+      },
+      {
+        "id": "step_1789229700478_hgp3",
+        "action": "press",
+        "value": "Enter",
+        "description": "Press Enter"
+      },
+      {
+        "id": "step_1789229702590_cc01",
+        "action": "goto",
+        "target": "https://chatgpt.com/uc/6aa57a81-7b80-83ea-876b-938a2f49aaf4",
+        "description": "Navigate to https://chatgpt.com/uc/6aa57a81-7b80-83ea-876b-938a2f49aaf4"
+      },
+      {
+        "id": "step_1789229706209_yfr1",
+        "action": "click",
+        "target": "#mobile-composer-prompt",
+        "description": "Click #mobile-composer-prompt"
+      },
+      {
+        "id": "step_1789229706608_fqix",
+        "action": "type",
+        "target": "#mobile-composer-prompt",
+        "value": "whatsup",
+        "description": "Type \"whatsup\" into #mobile-composer-prompt"
+      },
+      {
+        "id": "step_1789229709079_qshy",
+        "action": "press",
+        "value": "Enter",
+        "description": "Press Enter"
+      }
+    ],
     "isFormFill": false,
-    "targetUrl": "https://web.whatsapp.com/",
+    "targetUrl": "https://chatgpt.com/",
+    "tags": [
+      "recorded"
+    ],
+    "lastReplayedAt": "2026-09-13T11:44:24.146Z"
+  },
+  {
+    "id": "macro_1789287139751_0c43",
+    "createdAt": "2026-09-13T08:12:19.751Z",
+    "updatedAt": "2026-09-13T08:12:40.951Z",
+    "replayCount": 6,
+    "name": "Recording 1:42:19 pm",
+    "description": "Auto-recorded session on www.youtube.com",
+    "steps": [
+      {
+        "id": "step_1789287148759_icq6",
+        "action": "click",
+        "target": "input.ytSearchboxComponentInput.yt-searchbox-input",
+        "description": "Click input.ytSearchboxComponentInput.yt-searchbox-input"
+      },
+      {
+        "id": "step_1789287150875_ckzt",
+        "action": "type",
+        "target": "input[name=\"search_query\"]",
+        "value": "b",
+        "description": "Type \"b\" into input[name=\"search_query\"]"
+      },
+      {
+        "id": "step_1789287151073_q8oc",
+        "action": "type",
+        "target": "input[name=\"search_query\"]",
+        "value": "ba",
+        "description": "Type \"ba\" into input[name=\"search_query\"]"
+      },
+      {
+        "id": "step_1789287151484_4du0",
+        "action": "type",
+        "target": "input[name=\"search_query\"]",
+        "value": "bar",
+        "description": "Type \"bar\" into input[name=\"search_query\"]"
+      },
+      {
+        "id": "step_1789287152096_o5ln",
+        "action": "type",
+        "target": "input[name=\"search_query\"]",
+        "value": "bars",
+        "description": "Type \"bars\" into input[name=\"search_query\"]"
+      },
+      {
+        "id": "step_1789287153118_io0p",
+        "action": "press",
+        "value": "ArrowDown",
+        "description": "Press ArrowDown"
+      },
+      {
+        "id": "step_1789287153799_m17a",
+        "action": "press",
+        "value": "Enter",
+        "description": "Press Enter"
+      },
+      {
+        "id": "step_1789287153845_y7wi",
+        "action": "goto",
+        "target": "https://www.youtube.com/results?search_query=barsaat",
+        "description": "Navigate to https://www.youtube.com/results?search_query=barsaat"
+      },
+      {
+        "id": "step_1789287160894_7pvc",
+        "action": "click",
+        "target": "#media-container-link",
+        "description": "Click #media-container-link"
+      },
+      {
+        "id": "step_1789287160951_sw93",
+        "action": "goto",
+        "target": "https://www.youtube.com/watch?v=ebZj_nrmH-c&list=RDebZj_nrmH-c&start_radio=1",
+        "description": "Navigate to https://www.youtube.com/watch?v=ebZj_nrmH-c&list=RDebZj_nrmH-c&start_radio=1"
+      }
+    ],
+    "isFormFill": false,
+    "targetUrl": "https://www.youtube.com/",
+    "tags": [
+      "recorded"
+    ],
+    "lastReplayedAt": "2026-09-13T09:14:36.304Z"
+  },
+  {
+    "id": "macro_1789288897989_z8yx",
+    "createdAt": "2026-09-13T08:41:37.989Z",
+    "updatedAt": "2026-09-13T08:41:56.194Z",
+    "replayCount": 0,
+    "name": "Recording 2:11:37 pm",
+    "description": "Auto-recorded session on www.youtube.com",
+    "steps": [
+      {
+        "id": "step_1789288903717_dso8",
+        "action": "type",
+        "target": "input[name=\"search_query\"]",
+        "value": "barsaat",
+        "description": "Type \"barsaat\" into input[name=\"search_query\"]"
+      },
+      {
+        "id": "step_1789288906024_u8g6",
+        "action": "goto",
+        "target": "https://www.youtube.com/results?search_query=barsaat",
+        "description": "Navigate to https://www.youtube.com/results?search_query=barsaat"
+      },
+      {
+        "id": "step_1789288908783_05h6",
+        "action": "click",
+        "target": "#thumbnail",
+        "description": "Click #thumbnail"
+      },
+      {
+        "id": "step_1789288908805_l3kl",
+        "action": "goto",
+        "target": "https://www.youtube.com/watch?v=ebZj_nrmH-c&list=RDebZj_nrmH-c&start_radio=1",
+        "description": "Navigate to https://www.youtube.com/watch?v=ebZj_nrmH-c&list=RDebZj_nrmH-c&start_radio=1"
+      },
+      {
+        "id": "step_1789288916194_50ea",
+        "action": "click",
+        "target": "#skip-button:2",
+        "description": "Click #skip-button:2"
+      }
+    ],
+    "isFormFill": false,
+    "targetUrl": "https://www.youtube.com/",
     "tags": [
       "recorded"
     ]
   },
   {
-    "id": "macro_1789229121025_h39e",
-    "createdAt": "2026-09-12T16:05:21.025Z",
-    "updatedAt": "2026-09-12T16:05:21.025Z",
+    "id": "macro_1789288941095_6wzl",
+    "createdAt": "2026-09-13T08:42:21.095Z",
+    "updatedAt": "2026-09-13T08:42:32.909Z",
+    "replayCount": 1,
+    "name": "Recording 2:12:21 pm",
+    "description": "Auto-recorded session on www.youtube.com",
+    "steps": [
+      {
+        "id": "step_1789288946577_aapr",
+        "action": "type",
+        "target": "input[name=\"search_query\"]",
+        "value": "bar",
+        "description": "Type \"bar\" into input[name=\"search_query\"]"
+      },
+      {
+        "id": "step_1789288947912_fa1t",
+        "action": "press",
+        "value": "ArrowDown",
+        "description": "Press ArrowDown"
+      },
+      {
+        "id": "step_1789288948194_q4l1",
+        "action": "press",
+        "value": "Enter",
+        "description": "Press Enter"
+      },
+      {
+        "id": "step_1789288948233_0mib",
+        "action": "goto",
+        "target": "https://www.youtube.com/results?search_query=barsaat",
+        "description": "Navigate to https://www.youtube.com/results?search_query=barsaat"
+      },
+      {
+        "id": "step_1789288952875_yosh",
+        "action": "click",
+        "target": "#media-container-link",
+        "description": "Click #media-container-link"
+      },
+      {
+        "id": "step_1789288952909_9jdp",
+        "action": "goto",
+        "target": "https://www.youtube.com/watch?v=ebZj_nrmH-c&list=RDebZj_nrmH-c&start_radio=1",
+        "description": "Navigate to https://www.youtube.com/watch?v=ebZj_nrmH-c&list=RDebZj_nrmH-c&start_radio=1"
+      }
+    ],
+    "isFormFill": false,
+    "targetUrl": "https://www.youtube.com/",
+    "tags": [
+      "recorded"
+    ],
+    "lastReplayedAt": "2026-09-13T08:52:06.026Z"
+  },
+  {
+    "id": "macro_1789289450571_51g9",
+    "createdAt": "2026-09-13T08:50:50.571Z",
+    "updatedAt": "2026-09-13T08:51:25.146Z",
+    "replayCount": 2,
+    "name": "Recording 2:20:50 pm",
+    "description": "Auto-recorded session on www.youtube.com",
+    "steps": [
+      {
+        "id": "step_1789289455886_hakg",
+        "action": "type",
+        "target": "input[name=\"search_query\"]",
+        "value": "channa ",
+        "description": "Type \"channa \" into input[name=\"search_query\"]"
+      },
+      {
+        "id": "step_1789289458266_k3tf",
+        "action": "press",
+        "value": "ArrowDown",
+        "description": "Press ArrowDown"
+      },
+      {
+        "id": "step_1789289458659_c2px",
+        "action": "press",
+        "value": "Enter",
+        "description": "Press Enter"
+      },
+      {
+        "id": "step_1789289458690_3k6q",
+        "action": "goto",
+        "target": "https://www.youtube.com/results?search_query=channa+mereya",
+        "description": "Navigate to https://www.youtube.com/results?search_query=channa+mereya"
+      },
+      {
+        "id": "step_1789289462576_ammi",
+        "action": "click",
+        "target": "#media-container-link",
+        "description": "Click #media-container-link"
+      },
+      {
+        "id": "step_1789289462639_p6xo",
+        "action": "goto",
+        "target": "https://www.youtube.com/watch?v=284Ov7ysmfA&list=RD284Ov7ysmfA&start_radio=1",
+        "description": "Navigate to https://www.youtube.com/watch?v=284Ov7ysmfA&list=RD284Ov7ysmfA&start_radio=1"
+      },
+      {
+        "id": "step_1789289485146_kywg",
+        "action": "click",
+        "target": "#skip-button:g",
+        "description": "Click #skip-button:g"
+      }
+    ],
+    "isFormFill": false,
+    "targetUrl": "https://www.youtube.com/",
+    "tags": [
+      "recorded"
+    ],
+    "lastReplayedAt": "2026-09-13T11:14:34.837Z"
+  },
+  {
+    "id": "macro_1789291072801_n3k7",
+    "createdAt": "2026-09-13T09:17:52.801Z",
+    "updatedAt": "2026-09-13T09:18:03.564Z",
+    "replayCount": 2,
+    "name": "Desktop — 4 steps",
+    "description": "Recorded 4 desktop actions. Duration: 11s",
+    "steps": [
+      {
+        "id": "dstep_1789291073198_2jwp",
+        "action": "click",
+        "target": "500,300",
+        "description": "Click test"
+      },
+      {
+        "id": "dstep_1789291083162_p3h2",
+        "action": "type",
+        "value": "test input",
+        "description": "Type test input"
+      },
+      {
+        "id": "dstep_1789291083260_1436",
+        "action": "press",
+        "value": "Enter",
+        "description": "Press Enter"
+      },
+      {
+        "id": "dstep_1789291083376_pvsv",
+        "action": "wait",
+        "value": "500",
+        "description": "Wait 500ms"
+      }
+    ],
+    "isFormFill": false,
+    "tags": [
+      "desktop",
+      "recorded"
+    ],
+    "lastReplayedAt": "2026-09-13T10:35:27.888Z"
+  },
+  {
+    "id": "macro_1789291544484_0ds5",
+    "createdAt": "2026-09-13T09:25:44.484Z",
+    "updatedAt": "2026-09-13T09:25:44.484Z",
     "replayCount": 0,
-    "name": "Recording 9:35:21 pm",
-    "description": "Auto-recorded session on web.whatsapp.com",
+    "name": "Desktop Recording 2:55:44 pm",
+    "description": "Auto-recorded desktop session",
     "steps": [],
     "isFormFill": false,
-    "targetUrl": "https://web.whatsapp.com/",
+    "tags": [
+      "desktop",
+      "recorded"
+    ]
+  },
+  {
+    "id": "macro_1789291627616_1mp0",
+    "createdAt": "2026-09-13T09:27:07.616Z",
+    "updatedAt": "2026-09-13T09:27:25.048Z",
+    "replayCount": 1,
+    "name": "Recording 2:57:07 pm",
+    "description": "Auto-recorded session on www.youtube.com",
+    "steps": [
+      {
+        "id": "step_1789291633754_z1gk",
+        "action": "press",
+        "value": "Enter",
+        "description": "Press Enter"
+      },
+      {
+        "id": "step_1789291633774_oc3i",
+        "action": "goto",
+        "target": "https://www.youtube.com/results?search_query=barsaat",
+        "description": "Navigate to https://www.youtube.com/results?search_query=barsaat"
+      },
+      {
+        "id": "step_1789291636748_5ri4",
+        "action": "click",
+        "target": "#media-container-link",
+        "description": "Click #media-container-link"
+      },
+      {
+        "id": "step_1789291636785_sdby",
+        "action": "goto",
+        "target": "https://www.youtube.com/watch?v=ebZj_nrmH-c&list=RDebZj_nrmH-c&start_radio=1",
+        "description": "Navigate to https://www.youtube.com/watch?v=ebZj_nrmH-c&list=RDebZj_nrmH-c&start_radio=1"
+      },
+      {
+        "id": "step_1789291645047_d55i",
+        "action": "click",
+        "target": "#skip-button:2",
+        "description": "Click #skip-button:2"
+      }
+    ],
+    "isFormFill": false,
+    "targetUrl": "https://www.youtube.com/",
+    "tags": [
+      "recorded"
+    ],
+    "lastReplayedAt": "2026-09-13T09:28:32.623Z"
+  },
+  {
+    "id": "macro_1789292316734_zslx",
+    "createdAt": "2026-09-13T09:38:36.734Z",
+    "updatedAt": "2026-09-13T09:38:36.734Z",
+    "replayCount": 0,
+    "name": "Desktop Recording 3:08:36 pm",
+    "description": "Auto-recorded desktop session",
+    "steps": [],
+    "isFormFill": false,
+    "tags": [
+      "desktop",
+      "recorded"
+    ]
+  },
+  {
+    "id": "macro_1789292360385_6vww",
+    "createdAt": "2026-09-13T09:39:20.384Z",
+    "updatedAt": "2026-09-13T09:39:20.384Z",
+    "replayCount": 0,
+    "name": "Desktop Recording 3:09:20 pm",
+    "description": "Auto-recorded desktop session",
+    "steps": [],
+    "isFormFill": false,
+    "tags": [
+      "desktop",
+      "recorded"
+    ]
+  },
+  {
+    "id": "macro_1789292512824_10wz",
+    "createdAt": "2026-09-13T09:41:52.823Z",
+    "updatedAt": "2026-09-13T09:41:52.823Z",
+    "replayCount": 0,
+    "name": "Desktop Recording 3:11:52 pm",
+    "description": "Auto-recorded desktop session",
+    "steps": [],
+    "isFormFill": false,
+    "tags": [
+      "desktop",
+      "recorded"
+    ]
+  },
+  {
+    "id": "macro_1789292718658_vxo7",
+    "createdAt": "2026-09-13T09:45:18.658Z",
+    "updatedAt": "2026-09-13T09:45:19.635Z",
+    "replayCount": 0,
+    "name": "Desktop Recording 3:15:18 pm",
+    "description": "Auto-recorded desktop session",
+    "steps": [
+      {
+        "id": "dstep_1789292719200_rezy",
+        "action": "click",
+        "target": "500,300",
+        "value": "500,300",
+        "description": "Test click"
+      },
+      {
+        "id": "dstep_1789292719329_asns",
+        "action": "type",
+        "target": "hello_world",
+        "value": "hello_world",
+        "description": "Test type"
+      },
+      {
+        "id": "dstep_1789292719470_bxbb",
+        "action": "press",
+        "target": "Enter",
+        "value": "Enter",
+        "description": "Test press"
+      },
+      {
+        "id": "dstep_1789292719635_5kqc",
+        "action": "wait",
+        "target": "500",
+        "value": "500",
+        "description": "Test wait"
+      }
+    ],
+    "isFormFill": false,
+    "tags": [
+      "desktop",
+      "recorded"
+    ]
+  },
+  {
+    "id": "macro_1789293301239_z7za",
+    "createdAt": "2026-09-13T09:55:01.239Z",
+    "updatedAt": "2026-09-13T09:55:01.239Z",
+    "replayCount": 0,
+    "name": "Recording 3:25:01 pm",
+    "description": "Auto-recorded session on www.youtube.com",
+    "steps": [],
+    "isFormFill": false,
+    "targetUrl": "https://www.youtube.com",
     "tags": [
       "recorded"
     ]
   },
   {
-    "id": "macro_1789229140362_oili",
-    "createdAt": "2026-09-12T16:05:40.362Z",
-    "updatedAt": "2026-09-12T16:05:40.362Z",
-    "replayCount": 0,
-    "name": "Recording 9:35:40 pm",
-    "description": "Auto-recorded session on web.whatsapp.com",
-    "steps": [],
+    "id": "macro_1789296094487_oyq5",
+    "createdAt": "2026-09-13T10:41:34.487Z",
+    "updatedAt": "2026-09-13T10:41:44.605Z",
+    "replayCount": 1,
+    "name": "Recording 4:11:34 pm",
+    "description": "Auto-recorded session on www.youtube.com",
+    "steps": [
+      {
+        "id": "step_1789296099244_dayk",
+        "action": "type",
+        "target": "input[name=\"search_query\"]",
+        "value": "channa ",
+        "description": "Type \"channa \" into input[name=\"search_query\"]"
+      },
+      {
+        "id": "step_1789296101301_lcb8",
+        "action": "press",
+        "value": "ArrowDown",
+        "description": "Press ArrowDown"
+      },
+      {
+        "id": "step_1789296101991_u8xt",
+        "action": "press",
+        "value": "Enter",
+        "description": "Press Enter"
+      },
+      {
+        "id": "step_1789296102014_gxbs",
+        "action": "goto",
+        "target": "https://www.youtube.com/results?search_query=channa+mereya",
+        "description": "Navigate to https://www.youtube.com/results?search_query=channa+mereya"
+      },
+      {
+        "id": "step_1789296104581_fepk",
+        "action": "click",
+        "target": "#media-container-link",
+        "description": "Click #media-container-link"
+      },
+      {
+        "id": "step_1789296104605_prj1",
+        "action": "goto",
+        "target": "https://www.youtube.com/watch?v=284Ov7ysmfA&list=RD284Ov7ysmfA&start_radio=1",
+        "description": "Navigate to https://www.youtube.com/watch?v=284Ov7ysmfA&list=RD284Ov7ysmfA&start_radio=1"
+      }
+    ],
     "isFormFill": false,
-    "targetUrl": "https://web.whatsapp.com/",
+    "targetUrl": "https://www.youtube.com/",
     "tags": [
       "recorded"
-    ]
+    ],
+    "lastReplayedAt": "2026-09-13T10:42:42.326Z"
   },
   {
-    "id": "macro_1789229207003_edky",
-    "createdAt": "2026-09-12T16:06:47.003Z",
-    "updatedAt": "2026-09-12T16:06:47.003Z",
-    "replayCount": 0,
-    "name": "Recording 9:36:47 pm",
-    "description": "Auto-recorded session on web.whatsapp.com",
-    "steps": [],
+    "id": "macro_1789314231546_mjep",
+    "createdAt": "2026-09-13T15:43:51.546Z",
+    "updatedAt": "2026-09-13T15:44:03.729Z",
+    "replayCount": 1,
+    "name": "Recording 9:13:51 pm",
+    "description": "Auto-recorded session on www.youtube.com",
+    "steps": [
+      {
+        "id": "step_1789314237245_put9",
+        "action": "type",
+        "target": "input[name=\"search_query\"]",
+        "value": "in the stars",
+        "description": "Type \"in the stars\" into input[name=\"search_query\"]",
+        "options": {
+          "fallbacks": [
+            "[placeholder=\"Search\"]",
+            "input.ytSearchboxComponentInput.yt-searchbox-input",
+            "input"
+          ]
+        }
+      },
+      {
+        "id": "step_1789314240445_vbdu",
+        "action": "press",
+        "value": "Enter",
+        "description": "Press Enter"
+      },
+      {
+        "id": "step_1789314240476_72sv",
+        "action": "goto",
+        "target": "https://www.youtube.com/results?search_query=in+the+stars",
+        "description": "Navigate to https://www.youtube.com/results?search_query=in+the+stars"
+      },
+      {
+        "id": "step_1789314243692_wlv1",
+        "action": "click",
+        "target": "#media-container-link",
+        "description": "Click #media-container-link",
+        "options": {
+          "fallbacks": [
+            "[aria-label=\"Benson Boone - In The Stars (Official Music Video) 3 minutes, 37 seconds\"]",
+            "a.yt-simple-endpoint.style-scope",
+            "a"
+          ]
+        }
+      },
+      {
+        "id": "step_1789314243729_zdhv",
+        "action": "goto",
+        "target": "https://www.youtube.com/watch?v=HPR-VwzbDRg&list=RDHPR-VwzbDRg&start_radio=1",
+        "description": "Navigate to https://www.youtube.com/watch?v=HPR-VwzbDRg&list=RDHPR-VwzbDRg&start_radio=1"
+      }
+    ],
     "isFormFill": false,
-    "targetUrl": "https://web.whatsapp.com/",
+    "targetUrl": "https://www.youtube.com/",
     "tags": [
       "recorded"
-    ]
+    ],
+    "lastReplayedAt": "2026-09-13T15:45:16.196Z"
+  },
+  {
+    "id": "macro_1789407194855_ms0e",
+    "createdAt": "2026-09-14T17:33:14.855Z",
+    "updatedAt": "2026-09-14T17:34:19.362Z",
+    "replayCount": 1,
+    "name": "Desktop — 6 steps",
+    "description": "Recorded 6 desktop actions (semantic). Duration: 64s",
+    "steps": [
+      {
+        "id": "dstep_1789407207986_894r",
+        "action": "launch",
+        "target": "Spotify",
+        "value": "",
+        "description": "Launch Spotify"
+      },
+      {
+        "id": "dstep_1789407217918_206n",
+        "action": "click",
+        "target": "678,40",
+        "value": "",
+        "description": "Pane element (comet)",
+        "options": {
+          "uia": {
+            "process": "comet",
+            "name": "",
+            "controlType": "Pane",
+            "automationId": "",
+            "className": "FrameGrabHandle",
+            "windowName": "JARVIS | Just A Rather Very Intelligent System - Comet"
+          }
+        }
+      },
+      {
+        "id": "dstep_1789407228586_03j1",
+        "action": "type",
+        "target": "",
+        "value": "Back to friends",
+        "description": "Type \"Back to friends\""
+      },
+      {
+        "id": "dstep_1789407236866_fd4u",
+        "action": "press",
+        "target": "",
+        "value": "Enter",
+        "description": "Press Enter"
+      },
+      {
+        "id": "dstep_1789407246182_ywlj",
+        "action": "wait",
+        "target": "",
+        "value": "",
+        "description": "Wait 1000ms"
+      },
+      {
+        "id": "dstep_1789407256249_7968",
+        "action": "click",
+        "target": "926,230",
+        "value": "",
+        "description": "Pane element (comet)",
+        "options": {
+          "uia": {
+            "process": "comet",
+            "name": "",
+            "controlType": "Pane",
+            "automationId": "",
+            "className": "Chrome_WidgetWin_1",
+            "windowName": "JARVIS | Just A Rather Very Intelligent System - Comet"
+          }
+        }
+      }
+    ],
+    "isFormFill": false,
+    "tags": [
+      "desktop",
+      "recorded"
+    ],
+    "lastReplayedAt": "2026-09-14T17:35:59.542Z"
+  },
+  {
+    "id": "macro_1789408874503_kpga",
+    "createdAt": "2026-09-14T18:01:14.503Z",
+    "updatedAt": "2026-09-14T18:01:15.460Z",
+    "replayCount": 5,
+    "name": "Desktop — 6 steps",
+    "description": "Recorded 6 desktop actions (semantic). Duration: 1s",
+    "steps": [
+      {
+        "id": "dstep_1789408874984_h1t8",
+        "action": "launch",
+        "target": "Spotify",
+        "description": "Launch Spotify"
+      },
+      {
+        "id": "dstep_1789408875042_ojew",
+        "action": "click",
+        "description": "Click search box (Spotify)",
+        "options": {
+          "uia": {
+            "process": "Spotify",
+            "name": "What do you want to play?",
+            "controlType": "ComboBox",
+            "automationId": "",
+            "className": "",
+            "windowName": "Spotify"
+          }
+        }
+      },
+      {
+        "id": "dstep_1789408875106_621l",
+        "action": "type",
+        "value": "Back to friends",
+        "description": "Type song name"
+      },
+      {
+        "id": "dstep_1789408875183_ovog",
+        "action": "press",
+        "value": "Enter",
+        "description": "Press Enter"
+      },
+      {
+        "id": "dstep_1789408875273_lc6r",
+        "action": "wait",
+        "value": "800",
+        "description": "Wait 800ms"
+      },
+      {
+        "id": "dstep_1789408875385_38qa",
+        "action": "click",
+        "description": "Click track (Spotify)",
+        "options": {
+          "uia": {
+            "process": "Spotify",
+            "name": "Back to friends",
+            "controlType": "DataItem",
+            "automationId": "",
+            "className": "",
+            "windowName": "Spotify"
+          }
+        }
+      }
+    ],
+    "isFormFill": false,
+    "tags": [
+      "desktop",
+      "recorded"
+    ],
+    "lastReplayedAt": "2026-09-14T18:17:16.029Z"
   }
 ]

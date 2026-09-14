@@ -5,7 +5,7 @@ import { replayMacro } from "@/services/MacroRecorderService";
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { macroId, headed = false, stopOnFirstError = false } = body;
+    const { macroId, headed = true, stopOnFirstError = false, keepOpen = true } = body;
 
     if (!macroId) {
       return NextResponse.json(
@@ -14,11 +14,12 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    console.log(`[ghost/macros/replay] Replaying macro ${macroId}...`);
+    console.log(`[ghost/macros/replay] Replaying macro ${macroId} (keepOpen=${keepOpen})...`);
 
     const result = await replayMacro(macroId, {
       headed,
       stopOnFirstError,
+      keepOpen,
     });
 
     return NextResponse.json({
