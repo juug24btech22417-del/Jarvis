@@ -420,14 +420,27 @@ async function tick() {
           }
         } else if (action === "alarm") {
           const { executeOsCommand } = await import("./osBridge");
-          const result = await executeOsCommand("play_sound");
+          const result = await executeOsCommand("siren");
           if (result.ok) {
-            await sendReply(POLL_TOKEN, chatId, "🔔 Alarm triggered (chime played on laptop).").catch(() => {});
+            await sendReply(POLL_TOKEN, chatId, "🚨 SIREN triggered on laptop (~6s).").catch(() => {});
           } else {
-            await sendReply(POLL_TOKEN, chatId, `❌ Failed to trigger alarm: ${result.error}`).catch(() => {});
+            await sendReply(POLL_TOKEN, chatId, `❌ Failed to trigger siren: ${result.error}`).catch(() => {});
           }
         } else if (action === "dismiss") {
           await sendReply(POLL_TOKEN, chatId, "✅ Threat alert dismissed.").catch(() => {});
+        } else if (action === "escalate") {
+          // Remote full escalation from the alert card.
+          try {
+            const r = await fetch(`${process.env.INTERNAL_BASE_URL || "http://localhost:3000"}/api/security`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "escalate", data: { level: 3 } }),
+            });
+            const d = await r.json().catch(() => ({}));
+            await sendReply(POLL_TOKEN, chatId, d?.success ? `⚡ Escalation L3 done: ${d.steps?.join(" → ")}` : `❌ Escalation failed: ${d?.error ?? r.status}`).catch(() => {});
+          } catch (e: any) {
+            await sendReply(POLL_TOKEN, chatId, `❌ Escalation failed: ${e.message}`).catch(() => {});
+          }
         }
         continue;
       }

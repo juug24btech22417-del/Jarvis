@@ -23,6 +23,23 @@ export const BOT_COMMANDS: Array<{ command: string; description: string }> = [
   { command: "reminders", description: "List pending reminders" },
   { command: "cancel", description: "Cancel a reminder by id" },
 
+  { command: "macros", description: "List your recorded macros" },
+  { command: "replay", description: "Replay a macro (e.g. /replay google form attendance)" },
+  { command: "record", description: "Record a browser macro (e.g. /record https://...)" },
+  { command: "stop", description: "Stop the running macro recording" },
+  { command: "history", description: "Form-fill history" },
+  { command: "analytics", description: "Macro + form-fill analytics" },
+
+  { command: "status", description: "PC status — CPU, RAM, battery, uptime" },
+
+  { command: "secstatus", description: "Security status — armed state, faces, recent events" },
+  { command: "attempts", description: "Intrusion log — denied access attempts" },
+  { command: "siren", description: "Blast the security siren" },
+  { command: "stealth", description: "Silent watcher mode: /stealth on | off" },
+
+  { command: "fill", description: "Auto-fill a form (e.g. /fill https://...)" },
+  { command: "profile", description: "Show your Ghost Protocol profile" },
+
   { command: "lock", description: "Lock the laptop" },
   { command: "sleep", description: "Sleep the laptop" },
   { command: "screenshot", description: "Take a screenshot" },

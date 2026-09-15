@@ -265,6 +265,78 @@ async function routeSlash(chatId: number, text: string): Promise<ReplyPlan> {
     case "telemetry":
       return { kind: "execute_os", payload: { command: "pc_status", params: {} } };
 
+    // ─── SECURITY CONSOLE (#9) ─────────────────────────────────────────
+    case "siren":
+      return { kind: "execute_os", payload: { command: "siren", params: {} } };
+
+    case "secstatus":
+    case "security": {
+      try {
+        const base = process.env.INTERNAL_BASE_URL || "http://localhost:3000";
+        const r = await fetch(`${base}/api/security`);
+        const d = await r.json();
+        const s = d?.settings ?? {};
+        const faces = d?.faces ?? [];
+        const events = (d?.events ?? []).slice(0, 5);
+        const lines = [
+          "🛡️ <b>Security Status</b>",
+          `• System: ${s.enabled ? "✅ ARMED" : "⏸️ disabled"}`,
+          `• Strict mode: ${s.strictMode ? "on" : "off"} • Stealth: ${s.stealthMode ? "🥷 on" : "off"} • Escalation: ${s.escalation ? "on" : "off"}`,
+          `• Authorized faces: ${faces.length}${faces.length ? ` (${faces.map((f: any) => f.name).join(", ")})` : ""}`,
+          `• Auto-lock: ${s.autoLockTimeout ?? 5} min`,
+          "",
+          "<b>Recent events:</b>",
+          ...events.map((e: any) => `• ${e.type === "access_denied" ? "🚨" : e.type === "access_granted" ? "✅" : "•"} ${e.details} _(${new Date(e.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })})_`),
+        ];
+        return { kind: "reply", text: lines.join("\n"), opts: { parseMode: "HTML" } };
+      } catch (e: any) {
+        return { kind: "reply", text: `❌ Could not read security status: ${e.message}` };
+      }
+    }
+
+    case "attempts":
+    case "intrusions": {
+      try {
+        const base = process.env.INTERNAL_BASE_URL || "http://localhost:3000";
+        const r = await fetch(`${base}/api/security?action=events&limit=100`);
+        const d = await r.json();
+        const denied = (d?.events ?? []).filter((e: any) => e.type === "access_denied").slice(0, 10);
+        if (denied.length === 0) {
+          return { kind: "reply", text: "✅ No denied access attempts on record, Boss. All clear." };
+        }
+        const lines = [
+          `🚨 <b>${denied.length} denied attempt(s)</b> (latest first):\n`,
+          ...denied.map((e: any) => `• ${e.details}\n  _${new Date(e.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}_`),
+        ];
+        return { kind: "reply", text: lines.join("\n"), opts: { parseMode: "HTML" } };
+      } catch (e: any) {
+        return { kind: "reply", text: `❌ Could not read attempts: ${e.message}` };
+      }
+    }
+
+    case "stealth": {
+      const on = !/^off|false|0|disable/i.test(args);
+      try {
+        const base = process.env.INTERNAL_BASE_URL || "http://localhost:3000";
+        const r = await fetch(`${base}/api/security`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "settings", data: { stealthMode: on } }),
+        });
+        const d = await r.json();
+        return {
+          kind: "reply",
+          text: d?.success
+            ? on
+              ? "🥷 Stealth mode ARMED — silent watcher: no visible reaction, intruders get photographed in secret."
+              : "👀 Stealth mode disarmed — normal visible responses restored."
+            : `❌ Failed: ${d?.error ?? r.status}`,
+        };
+      } catch (e: any) {
+        return { kind: "reply", text: `❌ Failed: ${e.message}` };
+      }
+    }
+
     case "fill":
     case "autofill": {
       if (!args) {
@@ -627,6 +699,11 @@ const HELP_TEXT =
   `/profile — view current autofill profile\n` +
   `/lock · /sleep · /screenshot · /wake\n` +
   `/shutdown · /restart · /cancel_shutdown\n` +
+  `*Security console*\n` +
+  `/secstatus — armed state, faces, recent events\n` +
+  `/attempts — denied access attempts (intrusion log)\n` +
+  `/siren — blast the security siren\n` +
+  `/stealth on|off — silent watcher mode\n` +
   `/vol <0-100|up|down|mute> — or say "increase volume"\n` +
   `/brightness <0-100|up|down> — or say "dim the screen"\n` +
   `/open <app|url> · /kill <app> · /search <q>\n\n` +

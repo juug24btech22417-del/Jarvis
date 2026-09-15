@@ -349,6 +349,19 @@ Write-Output "muted"
       description = "Beep";
     }
 
+    // Security siren — rising two-tone loop for ~6s. Loud on purpose.
+    else if (command === "siren") {
+      shellCmd = `powershell -Command "1..6 | ForEach-Object { [console]::beep(880,300); [console]::beep(1245,300) }"`;
+      description = "Security siren (~6s)";
+    }
+
+    // Spoken warning via Windows SAPI — security escalation TTS.
+    else if (command === "speak" && typeof body.text === "string" && body.text.trim()) {
+      const text = body.text.trim().slice(0, 300).replace(/["\r\n]/g, " ");
+      shellCmd = `powershell -Command "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('${text}')"`;
+      description = "Spoken warning";
+    }
+
     else if (command === "volume_set" && typeof body.level === "number") {
       const target = Math.max(0, Math.min(100, body.level));
       const script = `

@@ -18,6 +18,8 @@ import TelegramPanel from "@/components/panels/TelegramPanel";
 import ConnectedPanel from "@/components/panels/ConnectedPanel";
 import CommunicationHub from "@/components/panels/CommunicationHub";
 import SecurityPanel from "@/components/panels/SecurityPanel";
+import SentinelArmToggle from "@/components/panels/SentinelArmToggle";
+import { useSentinelWatcher } from "@/hooks/useSentinelWatcher";
 import VaultPanel from "@/components/panels/VaultPanel";
 import DungeonPanel from "@/components/panels/DungeonPanel";
 import HabitsPanel from "@/components/panels/HabitsPanel";
@@ -343,6 +345,9 @@ export default function Home() {
 
   // Tier 3B: auto-switch persona on time/alerts/panel/chat context.
   useAutoPersona();
+  // Sentinel Eyes global watcher — headless face-security loop that runs
+  // regardless of which panel is open. Controlled by SentinelArmToggle.
+  useSentinelWatcher();
   // Tier 3A: drive reactor color/speed/density from persona + state + alerts.
   useReactorDrive();
   // Tier 3C: aggregate ambient signals for downstream consumers.
@@ -861,6 +866,10 @@ export default function Home() {
       {/* UI Panels (only show after boot) */}
       {bootComplete && (
         <>
+          {/* Sentinel arm/disarm — floats top-center under the HUD bar */}
+          <div className="fixed top-16 right-4 z-[45]">
+            <SentinelArmToggle />
+          </div>
           <StatusHUD />
           <MemoryPanel
             onDiscuss={(entity) => setDiscussEntity(entity)}

@@ -529,3 +529,34 @@ html[data-theme="quantum"] .reactor-glow {
     text-wrap: balance;
   }
 }
+
+/* ═══ Sentinel Eyes — camera CRT + alert effects ═══ */
+.security-crt {
+  position: relative;
+}
+.security-crt::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0.12) 0px,
+    rgba(0, 0, 0, 0.12) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  mix-blend-mode: multiply;
+}
+.security-crt-alert {
+  animation: securityAlertTint 1.1s ease-in-out infinite;
+}
+@keyframes securityAlertTint {
+  0%,
+  100% {
+    filter: saturate(1.1) brightness(0.95);
+  }
+  50% {
+    filter: saturate(1.5) brightness(0.8) hue-rotate(-12deg);
+  }
+}

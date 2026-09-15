@@ -74,6 +74,15 @@ interface JarvisStore {
   setSentinelActive: (sentinelActive: boolean) => void;
   biometricActive: boolean;
   setBiometricActive: (biometricActive: boolean) => void;
+  // Sentinel Eyes global watcher: armed from the home UI, runs even when
+  // the Security panel is closed. Panel requests the camera via
+  // requestSentinelCamera(); the watcher pauses its own loop and yields it.
+  sentinelArmed: boolean;
+  setSentinelArmed: (armed: boolean) => void;
+  sentinelCameraBusy: boolean; // panel is using the camera (registration etc.)
+  setSentinelCameraBusy: (busy: boolean) => void;
+  sentinelLiveStatus: "idle" | "scanning" | "verified" | "intruder";
+  setSentinelLiveStatus: (s: "idle" | "scanning" | "verified" | "intruder") => void;
   isSpeaking: boolean;
   setIsSpeaking: (isSpeaking: boolean) => void;
   isMuted: boolean;
@@ -208,6 +217,12 @@ export const useJarvisStore = create<JarvisStore>((set) => ({
   setSentinelActive: (sentinelActive) => set({ sentinelActive }),
   biometricActive: false, // "Biometric" face recognition
   setBiometricActive: (biometricActive) => set({ biometricActive }),
+  sentinelArmed: false,
+  setSentinelArmed: (armed) => set({ sentinelArmed: armed }),
+  sentinelCameraBusy: false,
+  setSentinelCameraBusy: (busy) => set({ sentinelCameraBusy: busy }),
+  sentinelLiveStatus: "idle",
+  setSentinelLiveStatus: (s) => set({ sentinelLiveStatus: s }),
   isMuted: false,
   setIsMuted: (isMuted: boolean) => set({ isMuted }),
   isSpeaking: false,

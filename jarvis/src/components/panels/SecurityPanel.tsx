@@ -27,11 +27,14 @@ import {
 } from "lucide-react";
 import { useFaceRecognition } from "@/hooks/useFaceRecognition";
 import { useTextToSpeech } from "@/hooks/useVoice";
+import { useJarvisStore } from "@/store/jarvis.store";
 
 interface SecuritySettings {
   enabled: boolean;
   strictMode: boolean;
   autoLockTimeout: number;
+  stealthMode: boolean;
+  escalation: boolean;
 }
 
 interface AuthorizedFace {
@@ -98,6 +101,19 @@ export default function SecurityPanel({
 
   const { speak } = useTextToSpeech();
 
+  // Global sentinel integration: camera handoff + live status publishing +
+  // arm/disarm sync with the home-UI toggle.
+  const setSentinelArmed = useJarvisStore((s) => s.setSentinelArmed);
+  const setSentinelCameraBusy = useJarvisStore((s) => s.setSentinelCameraBusy);
+  const setSentinelLiveStatus = useJarvisStore((s) => s.setSentinelLiveStatus);
+
+  // If the panel unmounts while holding the camera, always hand it back.
+  useEffect(() => {
+    return () => {
+      setSentinelCameraBusy(false);
+    };
+  }, [setSentinelCameraBusy]);
+
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [detectedStatus, setDetectedStatus] = useState<string>("System Standby");
   const [matchName, setMatchName] = useState<string | null>(null);
@@ -106,11 +122,14 @@ export default function SecurityPanel({
   const isAlertSentRef = useRef<boolean>(false);
   const lastSpeechTimeRef = useRef<{ welcome: number; warning: number }>({ welcome: 0, warning: 0 });
   const latestDetectionRef = useRef<any>(null);
+  const hexTickerRef = useRef<{ t: number; s: string } | null>(null);
 
   const [settings, setSettings] = useState<SecuritySettings>({
     enabled: false,
     strictMode: false,
     autoLockTimeout: 5,
+    stealthMode: false,
+    escalation: true,
   });
   const [authorizedFaces, setAuthorizedFaces] = useState<AuthorizedFace[]>([]);
   const [events, setEvents] = useState<SecurityEvent[]>([]);
@@ -170,6 +189,35 @@ export default function SecurityPanel({
       if (data.success) {
         console.log("Telegram security threat alert pushed successfully");
         fetchSecurityData();
+
+        // ESCALATION LADDER (#3): the Telegram alert is stage 1. While the
+        // unknown face is STILL present, keep escalating — L2 siren+TTS after
+        // 10s more, L3 Windows lock after 20s. Stealth mode skips the noisy
+        // stages (silent watcher: log + photo only, no tip-off).
+        if (settings.escalation && !settings.stealthMode) {
+          setTimeout(async () => {
+            try {
+              await fetch("/api/security", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "escalate", data: { level: 2 } }),
+              });
+            } catch {}
+          }, 10_000);
+          setTimeout(async () => {
+            // Only lock if the face is still unknown at T+20s.
+            const st = recognitionStateRef.current;
+            if (!st.isAuthorized) {
+              try {
+                await fetch("/api/security", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ action: "escalate", data: { level: 3 } }),
+                });
+              } catch {}
+            }
+          }, 20_000);
+        }
       } else {
         console.error("Failed to push Telegram threat alert:", data.error);
       }
@@ -242,6 +290,7 @@ export default function SecurityPanel({
                 setDetectedStatus("Access Granted");
                 setMatchName(localMatch.name);
                 setConfidence(confVal);
+                setSentinelLiveStatus("verified");
 
                 recognitionStateRef.current = {
                   isAuthorized: true,
@@ -266,6 +315,7 @@ export default function SecurityPanel({
                 setDetectedStatus("UNAUTHORIZED SUBJECT");
                 setMatchName("UNKNOWN");
                 setConfidence(null);
+                setSentinelLiveStatus("intruder");
 
                 recognitionStateRef.current = {
                   isAuthorized: false,
@@ -274,11 +324,18 @@ export default function SecurityPanel({
                 };
 
                 // 45 seconds Speech Cooldown for warning message
+                // STEALTH (#5): stay visibly+audibly silent — no spoken
+                // warning, no status flip. The intruder sees nothing; the
+                // log + Telegram alert still fire.
                 const now = Date.now();
-                if (now - lastSpeechTimeRef.current.warning > 45000) {
+                if (!settings.stealthMode && now - lastSpeechTimeRef.current.warning > 45000) {
                   speak("Warning. Unidentified subject detected.");
                   lastSpeechTimeRef.current.warning = now;
                   lastSpeechTimeRef.current.welcome = 0; // Reset welcome cooldown on identity switch
+                }
+                if (settings.stealthMode) {
+                  setDetectedStatus("Scanning presence...");
+                  setMatchName(null);
                 }
 
                 if (!unknownFaceTimerRef.current && !isAlertSentRef.current) {
@@ -294,6 +351,7 @@ export default function SecurityPanel({
               setDetectedStatus("Scanning presence...");
               setMatchName(null);
               setConfidence(null);
+              setSentinelLiveStatus("scanning");
 
               recognitionStateRef.current = {
                 isAuthorized: false,
@@ -391,6 +449,85 @@ export default function SecurityPanel({
           const recState = recognitionStateRef.current;
           const isAuthorized = recState.isAuthorized;
 
+          // ═══ FUTURISTIC HUD FX LAYER ═══
+          const cx = x + w / 2;
+          const cy = y + h / 2;
+          const t = performance.now() / 1000;
+          const mainRGB = isAuthorized ? "34, 197, 94" : "239, 68, 68";
+          const pulse = 0.5 + 0.5 * Math.sin(t * (isAuthorized ? 2 : 6));
+
+          // GLITCH SLICES (intruder): shifted video slices — reality tears
+          if (!isAuthorized) {
+            for (let i = 0; i < 3; i++) {
+              const seed = Math.floor(t * 8) * 31 + i * 17;
+              const gy = y + ((seed * 13) % Math.max(1, h));
+              const gh = 4 + (seed % 6);
+              const gx = x + ((seed % 11) - 5) * (1 + pulse);
+              ctx.drawImage(video, 0, gy / scaleY, video.videoWidth, gh / scaleY, gx, gy, w, gh);
+              ctx.fillStyle = `rgba(239, 68, 68, ${0.08 + 0.05 * pulse})`;
+              ctx.fillRect(gx, gy, w, gh);
+            }
+          }
+
+          // RADIAL PULSE GLOW behind the face
+          const glow = ctx.createRadialGradient(cx, cy, 10, cx, cy, Math.max(w, h) * 0.8);
+          glow.addColorStop(0, `rgba(${mainRGB}, ${0.06 + 0.06 * pulse})`);
+          glow.addColorStop(1, "rgba(0,0,0,0)");
+          ctx.fillStyle = glow;
+          ctx.fillRect(x - 24, y - 24, w + 48, h + 48);
+
+          // ROTATING DASHED RETICLES — twin counter-spinning rings
+          const ringR = Math.max(w, h) * 0.72;
+          ctx.save();
+          ctx.translate(cx, cy);
+          ctx.rotate(t * (isAuthorized ? 0.6 : -1.6));
+          ctx.strokeStyle = `rgba(${mainRGB}, 0.5)`;
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([10, 14]);
+          ctx.beginPath();
+          ctx.arc(0, 0, ringR, 0, 2 * Math.PI);
+          ctx.stroke();
+          ctx.rotate(-t * (isAuthorized ? 2.2 : -4) );
+          ctx.setLineDash([4, 24]);
+          ctx.strokeStyle = `rgba(${mainRGB}, 0.35)`;
+          ctx.beginPath();
+          ctx.arc(0, 0, ringR * 1.12, 0, 2 * Math.PI);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.restore();
+
+          if (isAuthorized) {
+            // SONAR PING — expanding confirmation rings
+            for (let i = 0; i < 2; i++) {
+              const phase = (t * 0.7 + i * 0.5) % 1;
+              ctx.strokeStyle = `rgba(34, 197, 94, ${0.5 * (1 - phase)})`;
+              ctx.lineWidth = 2;
+              ctx.beginPath();
+              ctx.arc(cx, cy, ringR * (0.3 + phase * 1.1), 0, 2 * Math.PI);
+              ctx.stroke();
+            }
+          } else {
+            // HAZARD STRIPES — animated caution tape above + below
+            const drawStripes = (sy: number) => {
+              ctx.save();
+              ctx.beginPath();
+              ctx.rect(x - 8, sy, w + 16, 5);
+              ctx.clip();
+              ctx.strokeStyle = "rgba(239, 68, 68, 0.85)";
+              ctx.lineWidth = 5;
+              const off = (t * 40) % 16;
+              for (let sx = -16 + off; sx < w + 20; sx += 16) {
+                ctx.beginPath();
+                ctx.moveTo(x - 8 + sx, sy + 7);
+                ctx.lineTo(x - 8 + sx + 7, sy - 2);
+                ctx.stroke();
+              }
+              ctx.restore();
+            };
+            drawStripes(y - 14);
+            drawStripes(y + h + 9);
+          }
+
           // Draw HUD face frame corner brackets
           ctx.strokeStyle = isAuthorized ? "rgba(34, 197, 94, 0.8)" : "rgba(239, 68, 68, 0.8)";
           ctx.lineWidth = 2;
@@ -428,11 +565,14 @@ export default function SecurityPanel({
           ctx.lineTo(x + w, laserFaceY);
           ctx.stroke();
 
-          // Draw HUD text overlays
-          ctx.fillStyle = isAuthorized ? "#22c55e" : "#ef4444";
-          ctx.font = "bold 9px monospace";
-          const statusText = isAuthorized ? `AUTHORIZED: ${recState.name!.toUpperCase()}` : "UNAUTHORIZED SUBJECT DETECTED";
-          ctx.fillText(statusText, x, y - 6);
+          // Draw HUD text overlays (intruder text blinks like an alarm)
+          const blinkOn = isAuthorized || Math.sin(t * 10) > -0.2;
+          if (blinkOn) {
+            ctx.fillStyle = isAuthorized ? "#22c55e" : "#ef4444";
+            ctx.font = "bold 9px monospace";
+            const statusText = isAuthorized ? `AUTHORIZED: ${recState.name!.toUpperCase()}` : "⚠ UNAUTHORIZED SUBJECT DETECTED";
+            ctx.fillText(statusText, x, y - 19);
+          }
 
           ctx.font = "8px monospace";
           ctx.fillStyle = "rgba(255, 255, 255, 0.7)";
@@ -448,17 +588,41 @@ export default function SecurityPanel({
           ctx.lineTo(canvas.width, laserY);
           ctx.stroke();
 
-          // Targeting reticle
+          // Targeting reticle — rotating radar arcs
+          const tNow = performance.now() / 1000;
+          const ccx = canvas.width / 2;
+          const ccy = canvas.height / 2;
           ctx.strokeStyle = "rgba(255, 255, 255, 0.1)";
           ctx.beginPath();
-          ctx.arc(canvas.width / 2, canvas.height / 2, 20, 0, 2 * Math.PI);
+          ctx.arc(ccx, ccy, 20, 0, 2 * Math.PI);
           ctx.stroke();
           ctx.beginPath();
-          ctx.moveTo(canvas.width / 2 - 28, canvas.height / 2);
-          ctx.lineTo(canvas.width / 2 + 28, canvas.height / 2);
-          ctx.moveTo(canvas.width / 2, canvas.height / 2 - 28);
-          ctx.lineTo(canvas.width / 2, canvas.height / 2 + 28);
+          ctx.moveTo(ccx - 28, ccy);
+          ctx.lineTo(ccx + 28, ccy);
+          ctx.moveTo(ccx, ccy - 28);
+          ctx.lineTo(ccx, ccy + 28);
           ctx.stroke();
+          ctx.save();
+          ctx.translate(ccx, ccy);
+          ctx.rotate(tNow * 1.2);
+          ctx.strokeStyle = "rgba(6, 182, 212, 0.5)";
+          ctx.lineWidth = 2;
+          for (let i = 0; i < 3; i++) {
+            ctx.beginPath();
+            ctx.arc(0, 0, 34 + i * 10, i * 2, i * 2 + 1.2);
+            ctx.stroke();
+          }
+          ctx.restore();
+
+          // Hex data ticker along the bottom — pure aesthetic
+          if (!hexTickerRef.current || Math.floor(tNow * 8) !== hexTickerRef.current.t) {
+            let hex = "";
+            for (let i = 0; i < 40; i++) hex += "0123456789ABCDEF"[Math.floor(Math.random() * 16)];
+            hexTickerRef.current = { t: Math.floor(tNow * 8), s: hex };
+          }
+          ctx.font = "8px monospace";
+          ctx.fillStyle = "rgba(6, 182, 212, 0.35)";
+          ctx.fillText(hexTickerRef.current.s.match(/.{1,2}/g)!.join(" "), 8, canvas.height - 8);
         }
 
         animationFrameId = requestAnimationFrame(drawHUD);
@@ -478,7 +642,7 @@ export default function SecurityPanel({
         clearTimeout(unknownFaceTimerRef.current);
       }
     };
-  }, [showCamera, faceReady, settings.strictMode, matchAgainstStored]);
+  }, [showCamera, faceReady, settings.strictMode, matchAgainstStored, setSentinelLiveStatus]);
 
   const fetchSecurityData = async () => {
     try {
@@ -488,6 +652,12 @@ export default function SecurityPanel({
         setSettings(data.settings);
         setAuthorizedFaces(data.faces || []);
         setEvents(data.events || []);
+        // Keep the global armed flag in lockstep with the server state,
+        // so a reload restores the watcher if security was left on.
+        const armed = useJarvisStore.getState().sentinelArmed;
+        if (data.settings.enabled !== armed) {
+          setSentinelArmed(data.settings.enabled);
+        }
       }
     } catch (err) {
       console.error("Failed to load security data:", err);
@@ -512,6 +682,12 @@ export default function SecurityPanel({
       const data = await response.json();
       if (data.success) {
         setSettings((prev) => ({ ...prev, enabled: newEnabled }));
+        // Master sync: the home-UI watcher follows the panel's master switch
+        // in both directions — off here means off everywhere.
+        setSentinelArmed(newEnabled);
+        if (!newEnabled) {
+          setSentinelLiveStatus("idle");
+        }
         setSuccessMessage(
           `Security system ${newEnabled ? "enabled" : "disabled"}`
         );
@@ -545,10 +721,14 @@ export default function SecurityPanel({
 
   const handleStartCamera = async () => {
     try {
+      // Borrow the camera from the global watcher — it stands down while
+      // this flag is set, and resumes when we hand it back.
+      setSentinelCameraBusy(true);
       await startCamera();
       setShowCamera(true);
       setError(null);
     } catch (err) {
+      setSentinelCameraBusy(false);
       setError("Failed to access camera");
     }
   };
@@ -556,6 +736,7 @@ export default function SecurityPanel({
   const handleStopCamera = () => {
     stopCamera();
     setShowCamera(false);
+    setSentinelCameraBusy(false);
   };
 
   const handleRegisterWithCamera = async () => {
@@ -586,6 +767,8 @@ export default function SecurityPanel({
         setTimeout(() => setSuccessMessage(null), 3000);
         handleStopCamera();
         fetchSecurityData();
+        // Tell the global watcher to re-read localStorage faces.
+        window.dispatchEvent(new Event("jarvis-faces-updated"));
       } else {
         setError(result.error || "Registration failed");
       }
@@ -801,7 +984,11 @@ export default function SecurityPanel({
                   autoPlay
                   playsInline
                   muted
-                  className="w-full h-48 object-cover"
+                  className={`w-full h-48 object-cover ${
+                    detectedStatus === "UNAUTHORIZED SUBJECT"
+                      ? "security-crt security-crt-alert"
+                      : "security-crt"
+                  }`}
                 />
                 <canvas
                   ref={canvasRef}
@@ -893,7 +1080,10 @@ export default function SecurityPanel({
                 className="space-y-3 pt-4 border-t border-white/10"
               >
                 <div className="flex items-center justify-between">
-                  <span className="text-sm text-white/70">Strict Mode</span>
+                  <div>
+                    <span className="text-sm text-white/70">Strict Mode</span>
+                    <p className="text-xs text-white/40">Tighter face-match threshold</p>
+                  </div>
                   <button
                     onClick={() =>
                       updateSettings({ strictMode: !settings.strictMode })
@@ -905,6 +1095,48 @@ export default function SecurityPanel({
                     <div
                       className={`w-5 h-5 rounded-full bg-white transition-transform ${
                         settings.strictMode ? "translate-x-6" : "translate-x-0.5"
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-sm text-white/70">Escalation Ladder</span>
+                    <p className="text-xs text-white/40">Siren + voice warning on intrusion</p>
+                  </div>
+                  <button
+                    onClick={() =>
+                      updateSettings({ escalation: !settings.escalation })
+                    }
+                    className={`w-12 h-6 rounded-full transition-colors ${
+                      settings.escalation ? "bg-red-500" : "bg-white/20"
+                    }`}
+                  >
+                    <div
+                      className={`w-5 h-5 rounded-full bg-white transition-transform ${
+                        settings.escalation ? "translate-x-6" : "translate-x-0.5"
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-sm text-white/70">Stealth Mode</span>
+                    <p className="text-xs text-white/40">Silent watcher — intruder never knows</p>
+                  </div>
+                  <button
+                    onClick={() =>
+                      updateSettings({ stealthMode: !settings.stealthMode })
+                    }
+                    className={`w-12 h-6 rounded-full transition-colors ${
+                      settings.stealthMode ? "bg-purple-500" : "bg-white/20"
+                    }`}
+                  >
+                    <div
+                      className={`w-5 h-5 rounded-full bg-white transition-transform ${
+                        settings.stealthMode ? "translate-x-6" : "translate-x-0.5"
                       }`}
                     />
                   </button>

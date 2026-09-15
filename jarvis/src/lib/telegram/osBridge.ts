@@ -35,6 +35,8 @@ export const OS_ALLOWLIST = new Set([
   "restart",
   "wake_screen",
   "play_sound",
+  "siren",
+  "speak",
   "kill_app",
   "pc_status",
   "telemetry",

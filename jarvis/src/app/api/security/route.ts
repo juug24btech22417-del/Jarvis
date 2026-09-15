@@ -15,6 +15,8 @@ interface SecuritySettings {
   enabled: boolean;
   strictMode: boolean;
   autoLockTimeout: number; // minutes
+  stealthMode: boolean;    // #5: silent watcher — no visible UI reaction, still logs + alerts
+  escalation: boolean;     // #3: Telegram → siren+TTS → lock ladder
 }
 
 interface AuthorizedFace {
@@ -37,6 +39,8 @@ let securitySettings: SecuritySettings = {
   enabled: false,
   strictMode: false,
   autoLockTimeout: 5,
+  stealthMode: false,
+  escalation: true,
 };
 
 let authorizedFaces: AuthorizedFace[] = [];
@@ -170,10 +174,15 @@ export async function POST(req: NextRequest) {
 
     // Update settings
     if (action === "settings") {
-      const { strictMode, autoLockTimeout } = data;
+      const { strictMode, autoLockTimeout, stealthMode, escalation } = data;
       if (strictMode !== undefined) securitySettings.strictMode = strictMode;
       if (autoLockTimeout !== undefined)
         securitySettings.autoLockTimeout = autoLockTimeout;
+      if (stealthMode !== undefined) securitySettings.stealthMode = stealthMode;
+      if (escalation !== undefined) securitySettings.escalation = escalation;
+      if (stealthMode !== undefined) {
+        logEvent("system_enabled", `Stealth mode ${stealthMode ? "ARMED — silent watcher active" : "disarmed"}`);
+      }
       return NextResponse.json({
         success: true,
         settings: securitySettings,
@@ -399,6 +408,40 @@ export async function POST(req: NextRequest) {
       } catch (err: any) {
         console.error("[Security API] Alert sending failed:", err);
         return NextResponse.json({ success: false, error: err.message });
+      }
+    }
+
+    // ESCALATION LADDER (#3) — progressive defense on intrusion.
+    // level 1: Telegram alert (already sent by the panel) + TTS warning
+    // level 2: siren on speakers + TTS "device monitored and photographed"
+    // level 3: lock Windows (LockWorkStation via os bridge)
+    if (action === "escalate") {
+      const level = Math.min(3, Math.max(1, Number(data?.level ?? 1)));
+      const { executeOsCommand } = await import("@/lib/telegram/osBridge");
+      const steps: string[] = [];
+      try {
+        if (level >= 1) {
+          // Spoken warning — intruder knows they're on camera (unless stealth).
+          const warn = securitySettings.stealthMode
+            ? null // stealth: stay silent, keep watching
+            : "Warning. This device is monitored and photographed. Step away.";
+          if (warn) {
+            const tts = await executeOsCommand("speak", { text: warn });
+            steps.push(tts.ok ? "tts-warning" : `tts-failed:${tts.error ?? "?"}`);
+          }
+        }
+        if (level >= 2) {
+          const siren = await executeOsCommand("siren");
+          steps.push(siren.ok ? "siren" : `siren-failed:${siren.error ?? "?"}`);
+        }
+        if (level >= 3) {
+          const lock = await executeOsCommand("lock");
+          steps.push(lock.ok ? "locked" : `lock-failed:${lock.error ?? "?"}`);
+        }
+        logEvent("access_denied", `Escalation L${level} executed: ${steps.join(" → ")}`);
+        return NextResponse.json({ success: true, level, steps, stealth: securitySettings.stealthMode });
+      } catch (err: any) {
+        return NextResponse.json({ success: false, error: err.message, steps });
       }
     }
 
