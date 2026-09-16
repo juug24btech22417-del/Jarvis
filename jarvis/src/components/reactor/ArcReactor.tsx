@@ -19,10 +19,10 @@ import { useJarvisStore } from "@/store/jarvis.store";
 /* ─── Hue palettes (driven by reactorHue from useReactorDrive) ───────── */
 
 const HUES = {
-  cyan: { accent: "#00D4FF", soft: "#7DF9FF", deep: "#0E5F7A", white: "#CFEFFC" },
-  gold: { accent: "#FFD700", soft: "#FFE664", deep: "#7A5E0E", white: "#FFF4D6" },
-  red:  { accent: "#FF3B47", soft: "#FF8A93", deep: "#7A1420", white: "#FFD9DC" },
-  dim:  { accent: "#5A7A8C", soft: "#9FB8C4", deep: "#2C3E48", white: "#D8E4EA" },
+  cyan: { accent: "#00D4FF", soft: "#7DF9FF", deep: "#0E5F7A", white: "#CFEFFC", ring: "#0A6EE0", ringBright: "#2E9BFF" },
+  gold: { accent: "#FFD700", soft: "#FFE664", deep: "#7A5E0E", white: "#FFF4D6", ring: "#C79000", ringBright: "#FFC933" },
+  red:  { accent: "#FF3B47", soft: "#FF8A93", deep: "#7A1420", white: "#FFD9DC", ring: "#C21F2C", ringBright: "#FF5A66" },
+  dim:  { accent: "#4A8CB8", soft: "#9CC4DC", deep: "#1E3A4E", white: "#D8E8F0", ring: "#2E6396", ringBright: "#5EA8DC" },
 } as const;
 
 type HueKey = keyof typeof HUES;
@@ -344,7 +344,7 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
         ref={segGlow}
         r={204}
         fill="none"
-        stroke={c.accent}
+        stroke={c.ringBright}
         strokeOpacity={0.3}
         strokeWidth={20}
         strokeDasharray={DASH.segBright}
@@ -356,15 +356,15 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
         <circle
           r={200}
           fill="none"
-          stroke={c.accent}
-          strokeOpacity={0.85}
-          strokeWidth={7}
+          stroke={c.ring}
+          strokeOpacity={0.95}
+          strokeWidth={8}
         />
         <circle
           ref={segRing}
           r={200}
           fill="none"
-          stroke={c.soft}
+          stroke={c.ringBright}
           strokeOpacity={0.95}
           strokeWidth={16}
           strokeDasharray={DASH.segBright}
@@ -376,12 +376,12 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
         <circle
           r={200}
           fill="none"
-          stroke={c.accent}
-          strokeOpacity={0.45}
+          stroke={c.ring}
+          strokeOpacity={0.55}
           strokeWidth={10}
           strokeDasharray={DASH.segDim}
         />
-        <circle r={178} fill="none" stroke={c.accent} strokeOpacity={0.5} strokeWidth={2} />
+        <circle r={178} fill="none" stroke={c.ringBright} strokeOpacity={0.45} strokeWidth={2} />
       </g>
 
       {/* ── Layer 5 · inner collar ──────────────────────────────────── */}
@@ -404,9 +404,9 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
         <circle r={118} fill={c.accent} opacity={0.18} filter="url(#mk2-halo)" />
         <circle r={96} fill="url(#mk2-core)" />
         <circle r={78} fill="url(#mk2-iris)" />
-        {/* filled center disc — the MARK II's teal heart (contained, no blur) */}
-        <circle r={70} fill={c.accent} opacity={0.13} />
-        <circle r={70} fill="none" stroke={c.accent} strokeOpacity={0.55} strokeWidth={1.5} />
+        {/* filled center disc — the MARK II's blue heart (contained, no blur) */}
+        <circle r={70} fill={c.ringBright} opacity={0.16} />
+        <circle r={70} fill="none" stroke={c.ringBright} strokeOpacity={0.6} strokeWidth={1.5} />
         <circle ref={coreDot} r={78} fill="none" stroke={c.soft} strokeOpacity={0.45} strokeWidth={1.2} />
 
         <AnimatePresence mode="wait">
