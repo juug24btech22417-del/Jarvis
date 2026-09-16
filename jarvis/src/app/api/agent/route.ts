@@ -57,6 +57,7 @@ export async function POST(req: NextRequest) {
   if (!goal) return NextResponse.json({ error: "Missing 'goal'" }, { status: 400 });
   if (goal.length > 600) return NextResponse.json({ error: "Goal too long (max 600 chars)" }, { status: 400 });
 
-  const job = await planGoal(goal);
+  // auto: true → fast lane (skip the approval gate, execute immediately).
+  const job = await planGoal(goal, { autoApprove: body.auto === true });
   return NextResponse.json(job, { status: 202 });
 }

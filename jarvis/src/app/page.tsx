@@ -4,8 +4,10 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import ArcReactor from "@/components/reactor/ArcReactor";
 import StatusHUD from "@/components/panels/StatusHUD";
+import TelemetryTicker from "@/components/panels/TelemetryTicker";
+import DiagnosticsPanel from "@/components/panels/DiagnosticsPanel";
+import { useWeatherAmbient } from "@/hooks/useWeatherAmbient";
 import MemoryPanel from "@/components/panels/MemoryPanel";
-import TaskPanel from "@/components/panels/TaskPanel";
 import CommandBar from "@/components/panels/CommandBar";
 import TimerPanel from "@/components/panels/TimerPanel";
 import CalculatorDisplay, { useCalculatorHistory } from "@/components/panels/CalculatorDisplay";
@@ -326,6 +328,59 @@ import { useAmbientContext } from "@/hooks/useAmbientContext";
 import { composeLocalBriefing, polishBriefing } from "@/services/BriefingService";
 import OnboardingModal from "@/components/panels/OnboardingModal";
 import SentinelSuggestionWidget from "@/components/ui/SentinelSuggestionWidget";
+
+// ─── Weather-reactive ambient particles ───────────────────────────────
+function WeatherParticles() {
+  const ambient = useWeatherAmbient();
+
+  // Generate deterministic particle positions on mount
+  const particles = useRef(
+    Array.from({ length: 120 }, (_, i) => ({
+      x: ((i * 17 + 13) % 100),
+      y: ((i * 31 + 7) % 100),
+      size: 0.5 + ((i * 13) % 30) / 10,
+      delay: ((i * 7) % 40) / 10,
+      dur: 2 + ((i * 11) % 30) / 10,
+      colorIdx: i % ambient.particleColors.length,
+    }))
+  ).current;
+
+  return (
+    <div className="absolute inset-0 pointer-events-none overflow-hidden">
+      {/* Scene tint overlay */}
+      <div
+        className="absolute inset-0 transition-all duration-[3000ms]"
+        style={{
+          background: ambient.overlayColor,
+          filter: ambient.sceneFilter,
+        }}
+      />
+
+      {/* Particles */}
+      {particles.slice(0, ambient.particleCount).map((p, i) => (
+        <div
+          key={i}
+          className="absolute rounded-full"
+          style={{
+            left: `${p.x}%`,
+            top: `${p.y}%`,
+            width: `${p.size * 2}px`,
+            height: `${p.size * 2}px`,
+            backgroundColor: ambient.particleColors[p.colorIdx],
+            opacity: 0.25 + (p.size / 3.5) * 0.3,
+            animation: `particleDrift ${p.dur}s ease-in-out ${p.delay}s infinite alternate`,
+          }}
+        />
+      ))}
+
+      {/* Rain streaks overlay */}
+      {ambient.showRainStreaks && <div className="weather-rain-streaks" />}
+
+      {/* Fog overlay */}
+      {ambient.showFog && <div className="weather-fog-overlay" />}
+    </div>
+  );
+}
 
 export default function Home() {
   const bootComplete = useJarvisStore((s) => s.bootComplete);
@@ -834,21 +889,8 @@ export default function Home() {
 
   return (
     <main className="relative min-h-screen overflow-hidden bg-deep-space">
-      {/* Particle background (CSS fallback) */}
-      <div className="absolute inset-0 opacity-30">
-        {Array.from({ length: 50 }).map((_, i) => (
-          <div
-            key={i}
-            className="absolute w-1 h-1 bg-reactor-core/30 rounded-full animate-pulse"
-            style={{
-              left: `${Math.random() * 100}%`,
-              top: `${Math.random() * 100}%`,
-              animationDelay: `${Math.random() * 3}s`,
-              animationDuration: `${2 + Math.random() * 2}s`,
-            }}
-          />
-        ))}
-      </div>
+      {/* Weather-reactive ambient particle background */}
+      <WeatherParticles />
 
       {/* Boot sequence */}
       <BootSequence />
@@ -879,7 +921,6 @@ export default function Home() {
             onClose={() => setDiscussEntity(null)}
             entity={discussEntity}
           />
-          <TaskPanel />
           <TimerPanel onTimerComplete={handleTimerComplete} />
           <AnimatePresence>
             {calculatorOpen && lastCalculation && (
@@ -1492,6 +1533,12 @@ export default function Home() {
 
           {/* Sentinel Proactive Suggestion Widget */}
           <SentinelSuggestionWidget />
+
+          {/* Iron Man Diagnostics Panel — right sidebar */}
+          <DiagnosticsPanel />
+
+          {/* Live Telemetry Ticker — bottom HUD strip */}
+          <TelemetryTicker />
         </>
       )}
 

@@ -13,6 +13,54 @@ export interface SearchHit {
 }
 
 /**
+ * URLs that are never useful mission targets: block-page help threads,
+ * search engine shells, and anti-bot interstitials.
+ */
+const BAD_URL_RE =
+  /(reddit\.com\/r\/(help|modsupport|bugs)|support\.google\.|google\.com\/(search|url)|duckduckgo\.com|bing\.com\/search|\/search\?|captcha|blocked|banned)/i;
+
+/** Titles/snippets that reveal the page is a block/captcha screen, not content. */
+ const BAD_TEXT_RE =
+  /\b(you('|r|'re|ve)?\s+(been\s+)?(blocked|banned|rate.?limited)|blocked by|access denied|unusual traffic|verify (you are|that you are) human|are you a robot|confirm (you are|that you are) human|just a moment|attention required|permission denied|403 forbidden)\b/i;
+
+/**
+ * Drop block/captcha/help pages, dedupe identical URLs, and cap 2 results
+ * per host — without this, Firecrawl happily returns 3 copies of Reddit's
+ * "you've been blocked" help thread and the mission opens garbage.
+ */
+export function sanitizeHits(hits: SearchHit[]): SearchHit[] {
+  const seenUrls = new Set<string>();
+  const hostCount = new Map<string, number>();
+  const out: SearchHit[] = [];
+  for (const h of hits) {
+    let url = h.url;
+    if (!url || !url.startsWith("http")) continue;
+    try {
+      const u = new URL(url);
+      u.hash = "";
+      url = u.toString().replace(/\/$/, "");
+    } catch {
+      continue;
+    }
+    const key = url.toLowerCase();
+    if (seenUrls.has(key)) continue;
+    if (BAD_URL_RE.test(url) || BAD_TEXT_RE.test(`${h.title} ${h.description}`)) continue;
+    let host = "";
+    try {
+      host = new URL(url).hostname.replace(/^www\./, "");
+    } catch {
+      continue;
+    }
+    const n = hostCount.get(host) ?? 0;
+    if (n >= 2) continue; // max 2 per host — diversity over repetition
+    seenUrls.add(key);
+    hostCount.set(host, n + 1);
+    out.push({ ...h, url });
+  }
+  return out;
+}
+
+/**
  * Clean DuckDuckGo redirect link: //duckduckgo.com/l/?uddg=https%3A%2F%2F...
  */
 function cleanDuckDuckGoUrl(rawUrl: string): string {
@@ -71,7 +119,7 @@ async function searchWithFirecrawl(query: string, limit: number): Promise<Search
 async function searchWithDuckDuckGo(query: string, limit: number): Promise<SearchHit[]> {
   const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 7_000);
+  const timer = setTimeout(() => controller.abort(), 5_000);
 
   try {
     const res = await fetch(url, {
@@ -246,18 +294,19 @@ export async function searchWebWithFallback(
   // Tier 1: Firecrawl
   try {
     l(`Querying primary search engine: "${query}"`);
-    const hits = await searchWithFirecrawl(query, limit);
+    const hits = sanitizeHits(await searchWithFirecrawl(query, limit));
     if (hits.length > 0) {
       l(`Primary search returned ${hits.length} verified results`);
       return hits;
     }
+    l(`Primary search results unusable after quality filter — trying secondary...`);
   } catch (err: any) {
     l(`Primary search unavailable (${err.message}). Engaging secondary real-time search...`);
   }
 
   // Tier 2: DuckDuckGo HTML
   try {
-    const hits = await searchWithDuckDuckGo(query, limit);
+    const hits = sanitizeHits(await searchWithDuckDuckGo(query, limit));
     if (hits.length > 0) {
       l(`Secondary search returned ${hits.length} web results`);
       return hits;
@@ -268,7 +317,7 @@ export async function searchWebWithFallback(
 
   // Tier 3: Playwright Stealth Chromium
   try {
-    const hits = await searchWithPlaywright(query, limit);
+    const hits = sanitizeHits(await searchWithPlaywright(query, limit));
     if (hits.length > 0) {
       l(`Browser automation search found ${hits.length} live results`);
       return hits;

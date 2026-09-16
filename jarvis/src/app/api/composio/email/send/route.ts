@@ -20,7 +20,7 @@
 
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db/queries";
-import { composeEmail, inferTone, type EmailTone } from "@/lib/composio/email";
+import { composeEmail, inferTone, applyIdentity, type EmailTone } from "@/lib/composio/email";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -106,14 +106,16 @@ export async function POST(req: Request) {
     );
   }
 
-  // Compose the body.
-  const composed = await composeEmail({
+  // Compose the body, then stamp the user's real identity (name + contact)
+  // onto the signature — the LLM alone often skips or invents it.
+  const composedRaw = await composeEmail({
     toEmail: recipient.email,
     toName: recipient.name,
     about,
     tone,
     hint: body.hint,
   });
+  const composed = { ...applyIdentity(composedRaw.subject, composedRaw.body), tone: composedRaw.tone };
 
   const fireAt = new Date(Date.now() + CANCEL_WINDOW_SEC * 1000);
 

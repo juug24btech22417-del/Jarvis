@@ -2,7 +2,8 @@
 
 import { useEffect, useState, useRef, useLayoutEffect, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Brain, MessageSquare, MessageCircle, Pin, PinOff } from "lucide-react";
+import { Brain, MessageSquare, MessageCircle, Pin, PinOff, Network } from "lucide-react";
+import KnowledgeGraph from "./KnowledgeGraph";
 import HolographicPanel from "../ui/HolographicPanel";
 import { useJarvisStore } from "@/store/jarvis.store";
 import { animateStagger, addHoverScale, fadeUp, scaleIn } from "@/lib/animations/gsap";
@@ -25,6 +26,7 @@ interface MemoryPanelProps {
 export default function MemoryPanel({ onDiscuss }: MemoryPanelProps) {
   const [entities, setEntities] = useState<GraphEntity[]>([]);
   const [showArchived, setShowArchived] = useState(false);
+  const [showGraph, setShowGraph] = useState(true);
   const { messages } = useJarvisStore();
   const panelRef = useRef<HTMLDivElement>(null);
   const contextRef = useRef<HTMLDivElement>(null);
@@ -191,26 +193,48 @@ export default function MemoryPanel({ onDiscuss }: MemoryPanelProps) {
             )}
           </div>
 
-          {/* Tier 1A: Graph entities — strength-aware, discussable */}
+          {/* Tier 1A: Graph entities — visual knowledge graph + list */}
           <div className="flex-1 min-h-0 overflow-y-auto space-y-2 mt-3 pt-3 border-t border-panel-border/30 min-w-0">
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2 text-text-secondary text-xs font-orbitron tracking-wider">
                 <Brain className="w-3 h-3" />
                 KNOWLEDGE GRAPH
               </div>
-              {archivedCount > 0 && (
+              <div className="flex items-center gap-1.5">
+                {/* Graph / List toggle */}
                 <button
-                  onClick={() => setShowArchived((s) => !s)}
-                  className="text-[10px] text-text-secondary/50 hover:text-reactor-core font-rajdhani transition-colors"
+                  onClick={() => setShowGraph((g) => !g)}
+                  className={`p-1 rounded transition-colors ${
+                    showGraph ? "text-reactor-core bg-reactor-core/10" : "text-text-secondary/50 hover:text-reactor-core"
+                  }`}
+                  title={showGraph ? "Switch to list view" : "Switch to graph view"}
                 >
-                  {showArchived ? "hide" : "show"} {archivedCount} archived
+                  <Network className="w-3 h-3" />
                 </button>
-              )}
+                {archivedCount > 0 && (
+                  <button
+                    onClick={() => setShowArchived((s) => !s)}
+                    className="text-[10px] text-text-secondary/50 hover:text-reactor-core font-rajdhani transition-colors"
+                  >
+                    {showArchived ? "hide" : "show"} {archivedCount} archived
+                  </button>
+                )}
+              </div>
             </div>
 
             {visibleEntities.length === 0 ? (
               <div className="text-text-secondary/50 text-xs font-rajdhani text-center py-4">
                 No memories stored yet
+              </div>
+            ) : showGraph ? (
+              /* Visual knowledge graph */
+              <div className="rounded-lg border border-panel-border/30 bg-black/20 overflow-hidden">
+                <KnowledgeGraph
+                  entities={visibleEntities}
+                  width={280}
+                  height={280}
+                  onNodeClick={onDiscuss}
+                />
               </div>
             ) : (
               visibleEntities.map((entity) => (

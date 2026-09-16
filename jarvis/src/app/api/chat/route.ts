@@ -608,7 +608,9 @@ function generateOfflineResponse(lastMessage: string, reason: "no_llm" | "rate_l
   // Email check. Don't trap queries that the composio shortcut will
   // handle (check / summarise / what's in / any new …) — those reach
   // the live Gmail fetch below at the composioQueryMatch branch.
-  const isComposioEmailQuery = /\b(check|summari[sz]e|summary|read|what'?s in|any new|unread|latest)\b[^?]*\b(emails?|mail|inbox|gmail)\b/i.test(lastMessage);
+  const isComposioEmailQuery = /\b(check|summari[sz]e|summary|read|show|list|open|what'?s|whats|any|new|unread|latest|urgent|important|recent)\b[^?]*\b(emails?|mail|inbox|gmail|messages?)\b/i.test(lastMessage)
+    || /\b(emails?|mail|inbox|gmail)\b[^?]*\b(summari[sz]e|summary|urgent|important|today|unread)\b/i.test(lastMessage)
+    || /\bany\s+(urgent|important|new)\s+messages?\b/i.test(lastMessage);
   if (!isComposioEmailQuery && lastMessage.match(/email|mail|inbox|gmail/)) {
     return "I can't access your emails while offline, Boss. Once connected with Gmail integration, I can check your inbox and summarize messages.";
   }
@@ -657,54 +659,99 @@ function generateOfflineResponse(lastMessage: string, reason: "no_llm" | "rate_l
  *   - the offline-fallback path so "summarise my inbox" still works
  *     when the LLM chain is dead.
  */
+/**
+ * Live Google Calendar shortcut: fetches upcoming events directly from
+ * /api/calendar and formats a fast, no-LLM answer for "what's on my
+ * calendar / my schedule today / upcoming meetings".
+ */
+async function tryLiveCalendarShortcut(lower: string): Promise<NextResponse | null> {
+  try {
+    // In-process call (self-HTTP raced the dev server; same fix as inbox).
+    const cal = await import("@/lib/googleCalendar");
+    if (!cal.isCalendarConfigured()) return null; // never present demo events as real
+    const { events, authenticated } = await cal.fetchEvents("primary", 12);
+    if (!authenticated) return null;
+    const mapped = events.map((e) => ({
+      title: e.summary,
+      start: e.start.dateTime || e.start.date || "",
+      location: e.location,
+      meetLink: e.hangoutLink,
+      isAllDay: !e.start.dateTime,
+    }));
+    const data = { success: true, authenticated, events: mapped };
+
+    const now = new Date();
+    const todayOnly = /\b(today|tonight|this (?:morning|afternoon|evening))\b/.test(lower);
+    const upcoming = data.events
+      .map((e) => ({ ...e, startDt: new Date(e.start) }))
+      .filter((e) => !isNaN(e.startDt.getTime()) && e.startDt >= new Date(now.getTime() - 60 * 60 * 1000))
+      .filter((e) => !todayOnly || e.startDt.toDateString() === now.toDateString())
+      .sort((a, b) => a.startDt.getTime() - b.startDt.getTime())
+      .slice(0, 10);
+
+    if (upcoming.length === 0) {
+      return NextResponse.json({
+        content: todayOnly
+          ? "Your calendar is clear for the rest of today, Boss. 📅"
+          : "No upcoming events on your calendar right now, Boss. 📅",
+      });
+    }
+
+    const lines: string[] = [`${todayOnly ? "📅 Today" : "📅 Upcoming"} — ${upcoming.length} event${upcoming.length === 1 ? "" : "s"}:\n`];
+    for (const e of upcoming) {
+      const when = e.isAllDay
+        ? e.startDt.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })
+        : e.startDt.toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+      const where = e.location ? `  📍 ${e.location}` : e.meetLink ? "  💻 Meet link attached" : "";
+      lines.push(`• **${e.title || "(untitled)"}** — ${when}${where}`);
+    }
+    return NextResponse.json({ content: lines.join("\n") });
+  } catch (e) {
+    console.warn("[Chat] tryLiveCalendarShortcut failed:", e);
+    return null;
+  }
+}
+
 async function tryLiveInboxShortcut(
   lastMessage: string
 ): Promise<NextResponse | null> {
   const lower = lastMessage.toLowerCase();
-  if (!/\b(gmail|email|mail|inbox)\b/.test(lower)) return null;
+  if (!/\b(gmail|emails?|mail|inbox|messages?)\b/.test(lower)) return null;
   try {
     const unreadOnly = /\b(unread|new)\b/.test(lower);
     const numMatch = lower.match(/\b(\d{1,2})\b/);
     const limit = Math.min(15, Math.max(5, numMatch ? parseInt(numMatch[1], 10) || 10 : 10));
-    const ir = await fetchWithTimeout(
-      `${API_BASE}/api/composio/inbox?${new URLSearchParams({
-        unread: unreadOnly ? "true" : "false",
-        limit: String(limit),
-      }).toString()}`,
-      { method: "GET" },
-      6000
-    );
-    if (!ir.ok) return null;
-    const inbox = (await ir.json()) as {
-      ok: boolean;
-      count: number;
-      messages: Array<{
-        subject: string;
-        from: string;
-        fromEmail: string;
-        date: string | null;
-        snippet: string;
-        link: string | null;
-        isUnread: boolean;
-      }>;
-    };
+    // In-process call (the old self-HTTP fetch raced the dev server and
+    // aborted under load — same fix as telegram_send).
+    const { fetchInboxViaComposio } = await import("@/lib/composio/inbox");
+    const inbox = await fetchInboxViaComposio({ unreadOnly, maxResults: limit });
     if (!inbox.ok || inbox.count === 0) {
       return NextResponse.json({
         content: `No${unreadOnly ? " unread" : ""} emails in your inbox right now, Boss.`,
       });
     }
+    // Urgent-first: when the user asks about urgent/important mail, float
+    // those to the top and flag them so the answer leads with what matters.
+    const wantsUrgent = /\b(urgent|important|asap|priority)\b/.test(lower);
+    const isUrgent = (m: { subject: string; snippet: string }) =>
+      /\b(urgent|asap|immediately|time[- ]sensitive|action required|deadline|overdue|critical|important)\b/i.test(`${m.subject} ${m.snippet}`);
+    const sorted = wantsUrgent
+      ? [...inbox.messages].sort((a, b) => Number(isUrgent(b)) - Number(isUrgent(a)))
+      : inbox.messages;
+    const urgentCount = inbox.messages.filter(isUrgent).length;
+
     const lines: string[] = [];
     lines.push(
-      `📧 ${inbox.count} email${inbox.count === 1 ? "" : "s"} in your inbox (${unreadOnly ? "unread only" : "latest"}, live):\n`
+      `📧 ${inbox.count} email${inbox.count === 1 ? "" : "s"} in your inbox (${unreadOnly ? "unread only" : wantsUrgent && urgentCount > 0 ? `${urgentCount} look urgent — shown first` : "latest"}, live):\n`
     );
-    for (const m of inbox.messages.slice(0, 12)) {
+    for (const m of sorted.slice(0, 12)) {
       const subj = m.subject.length > 90 ? m.subject.slice(0, 87) + "…" : m.subject;
-      const star = m.isUnread ? "● " : "  ";
+      const flag = isUrgent(m) ? "🚨 " : m.isUnread ? "● " : "  ";
       const dateBit = m.date
         ? new Date(m.date).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
         : "";
       const who = m.from && m.from !== m.fromEmail ? m.from : (m.fromEmail || "Unknown");
-      lines.push(`${star}${subj}  — ${who}${dateBit ? "  _(" + dateBit + ")_" : ""}`);
+      lines.push(`${flag}${subj}  — ${who}${dateBit ? "  _(" + dateBit + ")_" : ""}`);
     }
     if (inbox.count > 12) lines.push(`\n…and ${inbox.count - 12} more.`);
     return NextResponse.json({ content: lines.join("\n") });
@@ -1028,10 +1075,14 @@ export async function POST(request: Request) {
     const composioQueryPatterns = [
       /\b(any|what|show|list|did i (?:get|receive)|have i (?:got|received))\b[^?]*\b(emails?|mail|gmail|inbox)\b/i,
       /\b(check|what'?s|read|show)\b[^?]*\b(inbox|mail|incoming)\b/i,
-      /\bany\s+(?:important|new)\s+(?:emails?|calendar\s+events?|meetings?|notifications?)\b/i,
+      /\bany\s+(?:important|new|urgent|upcoming)\s+(?:emails?|calendar\s+events?|meetings?|notifications?|messages?\b)/i,
       /\b(composio|connected\s+apps?|triggers?)\b[^?]*\b(today|recently|this (?:morning|week|hour)|yesterday|lately)\b/i,
       /\bwhat\s+came\s+(?:in|today|recently|this\s+(?:morning|hour))\b/i,
-      /\bsummar(?:y|ize)\s+(?:my\s+)?(?:inbox|notifications?|today'?s?\s+(?:emails?|events?))\b/i,
+      /\bsummar(?:y|ise|ize)\s+(?:my\s+)?(?:inbox|notifications?|emails?|mail|today'?s?\s+(?:emails?|events?))\b/i,
+      /\b(?:emails?|mail|inbox)\b[^.?!]*\b(summar|urgent|important|brief)\b/i,
+      /\b(urgent|important)\s+(messages?|emails?|mail)\b/i,
+      /\bmy\s+(emails?|mail|inbox|schedule|calendar|events?)\b[^.?!]*\b(today|now|recent|latest|any|upcoming)\b/i,
+      /\b(?:upcoming|today'?s?|my)\s+(?:meetings?|events?|schedule|calendar)\b/i,
     ];
     const composioQueryMatch = composioQueryPatterns.some((p) => p.test(lastMessage));
 
@@ -1047,9 +1098,17 @@ export async function POST(request: Request) {
         // listener process has been restarted). Same helper is called
         // again later from the offline-fallback path so LLM outages
         // don't make "summarise my inbox" useless.
-        if (/\b(gmail|email|mail|inbox)\b/.test(lower)) {
+        if (/\b(gmail|emails?|mail|inbox|messages?)\b/.test(lower)) {
           const liveResp = await tryLiveInboxShortcut(lastMessage);
           if (liveResp) return liveResp;
+        }
+
+        // Live Google Calendar shortcut — same philosophy as the inbox one:
+        // answer "what's on my calendar" from the real calendar API, fast,
+        // no LLM round-trip.
+        if (/\b(calendar|gcal|google\s+calendar|schedule|meetings?|events?|appointments?)\b/.test(lower) && !/\b(add|create|schedule|set up|delete|cancel)\b/.test(lower)) {
+          const calResp = await tryLiveCalendarShortcut(lower);
+          if (calResp) return calResp;
         }
 
         let sinceHours = 24;

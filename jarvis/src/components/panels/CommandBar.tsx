@@ -3819,12 +3819,12 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
 
   return (
     <motion.div
-      className="fixed bottom-0 left-0 right-0 z-50 px-6 py-4"
+      className="fixed bottom-8 left-0 right-0 z-50 px-6 py-3"
       initial={{ y: 100, opacity: 0 }}
       animate={{ y: 0, opacity: 1 }}
       transition={{ duration: 0.5, delay: 5, ease: "easeOut" }}
     >
-      <div className="max-w-4xl mx-auto">
+      <div className="max-w-4xl mx-auto max-h-[40vh] overflow-y-auto custom-scrollbar">
         {/* Voice Visualizer */}
         <div className="mb-2">
           <VoiceVisualizer barCount={32} />

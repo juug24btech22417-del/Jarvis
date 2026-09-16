@@ -16,9 +16,11 @@ import type {
   AgentJob,
   AgentPlan,
   AgentStep,
+  AgentStepKind,
   JobStatus,
   StepResult,
 } from "@/lib/agent/types";
+import { STEP_KIND_LABELS } from "@/lib/agent/types";
 import {
   PLANNER_SYSTEM_PROMPT,
   OPENROUTER_PLANNER_MODELS,
@@ -31,8 +33,8 @@ import {
   emitMissionEvent,
   clearMissionEvents,
 } from "@/lib/agent/events";
-import { searchWebWithFallback, type SearchHit as FallbackSearchHit } from "@/services/WebSearchFallback";
-import { exec } from "child_process";
+import { searchWebWithFallback, sanitizeHits, type SearchHit as FallbackSearchHit } from "@/services/WebSearchFallback";
+import { exec, spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 
@@ -177,7 +179,11 @@ export function getJob(jobId: string): AgentJob | undefined {
  * "awaiting_approval" state with a plan attached. Validates JSON; retries
  * up to 2 times on parse / validation failure.
  */
-export async function planGoal(goal: string): Promise<AgentJob> {
+export async function planGoal(goal: string, opts?: { autoApprove?: boolean }): Promise<AgentJob> {
+  const autoApprove = opts?.autoApprove === true;
+  // Safety: goals that ask JARVIS to act on this PC always go through the
+  // approval gate, even in fast mode (the job's `auto` flag is gated here).
+  const RUNS_ON_PC_RE = /\b(vs ?code|terminal|shell|command|run the|start the server|restart the server|fix my (dev|development)|screenshot my|my project|downloads folder|my downloads|my files|my documents|my desktop|open my \w+ folder)\b/i;
   const job: AgentJob = {
     id: randomUUID(),
     goal,
@@ -185,6 +191,9 @@ export async function planGoal(goal: string): Promise<AgentJob> {
     createdAt: Date.now(),
     results: [],
     creditsUsed: 0,
+    // Store the PC-gated flag: shell/vscode goals always ride the approval
+    // lane, so approveJob never re-gates them after a legitimate approval.
+    auto: autoApprove && !RUNS_ON_PC_RE.test(goal),
   };
   jobs.set(job.id, job);
   emitMissionEvent(job.id, "status", "Planning mission…", { status: "planning" });
@@ -195,7 +204,7 @@ export async function planGoal(goal: string): Promise<AgentJob> {
       await new Promise((r) => setTimeout(r, 2000 * attempt));
     }
     try {
-      const plan = await callPlanner(goal);
+      const plan = await callPlanner(goal, speedDirective(goal));
       validatePlan(plan);
       job.plan = plan;
       job.status = "awaiting_approval";
@@ -203,6 +212,15 @@ export async function planGoal(goal: string): Promise<AgentJob> {
         status: "awaiting_approval",
         plan,
       });
+      if (autoApprove && job.auto) {
+        // Fast lane — skip the approval gate and execute immediately.
+        // Progress flows through the job store + SSE; the UI polls status.
+        void approveJob(job.id).catch((e) => {
+          job.status = "failed";
+          job.error = (e as Error)?.message || String(e);
+          emitMissionEvent(job.id, "error", job.error, { status: "failed" });
+        });
+      }
       return job;
     } catch (e) {
       lastError = (e as Error)?.message || String(e);
@@ -224,6 +242,15 @@ export async function approveJob(jobId: string): Promise<AgentJob> {
     throw new Error(`Job is in status ${job.status}, not awaiting_approval`);
   }
   if (!job.plan) throw new Error("Job has no plan");
+
+  // Hard safety gate: shell commands never execute on a fast-lane
+  // auto-approval — they always get an explicit approval round-trip.
+  if (job.plan.steps.some((s) => s.kind === "shell_command") && job.auto) {
+    job.auto = false;
+    job.status = "awaiting_approval";
+    emitMissionEvent(job.id, "status", "This mission runs commands on your PC — review and approve to execute", { status: "awaiting_approval" });
+    return job;
+  }
 
   job.status = "running";
   job.startedAt = Date.now();
@@ -320,6 +347,9 @@ async function llmRace(opts: {
     ],
     max_tokens: opts.maxTokens,
     temperature: opts.temperature ?? 0.4,
+    // Planners occasionally ramble past the JSON; an early stop keeps
+    // responses tight (the robust extractor handles the rest).
+    stop: ["\n\n\n"],
   };
 
   // One attempt against an OpenAI-compatible chat endpoint.
@@ -386,22 +416,62 @@ async function llmRace(opts: {
     chain.push(() => attempt("nvidia", NIM_URL, nimKey, NIM_MODEL));
   }
 
-  const errors: string[] = [];
-  for (const fn of chain) {
-    try {
-      const result = await fn();
-      return result;
-    } catch (e: any) {
-      const msg: string = (e as Error)?.message || String(e);
-      console.warn(`[llmRace/${label}] provider failed, trying next:`, msg.slice(0, 120));
-      errors.push(msg);
-    }
-  }
+  // Parallel staggered race: preferred providers start first (500ms apart);
+  // everyone runs CONCURRENTLY, first usable result wins. Sequential
+  // fallback here was the #1 planning bottleneck — a dead first provider
+  // burned its full timeout before the next even started.
+  const STAGGER_MS = 500;
+  return await new Promise<string>((resolve, reject) => {
+    const errors: string[] = [];
+    const total = chain.length;
+    let launched = 0;
+    let settled = false;
 
-  throw new Error(`All LLM providers failed for ${label}: ${errors.map((m) => m.slice(0, 80)).join(" | ")}`);
+    const pump = () => {
+      if (settled || launched >= total) return;
+      const idx = launched++;
+      chain[idx]().then(
+        (res) => {
+          if (!settled) {
+            settled = true;
+            resolve(res);
+          }
+        },
+        (e: any) => {
+          const msg: string = (e as Error)?.message || String(e);
+          console.warn(`[llmRace/${label}] provider failed:`, msg.slice(0, 120));
+          errors.push(msg);
+          if (errors.length >= total && !settled) {
+            settled = true;
+            reject(new Error(`All LLM providers failed for ${label}: ${errors.map((m) => m.slice(0, 80)).join(" | ")}`));
+            return;
+          }
+          pump(); // a failure frees a launch slot immediately
+        }
+      );
+    };
+
+    pump();
+    for (let i = 1; i < total; i++) {
+      setTimeout(() => {
+        if (!settled) pump();
+      }, i * STAGGER_MS);
+    }
+  });
 }
 
-async function callPlanner(goal: string): Promise<AgentPlan> {
+/**
+ * Goals that genuinely need heavy steps (scrape / extract / deep research).
+ * Everything else runs the fast lane: search → decide → open.
+ */
+const RESEARCHY_RE = /\b(research|deep|compare|comparison|versus|\bvs\b|paper|documentation|docs|specs?|specifications?|analysis|analy[sz]e|study|in[- ]depth|report|detailed|thorough|full details)\b/i;
+
+function speedDirective(goal: string): string {
+  if (RESEARCHY_RE.test(goal)) return "";
+  return "\n\n[SPEED DIRECTIVE] This is a simple open-and-go mission — optimize for speed. For weather use weather_lookup; for music use spotify_action or youtube_open with a query; for opening videos use youtube_open; for timers use timer_set. For finding/browsing things use ONLY: firecrawl_search (limit 5) -> llm_decide (input 'from:<searchStepId>') -> browser_open (url 'from:<decideStepId>.url'). Do NOT add web_scrape, firecrawl_extract, or deep_research steps.";
+}
+
+async function callPlanner(goal: string, directive = ""): Promise<AgentPlan> {
   if (
     !process.env.OPENROUTER_API_KEY &&
     !process.env.GROQ_API_KEY &&
@@ -431,7 +501,7 @@ async function callPlanner(goal: string): Promise<AgentPlan> {
 
   const content = await llmRace({
     system: PLANNER_SYSTEM_PROMPT,
-    user: goal,
+    user: goal + directive,
     maxTokens: 1600,
     label: "planner",
   });
@@ -467,6 +537,7 @@ const KNOWN_KINDS = new Set([
   "change_tracking", "llm_decide", "llm_summarize", "deep_research",
   "memory_store", "notify", "playwright_action", "browser_open", "checkpoint",
   "spotify_action", "weather_lookup", "maps_open", "youtube_open", "notes_create", "task_create", "file_save",
+  "timer_set", "telegram_send", "shell_command", "vision_inspect", "file_list", "file_open",
 ]);
 
 function validatePlan(plan: AgentPlan) {
@@ -474,6 +545,41 @@ function validatePlan(plan: AgentPlan) {
   if (typeof plan.summary !== "string") throw new Error("plan.summary missing");
   if (!Array.isArray(plan.steps) || plan.steps.length === 0) throw new Error("plan.steps empty");
   if (plan.steps.length > 10) throw new Error("plan.steps too long (max 10)");
+  // Small models sometimes emit numeric references ("from:2", "from:2.url")
+  // instead of real step ids — rewrite them to the Nth step's id so deps
+  // infer and values resolve ("AI extraction: from:2" happened because the
+  // ref silently never matched).
+  const idOf = new Map<string, string>();
+  plan.steps.forEach((s, i) => {
+    idOf.set(String(i + 1), s.id);
+    idOf.set(s.id, s.id);
+  });
+  const rewriteRefs = (val: unknown): unknown => {
+    if (typeof val === "string") {
+      return val.replace(/from:([a-zA-Z0-9_-]+)(\.[a-zA-Z]+)?/g, (full, ref: string, field?: string) =>
+        idOf.has(ref) ? `from:${idOf.get(ref)}${field ?? ""}` : full
+      );
+    }
+    if (Array.isArray(val)) return val.map(rewriteRefs);
+    if (val && typeof val === "object") {
+      return Object.fromEntries(Object.entries(val).map(([k, v]) => [k, rewriteRefs(v)]));
+    }
+    return val;
+  };
+  for (const s of plan.steps) s.params = rewriteRefs(s.params) as Record<string, unknown>;
+  for (const s of plan.steps) {
+    if (Array.isArray(s.dependsOn)) {
+      s.dependsOn = s.dependsOn.map((d) => {
+        const key = String(d).split(".")[0].trim();
+        return idOf.get(key) ?? d;
+      });
+    }
+    // Titles derived from raw refs ("AI extraction: from:2") are useless —
+    // regenerate from the kind label instead.
+    if (/\bfrom:[a-zA-Z0-9_-]/.test(s.title)) {
+      s.title = STEP_KIND_LABELS[s.kind as AgentStepKind] ?? s.kind;
+    }
+  }
   autoInferDependencies(plan);
   const ids = new Set<string>();
   for (const s of plan.steps) {
@@ -482,9 +588,15 @@ function validatePlan(plan: AgentPlan) {
     ids.add(s.id);
     if (!s.kind || typeof s.kind !== "string") throw new Error(`step ${s.id}.kind missing`);
     if (!KNOWN_KINDS.has(s.kind)) throw new Error(`step ${s.id}: unknown kind "${s.kind}"`);
-    if (typeof s.title !== "string") throw new Error(`step ${s.id}.title missing`);
+    // Small models sometimes omit cosmetic fields — repair instead of failing
+    // the whole mission.
+    if (typeof s.title !== "string" || !s.title.trim()) {
+      const p = (s.params ?? {}) as Record<string, unknown>;
+      const detail = String(p.query ?? p.city ?? p.label ?? p.command ?? p.question ?? p.filename ?? p.url ?? "").slice(0, 50);
+      s.title = detail ? `${STEP_KIND_LABELS[s.kind as AgentStepKind]}: ${detail}` : STEP_KIND_LABELS[s.kind as AgentStepKind] ?? s.kind;
+    }
     if (typeof s.params !== "object" || s.params === null) {
-      throw new Error(`step ${s.id}.params must be object`);
+      s.params = {};
     }
   }
 }
@@ -525,10 +637,21 @@ function resolveParam(value: unknown, job: AgentJob, deps: Map<string, StepResul
     if (Array.isArray(out?.ingredients)) {
       return out.ingredients.map((item: any) => typeof item === "string" ? item : (item.name || item.item || JSON.stringify(item))).join("\n");
     }
+    // Generic extracted arrays (specs/points/prices/features...) — extraction
+    // is universal, not recipe-only.
+    for (const k of ["extracted", "points", "specs", "prices", "features", "items", "dates", "results"]) {
+      if (Array.isArray((out as Record<string, unknown>)?.[k])) {
+        return ((out as Record<string, unknown>)[k] as unknown[])
+          .map((i) => (typeof i === "string" ? i : (typeof i === "object" && i ? Object.entries(i as Record<string, unknown>).map(([kk, vv]) => `${kk}: ${String(vv)}`).join(" — ") : JSON.stringify(i))))
+          .join("\n");
+      }
+    }
     return typeof out === "string" ? out : String(out?.content ?? out?.summary ?? out?.text ?? JSON.stringify(out ?? ""));
   }
 
-  // Bare reference — smart-pick the best URL or text summary.
+  // Bare reference — prefer an absolute file path (file_list results), then
+  // the best URL, then text summaries.
+  if (typeof out?.path === "string" && path.isAbsolute(out.path)) return out.path;
   const chosen = pickUrl(out);
   if (chosen) return chosen;
   if (typeof dep.result === "string") return dep.result;
@@ -561,6 +684,11 @@ function extractUrls(out: unknown): SearchHit[] {
   }
   // decide result
   if (typeof o.url === "string" && o.url) return [{ url: o.url, title: String(o.choice ?? "") }];
+  // browser_open result (urls array)
+  if (Array.isArray(o.urls) && o.urls.length > 0) {
+    const first = o.urls.filter((u): u is string => typeof u === "string" && u.startsWith("http"));
+    if (first.length > 0) return [{ url: first[0], title: "opened page" }];
+  }
   // scrape result
   if (typeof o.url === "string") return [{ url: o.url, title: String(o.title ?? "") }];
   return [];
@@ -577,7 +705,7 @@ function pickUrl(out: unknown): string | null {
 
 /* ----------------------------- EXECUTOR (DAG-parallel) ----------------------------- */
 
-const PARALLELISM = 3;
+const PARALLELISM = 4;
 
 async function executePlan(job: AgentJob) {
   const plan = job.plan!;
@@ -629,6 +757,22 @@ async function executePlan(job: AgentJob) {
       }
     }
 
+    // Fast lane never runs shell commands — they always wait at the gate.
+    if (step.kind === "shell_command" && job.auto) {
+      const r: StepResult = {
+        stepId: step.id,
+        status: "skipped",
+        error: "Shell commands always wait for approval — rerun without fast mode to execute",
+        finishedAt: Date.now(),
+      };
+      resultsById.set(step.id, r);
+      finished.set(step.id, r);
+      job.results.push(r);
+      failedOrSkipped.add(step.id);
+      emitMissionEvent(job.id, "step_finished", `Skipped (needs approval): ${step.title}`, { stepId: step.id, status: "skipped" });
+      return;
+    }
+
     // Resolve templated params now that deps are done.
     const resolved: AgentStep = {
       ...step,
@@ -637,6 +781,9 @@ async function executePlan(job: AgentJob) {
       ),
     };
 
+    if (step.kind === "shell_command" && !job.auto) {
+      emitMissionEvent(job.id, "log", `⏳ Command step (ran after your approval): ${String(step.params.command ?? "").slice(0, 60)}`, { stepId: step.id });
+    }
     emitMissionEvent(job.id, "step_started", step.title, { stepId: step.id, kind: step.kind });
     const t0 = Date.now();
     try {
@@ -728,54 +875,114 @@ async function runStep(step: AgentStep, deps: Map<string, StepResult>, job: Agen
       const url = String(step.params.url ?? "");
       const prompt = String(step.params.prompt ?? "Extract the key data from this page");
       log(`Extracting data: ${prompt.slice(0, 60)}`);
+      // The subject hint comes from the mission goal + any decide step's
+      // pick — not from a broken ref that leaked into the title.
+      const choiceHint = (() => {
+        for (const r of deps.values()) {
+          const out = r.result as Record<string, unknown> | undefined;
+          if (out?.choice && typeof out.choice === "string") return String(out.choice);
+        }
+        return "";
+      })();
+      const subject = choiceHint || job.goal;
+      const wantsIngredients = /ingredient|shopping list|recipe/i.test(`${prompt} ${step.title}`);
 
+      // UNIVERSAL formatting: shopping-list style for ingredients, bullet
+      // list for everything else (specs, prices, key points, dates...).
       const formatIngredients = (parsed: any, fallbackText: string) => {
-        const rawItems = Array.isArray(parsed?.ingredients)
+        const rawItems = Array.isArray(parsed?.ingredients) && parsed.ingredients.length > 0
           ? parsed.ingredients
-          : Array.isArray(parsed?.items)
+          : Array.isArray(parsed?.items) && parsed.items.length > 0
             ? parsed.items
             : [fallbackText];
-        const items = rawItems.map((i: any) => typeof i === "string" ? i : (i.name || i.item || JSON.stringify(i)));
+        const items = rawItems.map((i: any) => typeof i === "string" ? i : (i.name || i.item || JSON.stringify(i))).filter((i: string) => i.trim());
         const summary = `### 📋 Extracted Ingredients & Items\n\n` + items.map((i: string) => `- ${i}`).join("\n");
         const content = items.map((i: string) => `- [ ] ${i}`).join("\n");
         return { ingredients: items, summary, content, ...parsed };
       };
+      const formatGeneric = (data: unknown, fallbackText: string) => {
+        // Structured JSON {"specs": [...]} / {"points": [...]} → bullet list.
+        const rec = (data && typeof data === "object" && !Array.isArray(data)) ? data as Record<string, unknown> : null;
+        const listField = rec ? Object.entries(rec).find(([, v]) => Array.isArray(v) && v.length > 0) : undefined;
+        let items: string[] = [];
+        if (listField) {
+          items = (listField[1] as unknown[]).map((i) => typeof i === "string" ? i : (typeof i === "object" && i ? Object.entries(i as Record<string, unknown>).map(([k, v]) => `${k}: ${String(v)}`).join(" — ") : JSON.stringify(i)));
+        } else if (rec) {
+          // Flat object {price: "...", screen: "..."} → bullets.
+          items = Object.entries(rec).filter(([, v]) => typeof v !== "object").map(([k, v]) => `${k}: ${String(v)}`);
+        }
+        if (items.length === 0) items = [fallbackText];
+        items = items.filter((i) => i.trim());
+        const summary = `### 🧾 Extracted Data\n\n` + items.map((i: string) => `- ${i}`).join("\n");
+        const content = items.join("\n");
+        return { extracted: items, summary, content, ...(rec ?? {}) };
+      };
 
       if (!url || url.startsWith("from:")) {
-        log(`Using AI knowledge extraction for "${step.title}"`);
+        log(`Using AI knowledge extraction for "${subject.slice(0, 60)}"`);
         const synthesized = await llmCall(
-          `You are an expert AI assistant. Extract and format the requested information accurately. If ingredients are requested, list all ingredients with exact quantities. Return valid JSON with an "ingredients" array: {"ingredients": ["quantity item", ...]}\n\nInstruction: ${prompt}`,
-          step.title
+          `You are an expert AI assistant. Extract and format the requested information accurately from your knowledge. If ingredients are requested, list all ingredients with exact quantities. Return valid JSON: use {"ingredients": [...]} for shopping lists, otherwise a JSON object or array matching what was asked (e.g. {"specs": [...]}, {"points": [...]}).\n\nInstruction: ${prompt}\nSubject: ${subject}`,
+          subject
         );
         const parsed = tryJson(synthesized);
-        return formatIngredients(parsed, synthesized);
+        if (wantsIngredients) return formatIngredients(parsed, synthesized);
+        return formatGeneric(parsed ?? { points: [synthesized] }, synthesized);
       }
 
+      // Unified fallback chain: LLM extraction → heuristic ingredient parser
+      // (works even when every LLM provider is rate-limited) → AI synthesis.
+      let markdown = "";
       try {
         log(`AI-extracting from ${url.slice(0, 70)}`);
         const scraped = await scrapeWithFallback(url, log);
-        const markdown = String((scraped as Record<string, unknown>).markdown ?? "");
-        if (markdown) {
+        markdown = String((scraped as Record<string, unknown>).markdown ?? "");
+      } catch (e: any) {
+        log(`Scrape failed (${e.message}) — falling back to AI synthesis`);
+      }
+
+      if (markdown) {
+        try {
           const raw = await llmCall(
-            `You extract structured data. Follow the instruction and return valid JSON with an "ingredients" array (or "items" array) if recipe/shopping list.\n\nInstruction: ${prompt}`,
+            `You extract structured data from the page content. Follow the instruction and return valid JSON: use {"ingredients": [...]} for shopping lists, otherwise an object or array matching what was asked (e.g. {"specs": [...]}, {"prices": [...]}, {"points": [...]}). If the page is a list/roundup, focus on the single most relevant item.\n\nInstruction: ${prompt}`,
             markdown.slice(0, 6000)
           );
           const parsed = tryJson(raw);
-          if (parsed && (Array.isArray((parsed as any).ingredients) || Array.isArray((parsed as any).items))) {
-            return formatIngredients(parsed, raw);
+          const listLen = (o: any, keys: string[]) => keys.reduce((n, k) => Math.max(n, Array.isArray(o?.[k]) ? o[k].length : 0), 0);
+          const hasData = !!parsed &&
+            (listLen(parsed, ["ingredients", "items", "specs", "prices", "points", "features", "dates", "results", "data"]) > 0 ||
+              (typeof parsed === "object" && Object.keys(parsed).length > 0));
+          if (hasData) {
+            return wantsIngredients ? formatIngredients(parsed, raw) : formatGeneric(parsed, raw);
           }
-          return { ...(parsed as object || {}), summary: raw, content: raw };
+        } catch (e: any) {
+          log(`LLM extraction unavailable (${String(e?.message ?? e).slice(0, 60)}) — trying heuristic parser`);
         }
-      } catch (e: any) {
-        log(`Scrape failed (${e.message}) — synthesizing ingredients via AI`);
+        // No-LLM fallbacks: shopping lists get the ingredient-line parser;
+        // everything else gets the universal key-line parser.
+        if (wantsIngredients) {
+          const heuristic = heuristicIngredients(markdown);
+          if (heuristic.length >= 3) {
+            log(`Heuristic parser found ${heuristic.length} ingredients`);
+            return formatIngredients({ ingredients: heuristic }, "");
+          }
+        } else {
+          const generic = heuristicKeyLines(markdown);
+          if (generic.length >= 3) {
+            log(`Heuristic parser found ${generic.length} key lines`);
+            return formatGeneric({ points: generic }, "");
+          }
+        }
+        log(`Page yielded no extractable data — synthesizing from AI knowledge`);
       }
 
       const backup = await llmCall(
-        `Provide an authentic, comprehensive ingredient list with quantities for: ${step.title}. Return ONLY JSON: {"ingredients": ["quantity item", ...]}`,
+        wantsIngredients
+          ? `Provide an authentic, comprehensive ingredient list with quantities for: ${subject}. Return ONLY JSON: {"ingredients": ["quantity item", ...]}`
+          : `Provide accurate, factual data for: ${subject}. Instruction: ${prompt}. Return ONLY JSON matching what was asked (e.g. {"specs": [...]} or {"points": [...]})`,
         prompt
       );
       const parsedBackup = tryJson(backup);
-      return formatIngredients(parsedBackup, backup);
+      return wantsIngredients ? formatIngredients(parsedBackup, backup) : formatGeneric(parsedBackup ?? { points: [backup] }, backup);
     }
 
     case "change_tracking": {
@@ -830,21 +1037,53 @@ async function runStep(step: AgentStep, deps: Map<string, StepResult>, job: Agen
       if (pool.length > 0) {
         log(`Deciding: ${question.slice(0, 60)} (${pool.length} candidates)`);
         const listing = pool
-          .map((h, i) => `${i + 1}. ${h.title}\n   URL: ${h.url}\n   ${h.description ?? ""}`)
+          .slice(0, 8)
+          .map((h, i) => `${i + 1}. ${h.title.slice(0, 110)}\n   URL: ${h.url}\n   ${(h.description ?? "").slice(0, 140)}`)
           .join("\n");
-        const raw = await llmCall(
-          `You are JARVIS choosing the best option for the user. Answer with ONLY JSON: {"choice": <number>, "reason": "<one sentence>", "url": "<the chosen URL>"}`,
-          `${question}\n\nOptions:\n${listing}`
-        );
+        let raw = "";
+        try {
+          raw = await llmCall(
+            `You are JARVIS choosing the best option for the user. The user's overall goal is: "${job.goal}". Pick something that genuinely serves that goal (right audience, right topic, right depth). Answer with ONLY JSON: {"choice": <number>, "reason": "<one sentence>", "url": "<the chosen URL>"}`,
+            `${question}\n\nOptions:\n${listing}`
+          );
+        } catch (e: any) {
+          // All providers down (quota/rate limit) — pick the top-ranked result
+          // deterministically instead of failing the mission branch.
+          log(`LLM unavailable for decision (${String(e?.message ?? e).slice(0, 60)}) — picking top-ranked result`);
+          const decided = ((job as unknown as { __decidedUrls?: Set<string> }).__decidedUrls ??= new Set<string>());
+          const winner = pool.find((h) => !decided.has(h.url)) ?? pool[0];
+          decided.add(winner.url);
+          return {
+            choice: winner.title,
+            url: winner.url,
+            reason: "Top-ranked search result (LLM providers unavailable)",
+            alternatives: pool.filter((h) => h.url !== winner.url).slice(0, 8).map((h) => ({ url: h.url, title: h.title })),
+            summary: `### 🏆 Best Option Selected: ${winner.title}\n\n- **Reason:** Top-ranked search result\n- **Direct Link:** [${winner.title}](${winner.url})`,
+          };
+        }
         const parsed = tryJson(raw) as { choice?: number | string; reason?: string; url?: string } | null;
         const idx = parsed?.choice != null ? parseInt(String(parsed.choice), 10) - 1 : 0;
-        const winner = pool[Number.isInteger(idx) && idx >= 0 && idx < pool.length ? idx : 0];
+        let winner = pool[Number.isInteger(idx) && idx >= 0 && idx < pool.length ? idx : 0];
+        // Sibling llm_decide steps run in parallel over the same pool — without
+        // dedup all three "pick a resource" steps can choose the same site.
+        const decided = ((job as unknown as { __decidedUrls?: Set<string> }).__decidedUrls ??= new Set<string>());
+        if (decided.has(winner.url)) {
+          const alt = pool.find((h) => !decided.has(h.url));
+          if (alt) {
+            log(`Choice already taken — switching to: ${alt.title.slice(0, 50)}`);
+            winner = alt;
+          }
+        }
+        decided.add(winner.url);
         log(`Picked: ${winner.title.slice(0, 60)} — ${parsed?.reason?.slice(0, 60) ?? ""}`);
-        const chosenUrl = parsed?.url || winner.url;
+        const chosenUrl = winner.url;
         return {
           choice: winner.title,
           url: chosenUrl,
           reason: parsed?.reason ?? "",
+          // Ranked alternates so sibling browser_open steps can each open a
+          // DIFFERENT resource ("choose three, open in separate tabs").
+          alternatives: pool.filter((h) => h.url !== chosenUrl).slice(0, 8).map((h) => ({ url: h.url, title: h.title })),
           summary: `### 🏆 Best Option Selected: ${winner.title}\n\n- **Reason:** ${parsed?.reason ?? "Top recommendation"}\n- **Direct Link:** [${winner.title}](${chosenUrl})`
         };
       }
@@ -891,9 +1130,9 @@ async function runStep(step: AgentStep, deps: Map<string, StepResult>, job: Agen
       }, 60_000);
       if (!searchRes.ok) throw new Error(`search HTTP ${searchRes.status}`);
       const searchData = await searchRes.json();
-      const hits: SearchHit[] = (searchData.results ?? []).map((r: Record<string, unknown>) => ({
+      const hits: SearchHit[] = sanitizeHits((searchData.results ?? []).map((r: Record<string, unknown>) => ({
         url: String(r.url ?? ""), title: String(r.title ?? r.url ?? ""), description: String(r.description ?? "").slice(0, 300),
-      }));
+      })));
       log(`Found ${hits.length} sources — scraping top ${Math.min(3, hits.length)}`);
       // 2. scrape top 3 with fallback
       const top = hits.slice(0, 3);
@@ -928,11 +1167,41 @@ async function runStep(step: AgentStep, deps: Map<string, StepResult>, job: Agen
       const prompt = String(step.params.prompt ?? "Summarize the following:");
       let inputs: string[] = [];
       const spec = step.params.inputs;
-      if (typeof spec === "string" && spec.startsWith("from:")) {
+      // Resolved URL input (e.g. 'from:<browserOpenStep>.url') — fetch the
+      // article and summarize its CONTENT, not the link text.
+      const scrapeUrlInputs = async (urls: string[]): Promise<string[]> => {
+        const docs = await Promise.allSettled(urls.slice(0, 3).map((u) => scrapeWithFallback(u, log)));
+        return docs
+          .filter((d): d is PromiseFulfilledResult<Record<string, unknown>> => d.status === "fulfilled")
+          .map((d) => String(d.value.markdown ?? "").slice(0, 6000))
+          .filter((md) => md.length > 100);
+      };
+      if (typeof spec === "string" && spec.startsWith("http")) {
+        log(`Fetching article to summarize: ${spec.slice(0, 60)}`);
+        inputs = await scrapeUrlInputs([spec]);
+      } else if (typeof spec === "string" && spec.startsWith("from:")) {
         const dep = deps.get(spec.slice(5).trim());
         const out = dep?.result as Record<string, unknown> | undefined;
         const md = String(out?.markdown ?? out?.summary ?? "");
         inputs = md ? [md] : extractUrls(out).map((h) => `${h.title}: ${h.description ?? h.url}`);
+        // Dep had no text but exposed a URL (e.g. an open/scrape step) —
+        // scrape the real content behind it.
+        if ((inputs.length === 0 || (inputs[0] ?? "").startsWith("http")) && out) {
+          const urls = extractUrls(out).map((h) => h.url).filter((u) => u.startsWith("http"));
+          if (urls.length > 0) {
+            log(`Input is a link — fetching the page content`);
+            const scraped = await scrapeUrlInputs(urls);
+            if (scraped.length > 0) inputs = scraped;
+          }
+        }
+        // A decide step exposes ranked alternatives — a study-plan/comparison
+        // summary needs ALL the picks, not just the winner.
+        if (Array.isArray(out?.alternatives) && out?.choice) {
+          const all = ([{ title: String(out.choice), url: String(out.url ?? "") }] as Array<{ title: string; url: string }>).
+            concat((out.alternatives as Array<{ url: string; title?: string }>).slice(0, 5).map((a) => ({ title: a.title ?? a.url, url: a.url }))).
+            map((a) => `${a.title}: ${a.url}`);
+          inputs = [`${inputs[0] ?? ""}\n\nOther picked resources:\n${all.join("\n")}`];
+        }
       } else if (Array.isArray(spec)) {
         inputs = (spec as unknown[]).map((x) => resolveParam(x, job, deps)).map(String);
       } else {
@@ -944,7 +1213,9 @@ async function runStep(step: AgentStep, deps: Map<string, StepResult>, job: Agen
           .filter(Boolean);
       }
       if (inputs.length === 0) {
-        return { summary: "(no inputs to summarize)" };
+        // Fail loudly — a silent placeholder once flowed into file_save and
+        // got delivered to Telegram as the "summary".
+        throw new Error("llm_summarize: no readable inputs (link scrape failed or dependency produced no text)");
       }
       log(`Summarizing ${inputs.length} input(s)`);
       const summary = await llmCall(
@@ -1119,6 +1390,36 @@ async function runStep(step: AgentStep, deps: Map<string, StepResult>, job: Agen
         urls = [`https://www.google.com/search?q=${encodeURIComponent(job.goal)}`];
       }
 
+      // Never open the same URL twice in one mission: "choose three and open
+      // in separate tabs" must yield three DIFFERENT tabs. Already-opened
+      // urls are swapped for the decide step's ranked alternatives.
+      const opened = ((job as unknown as { __openedUrls?: Set<string> }).__openedUrls ??= new Set<string>());
+      const alternatives: Array<{ url: string; title?: string }> = [];
+      for (const r of deps.values()) {
+        const out = r.result as Record<string, unknown> | undefined;
+        if (Array.isArray(out?.alternatives)) {
+          for (const a of out.alternatives as Array<{ url: string }>) {
+            if (a && typeof a.url === "string" && a.url.startsWith("http")) alternatives.push(a);
+          }
+        }
+      }
+      const finalUrls: string[] = [];
+      for (const u of urls) {
+        let candidate = u;
+        while (opened.has(candidate) && alternatives.length > 0) {
+          const nextIdx = alternatives.findIndex((a) => !opened.has(a.url));
+          if (nextIdx === -1) break;
+          candidate = alternatives.splice(nextIdx, 1)[0].url;
+        }
+        if (!opened.has(candidate)) {
+          opened.add(candidate);
+          finalUrls.push(candidate);
+        } else if (!finalUrls.includes(candidate)) {
+          finalUrls.push(candidate); // unavoidable duplicate — keep once
+        }
+      }
+      urls = finalUrls.length > 0 ? finalUrls : urls;
+
       for (const u of urls) launchUrlOnWindows(u);
       emitMissionEvent(job.id, "log", `Opened in your browser: ${urls.join(", ")}`, { stepId: step.id, openUrls: urls });
       return { urls, opened: urls.length, summary: `Opened in browser: ${urls.join(", ")}` };
@@ -1265,21 +1566,455 @@ async function runStep(step: AgentStep, deps: Map<string, StepResult>, job: Agen
       return { success: true, query, url: watchUrl };
     }
 
+    case "timer_set": {
+      const minutes = Number(step.params.minutes ?? 0) || 0;
+      const seconds = Number(step.params.seconds ?? 0) || 0;
+      const label = String(step.params.label ?? "Mission timer").trim();
+      if (minutes <= 0 && seconds <= 0) throw new Error("timer_set: minutes or seconds required");
+      log(`Setting a ${minutes > 0 ? `${minutes} minute` : `${seconds} second`} timer: ${label}`);
+      const res = await fetchWithTimeout(`${INTERNAL_BASE}/api/timer`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "create", minutes, seconds, label }),
+      }, 8000);
+      if (!res.ok) throw new Error(`timer HTTP ${res.status}`);
+      const total = minutes * 60 + seconds;
+      const endsAt = new Date(Date.now() + total * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      log(`Timer running — rings around ${endsAt}`);
+      return {
+        success: true,
+        label,
+        minutes,
+        seconds,
+        endsAt,
+        summary: `### ⏱️ Timer set: ${label}\n\n- Duration: ${minutes > 0 ? `${minutes}m ` : ""}${seconds > 0 ? `${seconds}s` : ""}\n- Rings at ~${endsAt}`,
+      };
+    }
+
+    case "telegram_send": {
+      // Resolve the destination chat WITHOUT self-HTTP: the DB/lib are in-process.
+      // (Self-fetch to /api/telegram/recent raced the dev server and produced
+      // false "no chat id" failures even when a known chat existed.)
+      // Planners sometimes emit placeholder junk like "<YOUR_TELEGRAM_CHAT_ID>"
+      // — only accept a real numeric chat id from params.
+      const rawChatParam = step.params.chatId ? String(step.params.chatId).trim() : "";
+      const chatParam = /^\d+$/.test(rawChatParam) ? rawChatParam : "";
+      let chatId = chatParam || process.env.TELEGRAM_CHAT_ID || "";
+      if (!chatId) {
+        try {
+          const { getSeenChatIds } = await import("@/lib/telegram/queue");
+          const seen = await getSeenChatIds();
+          if (seen.length > 0) chatId = String(seen[0]);
+        } catch {
+          // fall through to the error below
+        }
+      }
+      if (!chatId) {
+        try {
+          const { getAllowedChatIds } = await import("@/lib/telegram");
+          const allowed = Array.from(getAllowedChatIds());
+          if (allowed.length > 0) chatId = String(allowed[0]);
+        } catch {
+          // fall through to the error below
+        }
+      }
+      if (!chatId) throw new Error("telegram_send: no chat id — message JARVIS on Telegram once so it learns where to reply");
+
+      // File support: content resolves from a saved file (from:<fileSaveStepId>
+      // resolves to its path) or a bare filename in notes/Desktop.
+      let fileText: string | null = null;
+      let fileName = "";
+      const rawContent = step.params.content;
+      if (typeof rawContent === "string" && rawContent.trim()) {
+        fileText = rawContent;
+      } else {
+        const fileSpec = String(step.params.file ?? "");
+        if (fileSpec) {
+          fileName = fileSpec.split(/[\\/]/).pop() || fileSpec;
+          const candidates = fileSpec.startsWith("from:")
+            ? [String((deps.get(fileSpec.slice(5).trim())?.result as Record<string, unknown> | undefined)?.path ?? ""), fileSpec.replace(/^from:/, "")]
+            : [fileSpec];
+          const notesDir = path.join(process.cwd(), "notes");
+          for (const c of candidates) {
+            const base = c && !c.startsWith("from:") ? c : "";
+            if (!base) continue;
+            const tries = path.isAbsolute(base) ? [base] : [path.join(notesDir, base), path.join(process.env.USERPROFILE || "", "Desktop", base)];
+            for (const t of tries) {
+              try {
+                if (fs.existsSync(t)) {
+                  fileText = fs.readFileSync(t, "utf8");
+                  fileName = path.basename(t);
+                  break;
+                }
+              } catch {
+                // unreadable — keep looking
+              }
+            }
+            if (fileText) break;
+          }
+        }
+      }
+
+      const text = String(step.params.text ?? "").trim();
+      if (!text && !fileText) throw new Error("telegram_send: nothing to send (provide text or a resolvable file)");
+
+      // Send via the in-process notify lib (self-fetch to /api/telegram/send
+      // raced the dev server and failed intermittently).
+      const { notifyUser } = await import("@/lib/telegram/notify");
+      const payload = fileText ? `${text ? text + "\n\n" : ""}${fileText}`.slice(0, 3500) : text;
+      const tg = await notifyUser(Number(chatId), payload, { silent: false });
+      if (!tg.sent) throw new Error(`telegram_send failed: ${tg.error ?? "unknown error"}`);
+      log(`Sent ${fileText ? `file "${fileName}"` : "message"} to Telegram`);
+      return {
+        success: true,
+        chatId,
+        sentFile: !!fileText,
+        filename: fileName || undefined,
+        summary: `### ✈️ Telegram\n\nSent ${fileText ? `**${fileName}**` : "your message"} to your Telegram.`,
+      };
+    }
+
+    case "shell_command": {
+      const command = String(step.params.command ?? "").trim();
+      if (!command) throw new Error("shell_command: command required");
+      // Safety: only whitelisted read-only / dev command heads. Anything
+      // outside the list is rejected rather than executed.
+      const first = command.split(/[\n;|&]+/)[0].trim();
+      const ALLOWED = /^(git (status|log|diff|branch)|node (--version| -v)|npm (--version| run (build|test|lint)| install)|npx tsc --noEmit|curl |ping |tasklist|netstat |code( |$))/i;
+      if (!ALLOWED.test(first)) {
+        throw new Error(`command not on the safe list: ${first.slice(0, 60)}`);
+      }
+      log(`$ ${command.slice(0, 80)}`);
+      if (/^code/i.test(first)) {
+        // VS Code detaches — don't wait for exit or the mission would stall.
+        exec(`code`);
+        await new Promise((r) => setTimeout(r, 2500));
+        return { success: true, command, output: "VS Code opened with the project", summary: "### 💻 VS Code opened with your project" };
+      }
+      const output = await new Promise<string>((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error("command timed out after 180s")), 180_000);
+        exec(command, { timeout: 170_000, maxBuffer: 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+          clearTimeout(t);
+          if (err && !stdout && !stderr) reject(err);
+          else resolve(`${stdout}${stderr ? `\n[stderr]\n${stderr}` : ""}`.trim());
+        });
+      });
+      log(`Command finished (${output.length} chars)`);
+      return {
+        success: true,
+        command,
+        output: output.slice(0, 4000),
+        summary: `### 🖥️ Command: \`${command}\`\n\n\`\`\`\n${output.slice(0, 1500) || "(no output)"}\n\`\`\``,
+      };
+    }
+
+    case "file_list": {
+      // Local folder listing — replaces the old xdg-open/ls shell approach
+      // that the Windows whitelist (correctly) rejected.
+      const FOLDERS: Record<string, string> = {
+        downloads: "Downloads",
+        desktop: "Desktop",
+        documents: "Documents",
+      };
+      const folderKey = String(step.params.folder ?? "Downloads").toLowerCase();
+      const folder = FOLDERS[folderKey] ?? "Downloads";
+      const ext = String(step.params.extension ?? "").replace(/[^a-z0-9]/gi, "").toLowerCase();
+      const dir = path.join(process.env.USERPROFILE || "C:\\Users\\dhruv", folder);
+      log(`Listing ${ext ? `*.${ext} ` : ""}files in ${folder}`);
+      let entries: fs.Dirent[] = [];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isFile());
+      } catch {
+        throw new Error(`file_list: could not read ${dir}`);
+      }
+      let files = entries.map((e) => ({
+        name: e.name,
+        mtime: fs.statSync(path.join(dir, e.name)).mtimeMs,
+      }));
+      if (ext) files = files.filter((f) => f.name.toLowerCase().endsWith(`.${ext}`));
+      files.sort((a, b) => b.mtime - a.mtime);
+      const top = files.slice(0, 8);
+      if (top.length === 0) throw new Error(`file_list: no ${ext ? `.${ext} ` : ""}files found in ${folder}`);
+      const newest = top[0];
+      const ageMin = Math.max(1, Math.round((Date.now() - newest.mtime) / 60000));
+      const ageStr = ageMin < 90 ? `${ageMin} min ago` : `${Math.round(ageMin / 60)} h ago`;
+      const listing = top.map((f, i) => `${i + 1}. ${f.name}`).join("\n");
+      log(`Newest: "${newest.name}" (${ageStr})`);
+      return {
+        folder,
+        name: newest.name,
+        count: files.length,
+        files: top.map((f) => f.name),
+        path: path.join(dir, newest.name),
+        summary: `### 📁 ${folder} — newest ${ext ? `.${ext}` : "file"}\n\n**Newest:** ${newest.name} (${ageStr})\n\n${listing}`,
+      };
+    }
+
+    case "file_open": {
+      // Open a local file with its default Windows app. Source: explicit
+      // name+folder, or a from:<fileListStepId> reference (its resolved
+      // params carry folder/extension; its result carries the newest path).
+      const FOLDERS: Record<string, string> = {
+        downloads: "Downloads",
+        desktop: "Desktop",
+        documents: "Documents",
+      };
+      let filePath = String(step.params.path ?? "");
+      const fromSpec = String(step.params.from ?? "");
+      if (!filePath && fromSpec && path.isAbsolute(fromSpec)) filePath = fromSpec;
+      if (!filePath) {
+        const folderKey = String(step.params.folder ?? "Downloads").toLowerCase();
+        const folder = FOLDERS[folderKey] ?? "Downloads";
+        const dir = path.join(process.env.USERPROFILE || "C:\\Users\\dhruv", folder);
+        let name = String(step.params.name ?? "").trim();
+        if (!name) {
+          // No explicit name: pick the newest file (same logic as file_list).
+          const ext = String(step.params.extension ?? "").replace(/[^a-z0-9]/gi, "").toLowerCase();
+          const files = fs.readdirSync(dir, { withFileTypes: true })
+            .filter((e) => e.isFile() && (!ext || e.name.toLowerCase().endsWith(`.${ext}`)))
+            .map((e) => ({ name: e.name, mtime: fs.statSync(path.join(dir, e.name)).mtimeMs }))
+            .sort((a, b) => b.mtime - a.mtime);
+          if (files.length === 0) throw new Error(`file_open: no files found in ${folder}`);
+          name = files[0].name;
+        }
+        filePath = path.join(dir, name);
+      }
+      if (!filePath || !fs.existsSync(filePath)) throw new Error(`file_open: file not found: ${filePath}`);
+      const base = path.basename(filePath);
+      log(`Opening "${base}" with its default app`);
+      // Detached start so the mission doesn't stall waiting for the app to close.
+      await new Promise<void>((resolve) => {
+        const p = spawn("cmd.exe", ["/c", "start", "", filePath], { windowsHide: true, detached: true, stdio: "ignore" });
+        p.on("close", () => resolve());
+        p.on("error", () => resolve());
+        setTimeout(resolve, 5000);
+      });
+      await new Promise((r) => setTimeout(r, 2500)); // let the app paint
+      return {
+        success: true,
+        file: base,
+        path: filePath,
+        summary: `### 📂 Opened: \`${base}\`\n\nOpened with its default Windows app.`,
+      };
+    }
+
+    case "vision_inspect": {
+      const url = String(step.params.url ?? "").trim();
+      const question = String(step.params.question ?? "Describe what you see. Is everything working as expected?").trim();
+      let imageData = "";
+      let source = "";
+      if (url && url.startsWith("http")) {
+        source = url;
+        const { createAgentSession } = await import("@/lib/browser/engine");
+        const session = await createAgentSession();
+        try {
+          await session.goto(url);
+          await session.page.waitForTimeout(1500);
+          imageData = (await session.page.screenshot({ type: "png" })).toString("base64");
+        } finally {
+          await session.close();
+        }
+      } else {
+        source = "your screen";
+        const out = path.join(process.cwd(), "scratch", `vision_${Date.now()}.png`);
+        await new Promise<void>((resolve) => {
+          const p = spawn(
+            "powershell.exe",
+            [
+              "-NoProfile", "-NoLogo", "-Command",
+              "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $b=[System.Windows.Forms.SystemInformation]::VirtualScreen; $bmp=New-Object System.Drawing.Bitmap($b.Width,$b.Height); $g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.X,$b.Y,0,0,$b.Size); $bmp.Save('" + out + "',[System.Drawing.Imaging.ImageFormat]::Png)",
+            ],
+            { windowsHide: true }
+          );
+          p.on("close", () => resolve());
+          p.on("error", () => resolve());
+          setTimeout(() => resolve(), 15_000);
+        });
+        try {
+          imageData = fs.readFileSync(out).toString("base64");
+          fs.unlinkSync(out);
+        } catch {
+          // capture failed — handled below
+        }
+      }
+      if (!imageData) throw new Error("vision_inspect: could not capture an image");
+
+      log(`Looking at ${source}: "${question.slice(0, 60)}"`);
+      const VISION_PROMPT = `You are JARVIS inspecting ${source}. Answer concisely (max 6 bullets): ${question}`;
+      let analysis = "";
+      // Provider 1: Gemini (if a key exists and quota allows).
+      const geminiKey = process.env.GEMINI_API_KEY;
+      if (geminiKey && !analysis) {
+        try {
+          const res = await fetchWithTimeout(
+            `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_PLANNER_MODEL}:generateContent?key=${geminiKey}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                contents: [
+                  {
+                    parts: [
+                      { text: VISION_PROMPT },
+                      { inline_data: { mime_type: "image/png", data: imageData } },
+                    ],
+                  },
+                ],
+              }),
+            },
+            45_000
+          );
+          if (res.ok) {
+            const data = await res.json();
+            analysis = String(data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "").trim();
+          } else {
+            log(`Gemini vision unavailable (HTTP ${res.status}) — trying OpenRouter vision`);
+          }
+        } catch {
+          // fall through to OpenRouter
+        }
+      }
+      // Provider 2: OpenRouter free vision models (verified live slugs).
+      const openrouterKey = process.env.OPENROUTER_API_KEY;
+      if (!analysis && openrouterKey) {
+        const VISION_MODELS = ["inclusionai/ling-3.0-flash-vl:free", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"];
+        for (const model of VISION_MODELS) {
+          try {
+            const res = await fetchWithTimeout(
+              "https://openrouter.ai/api/v1/chat/completions",
+              {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${openrouterKey}`,
+                  "Content-Type": "application/json",
+                  "HTTP-Referer": "http://localhost:3000",
+                  "X-Title": "JARVIS AI Assistant",
+                },
+                body: JSON.stringify({
+                  model,
+                  max_tokens: 600,
+                  messages: [
+                    {
+                      role: "user",
+                      content: [
+                        { type: "text", text: VISION_PROMPT },
+                        { type: "image_url", image_url: { url: `data:image/png;base64,${imageData}` } },
+                      ],
+                    },
+                  ],
+                }),
+              },
+              60_000
+            );
+            if (res.ok) {
+              const data = await res.json();
+              const text = String(data?.choices?.[0]?.message?.content ?? "").trim();
+              if (text) {
+                analysis = text;
+                log(`Vision analysis via ${model.split("/")[1]}`);
+                break;
+              }
+            }
+          } catch {
+            // try the next vision model
+          }
+        }
+      }
+
+      if (!analysis) {
+        // Vision model unavailable — read whatever text is on screen via the
+        // proven Windows OCR pipeline (DPI-aware, all WinRT via Await helper).
+        log("AI vision unavailable — reading the screen text via OCR instead");
+        const script = [
+          "Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class DPICV { [DllImport(\"user32.dll\")] public static extern bool SetProcessDPIAware(); }'",
+          "[DPICV]::SetProcessDPIAware()",
+          "$ErrorActionPreference='SilentlyContinue'",
+          "[void][Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]",
+          "$ocr=[Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()",
+          "Add-Type -AssemblyName System.Windows.Forms,System.Drawing",
+          "$vs=[System.Windows.Forms.SystemInformation]::VirtualScreen",
+          "$bmp=New-Object System.Drawing.Bitmap($vs.Width,$vs.Height)",
+          "$g=[System.Drawing.Graphics]::FromImage($bmp)",
+          "$g.CopyFromScreen($vs.X,$vs.Y,0,0,$vs.Size)",
+          "$ms=New-Object System.IO.MemoryStream",
+          "$bmp.Save($ms,[System.Drawing.Imaging.ImageFormat]::Png)",
+          "$ms.Position=0",
+          "Add-Type -AssemblyName System.Runtime.WindowsRuntime",
+          "$asTask=([System.WindowsRuntimeSystemExtensions].GetMethods()|?{$_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1'})[0]",
+          "function Await($o,$t){ $net=$asTask.MakeGenericMethod($t).Invoke($null,@($o)); $net.Wait(-1)|Out-Null; $net.Result }",
+          "[void][Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType = WindowsRuntime]",
+          "$dec=Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($ms.AsRandomAccessStream())) ([Windows.Graphics.Imaging.BitmapDecoder])",
+          "$res=Await ($dec.GetBitmapAsync([Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8,[Windows.Graphics.Imaging.BitmapAlphaMode]::Premultiplied)) ([Windows.Graphics.Imaging.BitmapFrame])",
+          "$soft=Windows.Graphics.Imaging.SoftwareBitmap::CreateCopyFromBuffer($res.PixelBuffer,[Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8,$res.PixelWidth,$res.PixelHeight)",
+          "if ($ocr) { $ocrRes=Await ($ocr.RecognizeAsync($soft)) ([Windows.Media.Ocr.OcrResult]); foreach($l in $ocrRes.Lines){ $l.Text } } else { 'OCR-UNAVAILABLE' }",
+        ].join("\n");
+        const dump = await new Promise<string>((resolve) => {
+          let buf = "";
+          const p = spawn("powershell.exe", ["-NoProfile", "-NoLogo", "-STA", "-Command", script], { windowsHide: true });
+          p.stdout.on("data", (d) => (buf += String(d)));
+          p.on("error", () => resolve(""));
+          p.on("close", () => resolve(buf));
+          setTimeout(() => {
+            try { p.kill(); } catch { /* already dead */ }
+            resolve(buf);
+          }, 30_000);
+        });
+        const lines = dump.split(/\r?\n/).map((s) => s.trim()).filter((s) => s.length > 2 && s !== "OCR-UNAVAILABLE").slice(0, 60);
+        analysis = lines.length
+          ? `**OCR of ${source}** (AI vision unavailable):\n\n${lines.map((l) => `- ${l}`).join("\n")}`
+          : "I could not read anything from the screen (AI vision unavailable and OCR found no text).";
+      }
+
+      log(`Vision check done — ${analysis.slice(0, 70)}`);
+      return {
+        success: true,
+        source,
+        question,
+        analysis: analysis.slice(0, 3000),
+        summary: `### 👁️ Vision check — ${source}\n\n${analysis.slice(0, 2000)}`,
+      };
+    }
+
     case "notes_create": {
       const title = String(step.params.title ?? `Note ${new Date().toLocaleDateString()}`).trim();
       const rawContent = step.params.content;
+      // Empty/missing content: backfill from dependency outputs (a planner
+      // once passed nothing, the API 400'd, the disk fallback wrote a bare
+      // timestamp — and the step still reported success).
+      const depText = (() => {
+        for (const r of [...deps.values()].reverse()) {
+          const out = r.result as Record<string, unknown> | undefined;
+          const t = String(out?.summary ?? out?.content ?? out?.markdown ?? (typeof r.result === "string" ? r.result : ""));
+          if (t.trim()) return t;
+        }
+        return "";
+      })();
       let textContent = "";
-      if (typeof rawContent === "object" && rawContent !== null) {
+      if (rawContent == null || (typeof rawContent === "string" && !rawContent.trim())) {
+        textContent = depText;
+      } else if (typeof rawContent === "object" && rawContent !== null) {
         const rc = rawContent as Record<string, unknown>;
         if (Array.isArray(rc.ingredients)) {
           textContent = `## ${title}\n\n` + rc.ingredients.map((item: any) => `- [ ] ${typeof item === "string" ? item : (item.name || item.item || JSON.stringify(item))}`).join("\n");
         } else if (Array.isArray(rc.results)) {
           textContent = (rc.results as FallbackSearchHit[]).map((h) => `- **${h.title}**: ${h.url}\n  ${h.description}`).join("\n");
         } else {
-          textContent = JSON.stringify(rawContent, null, 2);
+          // Universal: any extracted array (specs/points/prices/features) → bullets.
+          const genericKey = ["extracted", "points", "specs", "prices", "features", "items", "dates"].find((k) => Array.isArray(rc[k]) && rc[k].length > 0);
+          if (genericKey) {
+            textContent = `## ${title}\n\n` + (rc[genericKey] as unknown[]).map((i) => `- ${typeof i === "string" ? i : JSON.stringify(i)}`).join("\n");
+          } else {
+            textContent = JSON.stringify(rawContent, null, 2);
+          }
         }
       } else {
         textContent = String(rawContent ?? "");
+      }
+      if (!textContent.trim()) {
+        textContent = depText;
+      }
+      if (!textContent.trim()) {
+        throw new Error("notes_create: nothing to save (content empty and no dependency produced text)");
       }
       log(`Saving note to Jarvis: "${title}"`);
       const res = await fetchWithTimeout(`${INTERNAL_BASE}/api/notes`, {
@@ -1312,11 +2047,29 @@ async function runStep(step: AgentStep, deps: Map<string, StepResult>, job: Agen
       let filename = String(step.params.filename ?? "jarvis_output.txt").trim();
       if (!filename.includes(".")) filename += ".txt";
       const rawContent = step.params.content;
+      // Same empty-content guard as notes_create — never write a bare
+      // timestamp file and call it a success.
+      const depText = (() => {
+        for (const r of [...deps.values()].reverse()) {
+          const out = r.result as Record<string, unknown> | undefined;
+          const t = String(out?.summary ?? out?.content ?? out?.markdown ?? (typeof r.result === "string" ? r.result : ""));
+          if (t.trim()) return t;
+        }
+        return "";
+      })();
       let textContent = "";
-      if (typeof rawContent === "object" && rawContent !== null) {
+      if (rawContent == null || (typeof rawContent === "string" && !rawContent.trim())) {
+        textContent = depText;
+      } else if (typeof rawContent === "object" && rawContent !== null) {
         textContent = JSON.stringify(rawContent, null, 2);
       } else {
         textContent = String(rawContent ?? "");
+      }
+      if (!textContent.trim()) {
+        textContent = depText;
+      }
+      if (!textContent.trim()) {
+        throw new Error("file_save: nothing to save (content empty and no dependency produced text)");
       }
 
       log(`Saving file to disk: "${filename}"`);
@@ -1433,6 +2186,65 @@ function tryJson(text: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Universal no-LLM extractor: pull the most information-dense lines
+ * (bullets, definition lines, specs, prices, dates) out of ANY scraped
+ * page markdown. Used when the LLM tier is unavailable so extraction
+ * missions still produce real data instead of failing.
+ */
+function heuristicKeyLines(markdown: string): string[] {
+  if (!markdown) return [];
+  const JUNK = /https?:|\]\(|^\s*\||^\s*#|\bcookie|\bsubscribe|\bsign in|\blog in|\bmenu\b|\bshare this|\bfollow us|\ball rights reserved|\badvertisement\b|\bupdated\b.{0,20}\b(ago|am|pm|\d{4})|\bposted\b|\bnotable mentions\b|\bwe'?ve (removed|replaced|added)\b|\bprivacy policy|\bterms of (service|use)|\bnewsletter\b|\bdeal\b.{0,10}\bends\b/i;
+  const DENSE = /\b(price|rs|inr|\$|€|£|gb|tb|ram|battery|processor|screen|display|weight|dimension|released|launch|rating|review|warranty|model|core|fps|hz|mah|watt|inch|km|mp|specs?)\b|\d{2,}|\d+\s*(gb|tb|mah|inch|hz|w|kg|g|ml)/i;
+  const scored: Array<{ line: string; score: number }> = [];
+  const seen = new Set<string>();
+  for (const raw of markdown.split(/\n/)) {
+    let line = raw.replace(/^\s*[-*•+]\s*/, "").replace(/\*+/g, "").trim();
+    if (line.length < 15 || line.length > 220) continue;
+    if (JUNK.test(line)) continue;
+    let score = 0;
+    if (/^\s*[-*•+]/.test(raw)) score += 2; // bullets carry structure
+    if (DENSE.test(line)) score += 2; // specs/prices/numbers = data
+    if (/[:—–-]/.test(line)) score += 1; // definition-style lines
+    const words = line.split(/\s+/).length;
+    if (words >= 6 && words <= 40) score += 1;
+    if (score >= 3) {
+      const key = line.toLowerCase().slice(0, 60);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      scored.push({ line, score });
+    }
+  }
+  return scored.sort((a, b) => b.score - a.score).slice(0, 15).map((s) => s.line);
+}
+
+/**
+ * Pull ingredient-style lines straight out of scraped recipe markdown —
+ * the no-LLM fallback so ingredient extraction still works when every
+ * LLM provider is rate-limited.
+ */
+function heuristicIngredients(markdown: string): string[] {
+  if (!markdown) return [];
+  const UNITS = /\b(cup|cups|tbsp|tablespoon|tablespoons|tsp|teaspoon|teaspoons|g|gram|grams|kg|ml|litre|liter|l|oz|ounce|ounces|lb|lbs|pound|pounds|clove|cloves|pinch|sprig|sprigs|can|cans|pack|packs|slice|slices|handful|stick|sticks|bunch)\b/i;
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of markdown.split(/\n/)) {
+    const line = raw.replace(/^\s*[-*•]\s*/, "").replace(/\*+/g, "").replace(/\s*\([^)]*\)\s*/g, " ").trim();
+    if (line.length < 6 || line.length > 90) continue;
+    // Ingredient-ish: starts with a number OR contains a quantity unit,
+    // mostly letters, no URL/markup junk, no recipe-prose verbs.
+    const startsNum = /^\d([\d/.,])?\s/.test(line);
+    if (!startsNum && !UNITS.test(line)) continue;
+    if (/https?:|\]\(|\||#|\b(preheat|instructions|directions|method|steps?|minutes|bake|stir|heat|serve|whisk|season with salt)\b/i.test(line)) continue;
+    const key = line.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(line);
+    if (out.length >= 15) break;
+  }
+  return out;
 }
 
 /* ----------------------------- MISSION REPORT ----------------------------- */

@@ -6,6 +6,7 @@ import { Torus } from "@react-three/drei";
 import * as THREE from "three";
 import { useJarvisStore } from "@/store/jarvis.store";
 import { getThemeConfig, ThemeConfig } from "@/lib/theme";
+import { useSmoothedAudio } from "@/hooks/useSmoothedAudio";
 
 interface RingProps {
   radius: number;
@@ -31,6 +32,7 @@ function EnergyRing({
   reactorHue,
 }: RingProps) {
   const ringRef = useRef<THREE.Mesh>(null);
+  const audioRef = useSmoothedAudio();
 
   useFrame((_, delta) => {
     if (!ringRef.current) return;
@@ -38,10 +40,19 @@ function EnergyRing({
     const baseSpeed = state === "sleep" ? rotationSpeed * 0.1 : rotationSpeed;
     // Tier 3A: ring speed scales with reactorLoad (0.5..1.5x) and existing state multipliers.
     const loadMul = 0.5 + (typeof reactorLoad === "number" ? reactorLoad : 0.4) * 1.0;
+    // Music: beats drive ring speed — each ring at a slightly different rate for organic feel
+    const audio = audioRef.current;
+    // Beat + energy drive ring speed dramatically
+    const beatBoost = 1 + audio.energy * 2.0 + audio.beat * (1.5 + index * 0.2);
     const speed = state === "thinking" ? baseSpeed * 3 * loadMul : state === "listening" ? baseSpeed * 1.5 * loadMul : baseSpeed * loadMul;
-    ringRef.current.rotation.x += rotationAxis[0] * speed * speedMultiplier * delta;
-    ringRef.current.rotation.y += rotationAxis[1] * speed * speedMultiplier * delta;
-    ringRef.current.rotation.z += rotationAxis[2] * speed * speedMultiplier * delta;
+    const finalSpeed = speed * beatBoost;
+    ringRef.current.rotation.x += rotationAxis[0] * finalSpeed * speedMultiplier * delta;
+    ringRef.current.rotation.y += rotationAxis[1] * finalSpeed * speedMultiplier * delta;
+    ringRef.current.rotation.z += rotationAxis[2] * finalSpeed * speedMultiplier * delta;
+    // Beat-reactive glow: emissive intensity pulses dramatically with music
+    const mat = ringRef.current.material as THREE.MeshStandardMaterial;
+    const baseEmissive = state === "sleep" ? 0.15 : 0.6 * themeConfig.typography.intensity;
+    mat.emissiveIntensity = baseEmissive * (1 + audio.energy * 3.0 + audio.beat * 3.5);
   });
 
   const material = useMemo(() => {

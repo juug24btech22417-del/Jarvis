@@ -5,12 +5,14 @@ import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { useJarvisStore } from "@/store/jarvis.store";
 import { getThemeConfig, ThemeConfig } from "@/lib/theme";
+import { useSmoothedAudio } from "@/hooks/useSmoothedAudio";
 
 const PARTICLE_COUNT = 800;
 
 export default function ReactorParticles() {
   const pointsRef = useRef<THREE.Points>(null);
   const { state, voiceLevel, theme } = useJarvisStore();
+  const audioRef = useSmoothedAudio();
   const [themeConfig, setThemeConfig] = useState<ThemeConfig>(getThemeConfig(theme));
   const timeRef = useRef(0);
 
@@ -113,8 +115,9 @@ export default function ReactorParticles() {
     timeRef.current += delta * themeConfig.effects.scanSpeed;
     const positions = pointsRef.current.geometry.attributes.position.array as Float32Array;
 
-    const drift = state === "sleep" ? 0.2 : 1;
-    const expansion = voiceLevel * 0.5;
+    const audio = audioRef.current;
+    const drift = state === "sleep" ? 0.2 : 1 + audio.energy * 1.5 + audio.beat * 1.2;
+    const expansion = audio.energy * 1.2 + audio.beat * 0.5 + voiceLevel * 0.2; // dramatic blend
     const time = timeRef.current;
 
     for (let i = 0; i < PARTICLE_COUNT; i++) {
@@ -164,6 +167,19 @@ export default function ReactorParticles() {
     return state === "sleep" ? baseOpacity * 0.3 : baseOpacity;
   }, [themeConfig, state, isBatman]);
 
+  // Beat-reactive point size — particles grow on beats
+  const baseSize = isQuantum ? 0.045 : isBatman ? 0.025 : 0.035;
+  const matRef = useRef<THREE.PointsMaterial>(null);
+
+  // Update point size per-frame for beat pulsing
+  useFrame(() => {
+    if (!matRef.current) return;
+    const audio = audioRef.current;
+    const sizeBoost = 1 + audio.energy * 0.6 + audio.beat * 0.4;
+    matRef.current.size = baseSize * sizeBoost;
+    matRef.current.opacity = opacity * (1 + audio.energy * 0.3);
+  });
+
   return (
     <points ref={pointsRef}>
       <bufferGeometry>
@@ -172,7 +188,8 @@ export default function ReactorParticles() {
         <bufferAttribute attach="attributes-size" count={PARTICLE_COUNT} array={sizes} itemSize={1} />
       </bufferGeometry>
       <pointsMaterial
-        size={isQuantum ? 0.045 : isBatman ? 0.025 : 0.035}
+        ref={matRef}
+        size={baseSize}
         vertexColors
         transparent
         opacity={opacity}

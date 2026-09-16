@@ -12,6 +12,7 @@
 //      didn't read in the preview.
 
 import { runLlmChain } from "@/services/LlmChain";
+import { USER_PROFILE, emailSignature, identityPromptLine } from "@/lib/userProfile";
 
 export type EmailTone =
   | "professional"
@@ -77,6 +78,8 @@ export async function composeEmail(input: ComposeInput): Promise<ComposeResult> 
 
   const prompt = `Write an email in a **${input.tone}** tone. ${TONE_GUIDANCE[input.tone]}
 
+${identityPromptLine()}
+
 Recipient: ${input.toEmail}${input.toName ? ` (${input.toName})` : ""}
 Topic: ${input.about}${hint}
 
@@ -118,10 +121,29 @@ Do NOT use Markdown headings, bullet points, or code fences. Plain text only.`;
   // echoing the raw `about` text into the body. Produce a usable
   // email skeleton with the topic clearly framed, even when the LLM
   // is down. The user can still cancel and re-send if they want
-  // something richer.
+  // something richer. Signed with the user's real identity.
   const subject = `Re: ${input.about.slice(0, 60)}`.trim();
-  const body = `${greeting}\n\nI wanted to follow up regarding ${input.about}.\n\nPlease let me know your thoughts when you have a moment.\n\nBest regards`;
+  const body = `${greeting}\n\nI wanted to follow up regarding ${input.about}.\n\nPlease let me know your thoughts when you have a moment.\n\n${emailSignature()}`;
   return { subject, body, tone: input.tone };
+}
+
+/**
+ * Guarantee the composed body carries the user's identity: if the LLM
+ * signed off with a placeholder / wrong / missing name, append the real
+ * signature block. Also strips any phone-number-like digits the model
+ * invented.
+ */
+export function applyIdentity(subject: string, body: string): { subject: string; body: string } {
+  let fixed = body
+    .replace(/^\s*\[?(?:your|my)?\s*name\]?\s*$/gim, "")
+    .replace(/\b\d{10}\b/g, USER_PROFILE.phone === "9606571200" ? USER_PROFILE.phone : "");
+  const hasName = new RegExp(USER_PROFILE.name.split(/\s+/)[0], "i").test(fixed);
+  if (!hasName) {
+    fixed = `${fixed.replace(/\s+$/, "")}\n\n${emailSignature()}`;
+  } else if (!fixed.includes(USER_PROFILE.phone)) {
+    fixed = `${fixed.replace(/\s+$/, "")}\nContact: ${USER_PROFILE.phone}`;
+  }
+  return { subject, body: fixed.trim() };
 }
 
 function parseComposed(text: string, fallbackGreeting: string): { subject: string; body: string } | null {
