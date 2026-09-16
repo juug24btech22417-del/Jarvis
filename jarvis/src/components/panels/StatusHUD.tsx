@@ -9,6 +9,7 @@ import {
   VolumeX,
   Eye,
   Scan,
+  Clock,
 } from "lucide-react";
 import { useJarvisStore } from "@/store/jarvis.store";
 
@@ -364,6 +365,16 @@ export default function StatusHUD() {
               </span>
             )}
           </div>
+
+          {/* System uptime */}
+          {pcStats?.uptime != null && (
+            <div className="flex items-center gap-1.5" title="System uptime">
+              <Clock className="w-4 h-4 text-text-secondary" />
+              <span className="font-rajdhani text-xs font-semibold text-white/95 tabular-nums">
+                {formatUptime(pcStats.uptime)}
+              </span>
+            </div>
+          )}
 
           {/* Battery */}
           {battery !== null && (

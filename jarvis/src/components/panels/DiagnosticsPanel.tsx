@@ -337,19 +337,17 @@ export default function DiagnosticsPanel() {
                   <div className="font-rajdhani text-[9px] text-text-secondary/50 tracking-wider">
                     {time.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }).toUpperCase()}
                   </div>
-                </div>
-
-                {/* ─── RING GAUGES ─── */}
+                </div>                {/* ─── RING GAUGES ─── */}
                 <div className="flex justify-around py-1">
                   <RingGauge
                     value={pcStats?.cpuUsage ?? 0}
-                    color={getHeatColor(pcStats?.cpuUsage ?? null)}
+                    color="#9BD4FF"
                     label="CPU"
                     sub="LOAD"
                   />
                   <RingGauge
                     value={pcStats?.memoryUsage ?? 0}
-                    color={getHeatColor(pcStats?.memoryUsage ?? null)}
+                    color="#9BD4FF"
                     label="RAM"
                     sub="USAGE"
                   />
@@ -389,10 +387,18 @@ export default function DiagnosticsPanel() {
                       />
                     </div>
                     <span className="font-orbitron text-[10px]" style={{ color: getHeatColor(pcStats?.temperature ?? null) }}>
-                      {pcStats?.temperature ?? 0}°
+                      {pcStats?.temperature != null ? `${pcStats.temperature}°` : "—"}
                     </span>
                   </div>
-                  <Sparkline data={tempHistory} color={getHeatColor(pcStats?.temperature ?? null)} height={20} maxVal={100} />
+                  {pcStats?.temperature != null ? (
+                    <Sparkline data={tempHistory} color={getHeatColor(pcStats?.temperature ?? null)} height={20} maxVal={100} />
+                  ) : (
+                    <div className="h-[20px] flex items-center justify-center">
+                      <span className="font-rajdhani text-[8px] text-text-secondary/30 tracking-wider">
+                        THERMAL SENSOR UNAVAILABLE
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 {/* ─── SYSTEM STATE ─── */}

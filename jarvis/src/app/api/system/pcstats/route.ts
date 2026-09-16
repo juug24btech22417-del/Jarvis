@@ -12,6 +12,7 @@ interface CachedMetric<T> {
 }
 
 let cachedDisks: CachedMetric<Array<{ caption: string; size: number; free: number; usage: number }>> | null = null;
+let cachedTemp: CachedMetric<number | null> | null = null;
 let cachedBattery: CachedMetric<number | null> | null = null;
 const CACHE_TTL_MS = 25000; // 25 seconds
 
@@ -147,6 +148,8 @@ async function getPCStats() {
     getBattery().catch(() => null),
   ]);
 
+  const temperature = await getTemperature().catch(() => null);
+
   return {
     cpuUsage,
     memoryTotal: totalMem,
@@ -154,9 +157,46 @@ async function getPCStats() {
     memoryUsage: memUsage,
     uptime: uptimeHours,
     battery,
-    temperature: null, // MSAcpi_ThermalZoneTemperature requires elevation on Windows
+    temperature,
     disks,
   };
+}
+
+/**
+ * Thermal zone temperature — no admin elevation needed.
+ * MSAcpi_ThermalZoneTemperature is access-denied unelevated on Windows,
+ * but the thermal zone performance counter is readable:
+ * Win32_PerfFormattedData_Counters_ThermalZoneInformation.Temperature
+ *
+ * Windows reports this counter inconsistently across builds/machines:
+ *   - plain Kelvin      (e.g. 301 → 27.9 °C) — most common unelevated
+ *   - tenths of Kelvin  (e.g. 3010 → 27.9 °C)
+ * Detect the scale and sanity-clamp to a plausible machine range.
+ * Cached 25s — thermals move slowly.
+ */
+async function getTemperature(): Promise<number | null> {
+  if (cachedTemp && Date.now() - cachedTemp.timestamp < CACHE_TTL_MS) {
+    return cachedTemp.data;
+  }
+  try {
+    const { stdout } = await execAsync(
+      `powershell -NoProfile -NonInteractive -Command "(Get-CimInstance -ClassName Win32_PerfFormattedData_Counters_ThermalZoneInformation -ErrorAction SilentlyContinue | Where-Object { $_.Temperature -gt 0 } | Select-Object -First 1).Temperature"`,
+      { timeout: 5000 }
+    );
+    const raw = parseFloat(stdout.trim());
+    let celsius: number | null = null;
+    if (Number.isFinite(raw) && raw > 0) {
+      if (raw >= 1000) celsius = raw / 10 - 273.15; // tenths of Kelvin
+      else if (raw >= 150) celsius = raw - 273.15; // plain Kelvin
+    }
+    // Plausible operating range for a machine's thermal zone.
+    if (celsius === null || celsius < 0 || celsius > 110) celsius = null;
+    cachedTemp = { data: celsius === null ? null : Math.round(celsius), timestamp: Date.now() };
+    return cachedTemp.data;
+  } catch {
+    cachedTemp = { data: null, timestamp: Date.now() };
+    return null;
+  }
 }
 
 export async function GET() {
