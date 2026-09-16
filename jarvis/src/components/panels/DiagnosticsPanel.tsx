@@ -294,65 +294,43 @@ export default function DiagnosticsPanel() {
       initial={{ x: 300, opacity: 0 }}
       animate={{ x: 0, opacity: 1 }}
       transition={{ type: "spring", damping: 25, stiffness: 200, delay: 4.5 }}
-      className="fixed top-14 right-0 bottom-10 z-[35] w-[300px] flex flex-col"
-      style={{ pointerEvents: "auto" }}
+      className="fixed top-14 right-5 bottom-10 z-[35] w-[280px] flex flex-col pointer-events-none"
     >
-      {/* Outer glow border */}
-      <div className="absolute inset-0 rounded-l-xl border border-cyan-500/20 bg-[#030a14]/92 backdrop-blur-xl overflow-hidden">
-        {/* Animated corner brackets */}
-        <div className="absolute top-0 left-0 w-4 h-4 border-t-2 border-l-2 border-cyan-400/60 pointer-events-none" />
-        <div className="absolute bottom-0 left-0 w-4 h-4 border-b-2 border-l-2 border-cyan-400/60 pointer-events-none" />
+      {/* Floating minimal controls */}
+      <div className="absolute -top-7 right-0 flex items-center gap-1 pointer-events-auto">
+        <span className="font-orbitron text-[8px] text-cyan-400/50 tracking-[0.2em] mr-auto">DIAGNOSTICS</span>
+        <button
+          onClick={() => setExpanded(!expanded)}
+          title={expanded ? "Collapse" : "Expand"}
+          aria-label={expanded ? "Collapse diagnostics" : "Expand diagnostics"}
+          className="text-text-secondary/40 hover:text-cyan-400 transition-colors"
+        >
+          <ChevronRight className={`w-3 h-3 transition-transform ${expanded ? "rotate-90" : ""}`} />
+        </button>
+        <button
+          onClick={closePanel}
+          title="Close diagnostics console"
+          aria-label="Close diagnostics console"
+          className="text-text-secondary/40 hover:text-accent-red transition-colors"
+        >
+          <X className="w-3 h-3" />
+        </button>
+      </div>
 
-        {/* Scanline sweep */}
-        <div className="absolute inset-0 pointer-events-none overflow-hidden">
-          <div
-            className="absolute left-0 right-0 h-px bg-gradient-to-r from-transparent via-cyan-400/30 to-transparent"
-            style={{
-              animation: "scanlineSweep 4s ease-in-out infinite",
-            }}
-          />
-        </div>
-
-        {/* Top label */}
-        <div className="flex items-center justify-between px-3 py-2 border-b border-cyan-500/15">
-          <div className="flex items-center gap-2">
-            <Activity className="w-3 h-3 text-cyan-400 animate-pulse" />
-            <span className="font-orbitron text-[9px] text-cyan-400/80 tracking-[0.15em]">DIAGNOSTICS</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <button
-              onClick={() => setExpanded(!expanded)}
-              title={expanded ? "Collapse" : "Expand"}
-              aria-label={expanded ? "Collapse diagnostics" : "Expand diagnostics"}
-              className="text-text-secondary/40 hover:text-cyan-400 transition-colors"
-            >
-              <ChevronRight className={`w-3 h-3 transition-transform ${expanded ? "rotate-90" : ""}`} />
-            </button>
-            <button
-              onClick={closePanel}
-              title="Close diagnostics console"
-              aria-label="Close diagnostics console"
-              className="text-text-secondary/40 hover:text-accent-red transition-colors"
-            >
-              <X className="w-3 h-3" />
-            </button>
-          </div>
-        </div>
-
-        <AnimatePresence>
-          {expanded && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.2 }}
-              className="flex-1 min-h-0 overflow-hidden"
-            >
-            <div className="h-full overflow-y-auto overflow-x-hidden custom-scrollbar" style={{ maxHeight: "calc(100vh - 80px)" }}>
-              <div className="p-2.5 space-y-2.5">
+      <AnimatePresence>
+        {expanded && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="flex-1 min-h-0 overflow-hidden"
+          >
+            <div className="h-full overflow-y-auto overflow-x-hidden custom-scrollbar no-scrollbar-mask" style={{ maxHeight: "calc(100vh - 80px)" }}>
+              <div className="p-1 space-y-4">
                 {/* ─── CLOCK ─── */}
-                <div className="text-center py-1.5 rounded-lg bg-cyan-500/5 border border-cyan-500/10">
-                  <div className="font-orbitron text-lg text-reactor-core tracking-widest drop-shadow-[0_0_6px_rgba(0,243,255,0.3)]">
+                <div className="text-center py-1">
+                  <div className="font-orbitron text-lg text-white/95 tracking-widest drop-shadow-[0_0_6px_rgba(255,255,255,0.25)]">
                     {time.toLocaleTimeString("en-US", { hour12: false })}
                   </div>
                   <div className="font-rajdhani text-[9px] text-text-secondary/50 tracking-wider">
@@ -377,25 +355,25 @@ export default function DiagnosticsPanel() {
                 </div>
 
                 {/* ─── CPU SPARKLINE ─── */}
-                <div className="p-2 rounded-lg bg-black/30 border border-cyan-500/10">
+                <div>
                   <div className="flex items-center justify-between mb-1">
                     <span className="font-orbitron text-[8px] text-cyan-400/60 tracking-wider">CPU TREND</span>
-                    <span className="font-orbitron text-[9px] text-cyan-400">{Math.round(pcStats?.cpuUsage ?? 0)}%</span>
+                    <span className="font-orbitron text-[9px] text-white/95">{Math.round(pcStats?.cpuUsage ?? 0)}%</span>
                   </div>
-                  <Sparkline data={cpuHistory} color="#00D4FF" height={28} />
+                  <Sparkline data={cpuHistory} color="#C4A5FF" height={28} />
                 </div>
 
                 {/* ─── RAM SPARKLINE ─── */}
-                <div className="p-2 rounded-lg bg-black/30 border border-cyan-500/10">
+                <div>
                   <div className="flex items-center justify-between mb-1">
                     <span className="font-orbitron text-[8px] text-cyan-400/60 tracking-wider">RAM TREND</span>
-                    <span className="font-orbitron text-[9px] text-cyan-400">{Math.round(pcStats?.memoryUsage ?? 0)}%</span>
+                    <span className="font-orbitron text-[9px] text-white/95">{Math.round(pcStats?.memoryUsage ?? 0)}%</span>
                   </div>
-                  <Sparkline data={ramHistory} color="#7DF9FF" height={28} />
+                  <Sparkline data={ramHistory} color="#C4A5FF" height={28} />
                 </div>
 
                 {/* ─── THERMALS ─── */}
-                <div className="p-2 rounded-lg bg-black/30 border border-cyan-500/10">
+                <div>
                   <div className="flex items-center justify-between mb-1">
                     <span className="font-orbitron text-[8px] text-cyan-400/60 tracking-wider">THERMALS</span>
                     <Thermometer className="w-3 h-3" style={{ color: getHeatColor(pcStats?.temperature ?? null) }} />
@@ -417,28 +395,28 @@ export default function DiagnosticsPanel() {
                 </div>
 
                 {/* ─── SYSTEM STATE ─── */}
-                <div className="p-2 rounded-lg bg-black/30 border border-cyan-500/10">
+                <div>
                   <div className="flex items-center justify-between mb-1.5">
                     <span className="font-orbitron text-[8px] text-cyan-400/60 tracking-wider">SYSTEM STATE</span>
                   </div>
                   <div className="grid grid-cols-2 gap-1.5">
-                    <div className="flex items-center gap-1.5 px-1.5 py-1 rounded bg-black/20">
+                    <div className="flex items-center gap-1.5">
                       <Radio className="w-2.5 h-2.5" style={{ color: sLabel.color }} />
                       <span className="font-rajdhani text-[9px]" style={{ color: sLabel.color }}>{sLabel.text}</span>
                     </div>
-                    <div className="flex items-center gap-1.5 px-1.5 py-1 rounded bg-black/20">
+                    <div className="flex items-center gap-1.5">
                       <Shield className="w-2.5 h-2.5" style={{ color: sentinelArmed ? "#00FF9D" : "#4A5568" }} />
                       <span className="font-rajdhani text-[9px]" style={{ color: sentinelArmed ? "#00FF9D" : "#4A5568" }}>
                         {sentinelArmed ? "ARMED" : "SAFE"}
                       </span>
                     </div>
-                    <div className="flex items-center gap-1.5 px-1.5 py-1 rounded bg-black/20">
+                    <div className="flex items-center gap-1.5">
                       <Eye className="w-2.5 h-2.5" style={{ color: biometricActive ? "#00FF9D" : "#4A5568" }} />
                       <span className="font-rajdhani text-[9px]" style={{ color: biometricActive ? "#00FF9D" : "#4A5568" }}>
                         BIO {biometricActive ? "ON" : "OFF"}
                       </span>
                     </div>
-                    <div className="flex items-center gap-1.5 px-1.5 py-1 rounded bg-black/20">
+                    <div className="flex items-center gap-1.5">
                       <Zap className="w-2.5 h-2.5" style={{ color: activeAlerts > 0 ? "#FF2D55" : "#4A5568" }} />
                       <span className="font-rajdhani text-[9px]" style={{ color: activeAlerts > 0 ? "#FF2D55" : "#4A5568" }}>
                         {activeAlerts} ALERT{activeAlerts !== 1 ? "S" : ""}
@@ -448,7 +426,7 @@ export default function DiagnosticsPanel() {
                 </div>
 
                 {/* ─── WEATHER ─── */}
-                <div className="p-2 rounded-lg bg-black/30 border border-cyan-500/10">
+                <div>
                   <div className="flex items-center justify-between mb-1">
                     <span className="font-orbitron text-[8px] text-cyan-400/60 tracking-wider">WEATHER</span>
                     {getWeatherIcon()}
@@ -462,7 +440,7 @@ export default function DiagnosticsPanel() {
                 </div>
 
                 {/* ─── TASKS ─── */}
-                <div className="p-2 rounded-lg bg-black/30 border border-cyan-500/10">
+                <div>
                   <div className="flex items-center justify-between mb-1">
                     <span className="font-orbitron text-[8px] text-cyan-400/60 tracking-wider">TASKS</span>
                     <Target className="w-3 h-3 text-cyan-400/50" />
@@ -503,7 +481,7 @@ export default function DiagnosticsPanel() {
                 </div>
 
                 {/* ─── AGENT ACTIVITY ─── */}
-                <div className="p-2 rounded-lg bg-black/30 border border-cyan-500/10">
+                <div>
                   <div className="flex items-center justify-between mb-1">
                     <span className="font-orbitron text-[8px] text-cyan-400/60 tracking-wider">LIVE FEED</span>
                     <BarChart3 className="w-3 h-3 text-cyan-400/50" />
@@ -533,7 +511,7 @@ export default function DiagnosticsPanel() {
 
                 {/* ─── DISKS ─── */}
                 {pcStats?.disks && pcStats.disks.length > 0 && (
-                  <div className="p-2 rounded-lg bg-black/30 border border-cyan-500/10">
+                  <div>
                     <div className="flex items-center justify-between mb-1">
                       <span className="font-orbitron text-[8px] text-cyan-400/60 tracking-wider">STORAGE</span>
                       <Layers className="w-3 h-3 text-cyan-400/50" />
@@ -571,7 +549,6 @@ export default function DiagnosticsPanel() {
             </motion.div>
           )}
         </AnimatePresence>
-      </div>
     </motion.div>
   );
 }
