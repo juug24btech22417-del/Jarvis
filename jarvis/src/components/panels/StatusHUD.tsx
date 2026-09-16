@@ -7,23 +7,8 @@ import {
   Battery,
   Volume2,
   VolumeX,
-  Cpu,
-  HardDrive,
-  Thermometer,
-  Activity,
-  X,
   Eye,
   Scan,
-  ShieldCheck,
-  TrendingUp,
-  Clock,
-  Zap,
-  Sparkles,
-  RefreshCw,
-  Server,
-  Layers,
-  CheckCircle2,
-  AlertTriangle,
 } from "lucide-react";
 import { useJarvisStore } from "@/store/jarvis.store";
 
@@ -76,6 +61,7 @@ export default function StatusHUD() {
   const [battery, setBattery] = useState<number | null>(null);
   const [isCharging, setIsCharging] = useState(false);
   const [pcStats, setPcStats] = useState<PCStats | null>(null);
+  const [netStrength, setNetStrength] = useState<number | null>(null);
 
 
   const { isMuted, setIsMuted, state, sentinelActive, setSentinelActive, biometricActive } = useJarvisStore();
@@ -122,9 +108,24 @@ export default function StatusHUD() {
     fetchPCStats();
     const statsTimer = setInterval(fetchPCStats, 5000);
 
+    // Network strength from the Network Information API (downlink → %)
+    const conn =
+      typeof navigator !== "undefined"
+        ? (navigator as Navigator & { connection?: { downlink?: number; addEventListener(t: string, l: () => void): void; removeEventListener(t: string, l: () => void): void } }).connection
+        : undefined;
+    const updateNet = () => {
+      const downlink = conn?.downlink ?? 0; // Mbps
+      setNetStrength(Math.min(100, Math.round((downlink / 10) * 100)));
+    };
+    if (conn) {
+      updateNet();
+      conn.addEventListener("change", updateNet);
+    }
+
     return () => {
       clearInterval(timer);
       clearInterval(statsTimer);
+      conn?.removeEventListener("change", updateNet);
     };
   }, [fetchPCStats]);
 
@@ -142,23 +143,6 @@ export default function StatusHUD() {
         return "text-text-secondary opacity-50";
       default:
         return "text-text-secondary";
-    }
-  };
-
-  const getStatusText = () => {
-    switch (state) {
-      case "idle":
-        return "STANDBY";
-      case "listening":
-        return "LISTENING";
-      case "thinking":
-        return "PROCESSING";
-      case "speaking":
-        return "RESPONDING";
-      case "sleep":
-        return "SLEEP MODE";
-      default:
-        return "INITIALIZING";
     }
   };
 
@@ -255,9 +239,6 @@ export default function StatusHUD() {
               />
             ))}
           </div>
-          <span className={`font-orbitron text-xs tracking-widest ${getStatusColor()}`}>
-            {getStatusText()}
-          </span>
         </div>
 
         {/* Right side - System indicators (clickable) */}
@@ -267,34 +248,40 @@ export default function StatusHUD() {
             className="flex items-center gap-3"
             title="System diagnostics (see right panel)"
           >
-            {/* CPU */}
+            {/* CPU — word instead of icon */}
             {pcStats?.cpuUsage !== null && pcStats?.cpuUsage !== undefined && (
               <div className="flex items-center gap-1.5">
-                <Cpu className={`w-4 h-4 ${getCpuColor(pcStats.cpuUsage)}`} />
+                <span className={`font-rajdhani text-[11px] uppercase tracking-wider ${getCpuColor(pcStats.cpuUsage)}`}>
+                  CPU
+                </span>
                 <span className={`font-rajdhani text-xs font-semibold ${getCpuColor(pcStats.cpuUsage)}`}>
                   {Math.round(pcStats.cpuUsage)}%
                 </span>
               </div>
             )}
 
-            {/* Memory */}
+            {/* Memory — word instead of icon */}
             {pcStats?.memoryUsage !== null && pcStats?.memoryUsage !== undefined && (
               <div className="flex items-center gap-1.5">
-                <HardDrive className={`w-4 h-4 ${getMemoryColor(pcStats.memoryUsage)}`} />
+                <span className={`font-rajdhani text-[11px] uppercase tracking-wider ${getMemoryColor(pcStats.memoryUsage)}`}>
+                  RAM
+                </span>
                 <span className={`font-rajdhani text-xs font-semibold ${getMemoryColor(pcStats.memoryUsage)}`}>
                   {Math.round(pcStats.memoryUsage)}%
                 </span>
               </div>
             )}
 
-            {/* Temperature */}
+            {/* Core temperature — word instead of icon */}
             {pcStats?.temperature !== null && pcStats?.temperature !== undefined && (
               <div className="flex items-center gap-1.5">
-                <Thermometer className={`w-4 h-4 ${
+                <span className="font-rajdhani text-[11px] uppercase tracking-wider text-text-secondary">
+                  CORE
+                </span>
+                <span className={`font-rajdhani text-xs ${
                   pcStats.temperature > 80 ? "text-accent-red" :
                   pcStats.temperature > 60 ? "text-accent-amber" : "text-text-secondary"
-                }`} />
-                <span className="font-rajdhani text-xs text-text-secondary">
+                }`}>
                   {pcStats.temperature}°C
                 </span>
               </div>
@@ -367,8 +354,16 @@ export default function StatusHUD() {
             </AnimatePresence>
           </div>
 
-          {/* Network */}
-          <Wifi className="w-4 h-4 text-text-secondary" />
+          {/* Network — live strength from the Network Information API */}
+          <div className="flex items-center gap-1.5" title="Network strength">
+            <Wifi className="w-4 h-4 text-text-secondary" />
+            {netStrength !== null && (
+              <span className="font-rajdhani text-xs font-semibold text-text-secondary">
+                {netStrength}%
+                <span className="ml-1 text-[10px] text-text-secondary/60 uppercase tracking-wider">Strength</span>
+              </span>
+            )}
+          </div>
 
           {/* Battery */}
           {battery !== null && (
@@ -400,9 +395,6 @@ export default function StatusHUD() {
           {/* JARVIS Logo */}
           <div className="font-orbitron text-reactor-core text-sm tracking-widest flex items-center">
             J.A.R.V.I.S.
-            <span className="ml-2 text-[10px] text-accent-amber font-mono font-bold tracking-normal px-1 py-0.2 bg-amber-500/10 border border-amber-500/20 rounded">
-              NVIDIA
-            </span>
           </div>
         </div>
       </motion.div>
