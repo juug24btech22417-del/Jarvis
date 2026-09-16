@@ -251,10 +251,10 @@ export default function StatusHUD() {
             {/* CPU — word instead of icon */}
             {pcStats?.cpuUsage !== null && pcStats?.cpuUsage !== undefined && (
               <div className="flex items-center gap-1.5">
-                <span className={`font-rajdhani text-[11px] uppercase tracking-wider ${getCpuColor(pcStats.cpuUsage)}`}>
+                <span className="font-rajdhani text-[11px] uppercase tracking-wider text-white/90">
                   CPU
                 </span>
-                <span className={`font-rajdhani text-xs font-semibold ${getCpuColor(pcStats.cpuUsage)}`}>
+                <span className="font-rajdhani text-xs font-semibold text-white/95">
                   {Math.round(pcStats.cpuUsage)}%
                 </span>
               </div>
@@ -263,10 +263,10 @@ export default function StatusHUD() {
             {/* Memory — word instead of icon */}
             {pcStats?.memoryUsage !== null && pcStats?.memoryUsage !== undefined && (
               <div className="flex items-center gap-1.5">
-                <span className={`font-rajdhani text-[11px] uppercase tracking-wider ${getMemoryColor(pcStats.memoryUsage)}`}>
+                <span className="font-rajdhani text-[11px] uppercase tracking-wider text-white/90">
                   RAM
                 </span>
-                <span className={`font-rajdhani text-xs font-semibold ${getMemoryColor(pcStats.memoryUsage)}`}>
+                <span className="font-rajdhani text-xs font-semibold text-white/95">
                   {Math.round(pcStats.memoryUsage)}%
                 </span>
               </div>
