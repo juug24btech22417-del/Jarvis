@@ -7,7 +7,7 @@ import StatusHUD from "@/components/panels/StatusHUD";
 import TelemetryTicker from "@/components/panels/TelemetryTicker";
 import DiagnosticsPanel from "@/components/panels/DiagnosticsPanel";
 import { useWeatherAmbient } from "@/hooks/useWeatherAmbient";
-import MemoryPanel from "@/components/panels/MemoryPanel";
+import ReactorTelemetry from "@/components/panels/ReactorTelemetry";
 import CommandBar from "@/components/panels/CommandBar";
 import TimerPanel from "@/components/panels/TimerPanel";
 import CalculatorDisplay, { useCalculatorHistory } from "@/components/panels/CalculatorDisplay";
@@ -27,7 +27,6 @@ import DungeonPanel from "@/components/panels/DungeonPanel";
 import HabitsPanel from "@/components/panels/HabitsPanel";
 import TimeCapsulePanel from "@/components/panels/TimeCapsulePanel";
 import VoiceNotesPanel from "@/components/panels/VoiceNotesPanel";
-import MemoryDiscussPanel from "@/components/panels/MemoryDiscussPanel";
 import WeatherPanel from "@/components/panels/WeatherPanel";
 import SpotifyPanel from "@/components/panels/SpotifyPanel";
 import NewsPanel from "@/components/panels/NewsPanel";
@@ -674,15 +673,6 @@ export default function Home() {
   const [timeCapsuleOpen, setTimeCapsuleOpen] = useState(false);
   const [voiceNotesOpen, setVoiceNotesOpen] = useState(false);
 
-  // Tier 1B: Memory Discuss drawer
-  const [discussEntity, setDiscussEntity] = useState<{
-    id: string;
-    name: string;
-    type: string;
-    description: string | null;
-    strength: number;
-    pinned: boolean;
-  } | null>(null);
 
   // Tier 1C: lightweight pattern observation. Fire-and-forget POST.
   const recordPanelOpen = useCallback((panelName: string) => {
@@ -908,19 +898,9 @@ export default function Home() {
       {/* UI Panels (only show after boot) */}
       {bootComplete && (
         <>
-          {/* Sentinel arm/disarm — floats top-center under the HUD bar */}
-          <div className="fixed top-16 right-4 z-[45]">
-            <SentinelArmToggle />
-          </div>
+          {/* Sentinel arm/disarm — consolidated into the top-left app dock */}
           <StatusHUD />
-          <MemoryPanel
-            onDiscuss={(entity) => setDiscussEntity(entity)}
-          />
-          <MemoryDiscussPanel
-            isOpen={discussEntity !== null}
-            onClose={() => setDiscussEntity(null)}
-            entity={discussEntity}
-          />
+          <ReactorTelemetry />
           <TimerPanel onTimerComplete={handleTimerComplete} />
           <AnimatePresence>
             {calculatorOpen && lastCalculation && (
@@ -1012,8 +992,9 @@ export default function Home() {
             )}
           </AnimatePresence>
 
-          {/* Holographic Quick-Launch Dock (Top Right) */}
-          <div className="fixed top-20 right-5 z-[75] flex items-center gap-2.5">
+          {/* Holographic App Dock (top-left): Sentinel · Telegram · Connected Apps */}
+          <div className="fixed top-16 left-5 z-[75] flex items-center gap-2.5">
+            <SentinelArmToggle />
             {/* Telegram quick-launch button */}
             <AnimatePresence>
               {!telegramOpen && (
