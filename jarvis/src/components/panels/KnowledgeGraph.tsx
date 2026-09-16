@@ -102,21 +102,51 @@ function forceLayout(entities: GraphEntity[], width: number, height: number) {
  */
 function findConnections(nodes: ReturnType<typeof forceLayout>) {
   const connections: Array<{ from: number; to: number; strength: number }> = [];
+  const degree = new Array(nodes.length).fill(0);
+
   for (let i = 0; i < nodes.length; i++) {
     for (let j = i + 1; j < nodes.length; j++) {
       // Same type = strong connection
       if (nodes[i].type === nodes[j].type) {
-        connections.push({ from: i, to: j, strength: 0.6 });
+        connections.push({ from: i, to: j, strength: 0.7 });
+        degree[i]++;
+        degree[j]++;
         continue;
       }
       // Name overlap (one contains the other)
       const a = nodes[i].name.toLowerCase();
       const b = nodes[j].name.toLowerCase();
       if (a.includes(b) || b.includes(a)) {
-        connections.push({ from: i, to: j, strength: 0.4 });
+        connections.push({ from: i, to: j, strength: 0.5 });
+        degree[i]++;
+        degree[j]++;
       }
     }
   }
+
+  // Constellation fallback — no node should ever float unconnected.
+  // Link orphans to their spatially nearest neighbour with a faint thread.
+  for (let i = 0; i < nodes.length; i++) {
+    if (degree[i] > 0) continue;
+    let nearest = -1;
+    let bestDist = Infinity;
+    for (let j = 0; j < nodes.length; j++) {
+      if (j === i) continue;
+      const dx = nodes[j].x - nodes[i].x;
+      const dy = nodes[j].y - nodes[i].y;
+      const d = dx * dx + dy * dy;
+      if (d < bestDist) {
+        bestDist = d;
+        nearest = j;
+      }
+    }
+    if (nearest >= 0) {
+      connections.push({ from: i, to: nearest, strength: 0.3 });
+      degree[i]++;
+      degree[nearest]++;
+    }
+  }
+
   return connections;
 }
 
@@ -185,6 +215,7 @@ export default function KnowledgeGraph({
         const to = nodes[conn.to];
         const isHighlighted =
           hoveredNode === conn.from || hoveredNode === conn.to;
+        const isSemantic = conn.strength >= 0.5;
         return (
           <line
             key={`conn-${i}`}
@@ -192,12 +223,12 @@ export default function KnowledgeGraph({
             y1={from.y}
             x2={to.x}
             y2={to.y}
-            stroke={isHighlighted ? "#00D4FF" : "rgba(0, 212, 255, 0.12)"}
-            strokeWidth={isHighlighted ? 1.5 : 0.8}
-            strokeDasharray={isHighlighted ? "none" : "4 4"}
+            stroke={isHighlighted ? "#00D4FF" : "rgba(0, 212, 255, 0.55)"}
+            strokeWidth={isHighlighted ? 1.4 : 0.5 + conn.strength * 0.7}
+            strokeDasharray={isHighlighted || isSemantic ? "none" : "3 5"}
             style={{
-              transition: "stroke 0.3s, stroke-width 0.3s",
-              opacity: isHighlighted ? 0.8 : 0.4,
+              transition: "stroke 0.3s, stroke-width 0.3s, opacity 0.3s",
+              opacity: isHighlighted ? 0.9 : 0.2 + conn.strength * 0.35,
             }}
           />
         );
@@ -208,7 +239,7 @@ export default function KnowledgeGraph({
         const color = getNodeColor(node.type);
         const isHovered = hoveredNode === i;
         const isSelected = selectedNode === i;
-        const nodeSize = 6 + node.strength * 8 + (node.pinned ? 3 : 0);
+        const nodeSize = 4 + node.strength * 5 + (node.pinned ? 2 : 0);
         const pulseScale = isHovered ? 1.3 : isSelected ? 1.2 : 1;
 
         return (
@@ -262,7 +293,7 @@ export default function KnowledgeGraph({
               {/* Subtle breathing animation */}
               <animate
                 attributeName="r"
-                values={`${nodeSize * pulseScale};${nodeSize * pulseScale * 1.08};${nodeSize * pulseScale}`}
+                values={`${nodeSize * pulseScale};${nodeSize * pulseScale * 1.06};${nodeSize * pulseScale}`}
                 dur={`${2 + (i % 3)}s`}
                 repeatCount="indefinite"
               />

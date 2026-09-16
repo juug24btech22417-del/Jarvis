@@ -14,7 +14,7 @@ const config: Config = {
         // JARVIS Color Palette
         "reactor-core": "#00D4FF",
         "reactor-glow": "#7DF9FF",
-        "deep-space": "#020810",
+        "deep-space": "#000000",
         "panel-glass": "rgba(0, 180, 255, 0.06)",
         "panel-border": "rgba(0, 212, 255, 0.3)",
         "text-primary": "#E8F4FF",

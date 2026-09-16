@@ -10,9 +10,9 @@
   --reactor-glow: #7DF9FF;
   --accent-color: #7DF9FF;
 
-  --bg-gradient-from: #020810;
-  --bg-gradient-via: #051020;
-  --bg-gradient-to: #020810;
+  --bg-gradient-from: #000000;
+  --bg-gradient-via: #01060b;
+  --bg-gradient-to: #000000;
 
   --panel-glass: rgba(0, 180, 255, 0.06);
   --panel-border: rgba(0, 212, 255, 0.3);
@@ -50,7 +50,8 @@ html, body {
 }
 
 body {
-  background: radial-gradient(ellipse at center, var(--bg-gradient-via) 0%, var(--bg-gradient-from) 100%) !important;
+  /* near-black with the faintest arc-blue bloom at the reactor's position */
+  background: radial-gradient(ellipse 900px 700px at 50% 44%, #030d14 0%, #01050a 45%, #000000 75%) !important;
 }
 
 /* Force text colors */
@@ -676,7 +677,7 @@ html[data-theme="quantum"] .reactor-glow {
   inset: 0;
   pointer-events: none;
   z-index: 35;
-  background: radial-gradient(ellipse at 50% 80%, rgba(150,170,190,0.08) 0%, transparent 70%);
+  background: radial-gradient(ellipse at 50% 80%, rgba(150,170,190,0.03) 0%, transparent 60%);
   animation: fogDrift 8s ease-in-out infinite alternate;
 }
 @keyframes fogDrift {
