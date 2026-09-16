@@ -238,11 +238,12 @@ export default function DiagnosticsPanel() {
     return () => { cancelled = true; clearInterval(t); };
   }, []);
 
+  // Apple-quiet heat scale: calm lavender → soft amber → muted coral. No harsh orange.
   const getHeatColor = (val: number | null) => {
-    if (val === null) return "#7EB8D4";
-    if (val > 80) return "#FF2D55";
-    if (val > 60) return "#FF6B2B";
-    return "#00D4FF";
+    if (val === null) return "#A8B8C4";
+    if (val > 80) return "#E8737F";
+    if (val > 60) return "#E8B98A";
+    return "#C4A5FF";
   };
 
   const recentMessages = messages.slice(-5).reverse();
@@ -252,21 +253,21 @@ export default function DiagnosticsPanel() {
 
   const getWeatherIcon = () => {
     const d = weatherDesc.toLowerCase();
-    if (d.includes("rain") || d.includes("drizzle")) return <CloudRain className="w-4 h-4 text-cyan-400" />;
-    if (d.includes("cloud")) return <Cloud className="w-4 h-4 text-text-secondary" />;
-    if (d.includes("snow")) return <CloudSnow className="w-4 h-4 text-blue-300" />;
-    if (d.includes("thunder")) return <CloudLightning className="w-4 h-4 text-accent-amber" />;
-    return <Sun className="w-4 h-4 text-accent-amber" />;
+    if (d.includes("rain") || d.includes("drizzle")) return <CloudRain className="w-4 h-4 text-[#9BB8E8]" />;
+    if (d.includes("cloud")) return <Cloud className="w-4 h-4 text-[#A8B8C4]" />;
+    if (d.includes("snow")) return <CloudSnow className="w-4 h-4 text-[#D8E4F0]" />;
+    if (d.includes("thunder")) return <CloudLightning className="w-4 h-4 text-[#E8B98A]" />;
+    return <Sun className="w-4 h-4 text-[#E8C98A]" />;
   };
 
   const getStateLabel = () => {
     switch (state) {
-      case "idle": return { text: "STANDBY", color: "#7EB8D4" };
-      case "listening": return { text: "LISTENING", color: "#00FF9D" };
-      case "thinking": return { text: "PROCESSING", color: "#FF6B2B" };
-      case "speaking": return { text: "RESPONDING", color: "#00D4FF" };
-      case "sleep": return { text: "DORMANT", color: "#4A5568" };
-      default: return { text: "INIT", color: "#7EB8D4" };
+      case "idle": return { text: "STANDBY", color: "#A8B8C4" };
+      case "listening": return { text: "LISTENING", color: "#8FDDB8" };
+      case "thinking": return { text: "PROCESSING", color: "#C4A5FF" };
+      case "speaking": return { text: "RESPONDING", color: "#9BB8E8" };
+      case "sleep": return { text: "DORMANT", color: "#5A6A78" };
+      default: return { text: "INIT", color: "#A8B8C4" };
     }
   };
 
@@ -294,16 +295,16 @@ export default function DiagnosticsPanel() {
       initial={{ x: 300, opacity: 0 }}
       animate={{ x: 0, opacity: 1 }}
       transition={{ type: "spring", damping: 25, stiffness: 200, delay: 4.5 }}
-      className="fixed top-14 right-5 bottom-10 z-[35] w-[280px] flex flex-col pointer-events-none"
+      className="fixed top-20 right-5 bottom-10 z-[35] w-[280px] flex flex-col pointer-events-none"
     >
-      {/* Floating minimal controls */}
-      <div className="absolute -top-7 right-0 flex items-center gap-1 pointer-events-auto">
-        <span className="font-orbitron text-[8px] text-cyan-400/50 tracking-[0.2em] mr-auto">DIAGNOSTICS</span>
+      {/* Floating minimal controls — below the top bar, never overlapping it */}
+      <div className="absolute -top-6 right-0 flex items-center gap-2.5 pointer-events-auto">
+        <span className="font-orbitron text-[8px] text-white/30 tracking-[0.25em] mr-auto">DIAGNOSTICS</span>
         <button
           onClick={() => setExpanded(!expanded)}
           title={expanded ? "Collapse" : "Expand"}
           aria-label={expanded ? "Collapse diagnostics" : "Expand diagnostics"}
-          className="text-text-secondary/40 hover:text-cyan-400 transition-colors"
+          className="text-white/35 hover:text-white/80 transition-colors"
         >
           <ChevronRight className={`w-3 h-3 transition-transform ${expanded ? "rotate-90" : ""}`} />
         </button>
@@ -311,7 +312,7 @@ export default function DiagnosticsPanel() {
           onClick={closePanel}
           title="Close diagnostics console"
           aria-label="Close diagnostics console"
-          className="text-text-secondary/40 hover:text-accent-red transition-colors"
+          className="text-white/35 hover:text-white/80 transition-colors"
         >
           <X className="w-3 h-3" />
         </button>
@@ -405,20 +406,20 @@ export default function DiagnosticsPanel() {
                       <span className="font-rajdhani text-[9px]" style={{ color: sLabel.color }}>{sLabel.text}</span>
                     </div>
                     <div className="flex items-center gap-1.5">
-                      <Shield className="w-2.5 h-2.5" style={{ color: sentinelArmed ? "#00FF9D" : "#4A5568" }} />
-                      <span className="font-rajdhani text-[9px]" style={{ color: sentinelArmed ? "#00FF9D" : "#4A5568" }}>
+                      <Shield className="w-2.5 h-2.5" style={{ color: sentinelArmed ? "#8FDDB8" : "#5A6A78" }} />
+                      <span className="font-rajdhani text-[9px]" style={{ color: sentinelArmed ? "#8FDDB8" : "#5A6A78" }}>
                         {sentinelArmed ? "ARMED" : "SAFE"}
                       </span>
                     </div>
                     <div className="flex items-center gap-1.5">
-                      <Eye className="w-2.5 h-2.5" style={{ color: biometricActive ? "#00FF9D" : "#4A5568" }} />
-                      <span className="font-rajdhani text-[9px]" style={{ color: biometricActive ? "#00FF9D" : "#4A5568" }}>
+                      <Eye className="w-2.5 h-2.5" style={{ color: biometricActive ? "#8FDDB8" : "#5A6A78" }} />
+                      <span className="font-rajdhani text-[9px]" style={{ color: biometricActive ? "#8FDDB8" : "#5A6A78" }}>
                         BIO {biometricActive ? "ON" : "OFF"}
                       </span>
                     </div>
                     <div className="flex items-center gap-1.5">
-                      <Zap className="w-2.5 h-2.5" style={{ color: activeAlerts > 0 ? "#FF2D55" : "#4A5568" }} />
-                      <span className="font-rajdhani text-[9px]" style={{ color: activeAlerts > 0 ? "#FF2D55" : "#4A5568" }}>
+                      <Zap className="w-2.5 h-2.5" style={{ color: activeAlerts > 0 ? "#E8737F" : "#5A6A78" }} />
+                      <span className="font-rajdhani text-[9px]" style={{ color: activeAlerts > 0 ? "#E8737F" : "#5A6A78" }}>
                         {activeAlerts} ALERT{activeAlerts !== 1 ? "S" : ""}
                       </span>
                     </div>
@@ -434,7 +435,7 @@ export default function DiagnosticsPanel() {
                   <div className="flex items-center justify-between">
                     <span className="font-rajdhani text-[10px] text-text-secondary/80">{weatherDesc}</span>
                     {weatherTemp !== null && (
-                      <span className="font-orbitron text-[11px] text-cyan-400">{weatherTemp}°C</span>
+                      <span className="font-orbitron text-[11px] text-white/95">{weatherTemp}°C</span>
                     )}
                   </div>
                 </div>
@@ -447,24 +448,24 @@ export default function DiagnosticsPanel() {
                   </div>
                   <div className="flex items-center gap-3 mb-1">
                     <div className="flex items-center gap-1">
-                      <CheckCircle2 className="w-2.5 h-2.5 text-accent-green" />
-                      <span className="font-rajdhani text-[9px] text-accent-green">{completedTasks}</span>
+                      <CheckCircle2 className="w-2.5 h-2.5 text-[#8FDDB8]" />
+                      <span className="font-rajdhani text-[9px] text-[#8FDDB8]">{completedTasks}</span>
                     </div>
                     <div className="flex items-center gap-1">
-                      <Clock className="w-2.5 h-2.5 text-accent-amber" />
-                      <span className="font-rajdhani text-[9px] text-accent-amber">{pendingTasks}</span>
+                      <Clock className="w-2.5 h-2.5 text-[#E8B98A]" />
+                      <span className="font-rajdhani text-[9px] text-[#E8B98A]">{pendingTasks}</span>
                     </div>
                     {criticalTasks.length > 0 && (
                       <div className="flex items-center gap-1">
-                        <AlertTriangle className="w-2.5 h-2.5 text-accent-red animate-pulse" />
-                        <span className="font-rajdhani text-[9px] text-accent-red">{criticalTasks.length}</span>
+                        <AlertTriangle className="w-2.5 h-2.5 text-[#E8737F] animate-pulse" />
+                        <span className="font-rajdhani text-[9px] text-[#E8737F]">{criticalTasks.length}</span>
                       </div>
                     )}
                   </div>
                   {/* Progress bar */}
                   <div className="h-1 bg-black/40 rounded-full overflow-hidden">
                     <div
-                      className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-accent-green transition-all duration-500"
+                      className="h-full rounded-full bg-gradient-to-r from-[#C4A5FF] to-[#8FDDB8] transition-all duration-500"
                       style={{ width: `${tasks.length > 0 ? (completedTasks / tasks.length) * 100 : 0}%` }}
                     />
                   </div>
@@ -472,8 +473,8 @@ export default function DiagnosticsPanel() {
                     <div className="mt-1 space-y-0.5">
                       {criticalTasks.slice(0, 2).map((t) => (
                         <div key={t.id} className="flex items-center gap-1">
-                          <XCircle className="w-2 h-2 text-accent-red flex-shrink-0" />
-                          <span className="font-rajdhani text-[8px] text-accent-red/80 truncate">{t.title}</span>
+                          <XCircle className="w-2 h-2 text-[#E8737F] flex-shrink-0" />
+                          <span className="font-rajdhani text-[8px] text-[#E8737F]/80 truncate">{t.title}</span>
                         </div>
                       ))}
                     </div>
