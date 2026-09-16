@@ -23,7 +23,7 @@ async function summarizeWithNVIDIA(text: string, maxLength: number = 200): Promi
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "meta/llama-3.1-8b-instruct",
+        model: "nvidia/nemotron-3-super-120b-a12b",
         messages: [
           {
             role: "system",

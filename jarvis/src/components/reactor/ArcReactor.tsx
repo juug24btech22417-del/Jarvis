@@ -8,6 +8,9 @@
  * modeled after the MARK II film HUD. One requestAnimationFrame loop drives
  * every rotation; React re-renders only on state/hue changes.
  *
+ * Boot: the reactor ASSEMBLES — layers snap in core-first with spring
+ * physics and a synthesized power-up soundtrack (WebAudio, no assets).
+ *
  * Replaces the old WebGL orb: no scene fog (which tinted the whole page
  * cyan), no canvas glare — sits cleanly on a pure black background.
  */
@@ -16,6 +19,88 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useJarvisStore } from "@/store/jarvis.store";
 import { useAudioReactivity } from "@/hooks/useAudioReactivity";
+
+/* ─── Boot assembly soundtrack (synthesized — zero assets) ─────────────── */
+
+/**
+ * Layer-landing timestamps (seconds) — must match ASSEMBLY delays below.
+ * hum → snaps per layer → final power swell.
+ */
+const SND = { hum: 0.05, snaps: [0.15, 0.5, 0.75, 1.0, 1.25, 1.5], swell: 1.75 };
+
+function createAssemblyAudio() {
+  let ctx: AudioContext | null = null;
+  let played = false;
+
+  const ensureCtx = (): AudioContext | null => {
+    if (typeof window === "undefined") return null;
+    if (!ctx) {
+      const AC = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AC) return null;
+      ctx = new AC();
+    }
+    if (ctx.state === "suspended") void ctx.resume();
+    return ctx.state === "running" ? ctx : null;
+  };
+
+  const snap = (ac: AudioContext, t: number, freq: number) => {
+    // Soft mechanical clink — short sine with fast pitch drop + quick decay.
+    const osc = ac.createOscillator();
+    const gain = ac.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(freq, t);
+    osc.frequency.exponentialRampToValueAtTime(freq * 0.72, t + 0.09);
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.07, t + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
+    osc.connect(gain).connect(ac.destination);
+    osc.start(t);
+    osc.stop(t + 0.16);
+  };
+
+  const play = () => {
+    const ac = ensureCtx();
+    if (!ac || played) return;
+    played = true;
+    const now = ac.currentTime + 0.02;
+
+    // Rising hum — the reactor "waking up" under the assembly.
+    const hum = ac.createOscillator();
+    const humGain = ac.createGain();
+    hum.type = "triangle";
+    hum.frequency.setValueAtTime(52, now + SND.hum);
+    hum.frequency.exponentialRampToValueAtTime(108, now + SND.hum + 1.6);
+    humGain.gain.setValueAtTime(0.0001, now + SND.hum);
+    humGain.gain.exponentialRampToValueAtTime(0.045, now + SND.hum + 0.5);
+    humGain.gain.exponentialRampToValueAtTime(0.0001, now + SND.swell + 1.4);
+    hum.connect(humGain).connect(ac.destination);
+    hum.start(now + SND.hum);
+    hum.stop(now + SND.swell + 1.5);
+
+    // One clink per layer landing — pitch rises as the stack builds.
+    const snapFreqs = [340, 392, 466, 523, 622, 700];
+    SND.snaps.forEach((s, i) => snap(ac, now + s, snapFreqs[i]));
+
+    // Final power swell — warm chord bloom as the core ignites.
+    const swell = ac.createOscillator();
+    const swellGain = ac.createGain();
+    const swellFilter = ac.createBiquadFilter();
+    swell.type = "sawtooth";
+    swell.frequency.setValueAtTime(110, now + SND.swell);
+    swell.frequency.exponentialRampToValueAtTime(220, now + SND.swell + 0.9);
+    swellFilter.type = "lowpass";
+    swellFilter.frequency.setValueAtTime(400, now + SND.swell);
+    swellFilter.frequency.exponentialRampToValueAtTime(2400, now + SND.swell + 0.9);
+    swellGain.gain.setValueAtTime(0.0001, now + SND.swell);
+    swellGain.gain.exponentialRampToValueAtTime(0.09, now + SND.swell + 0.25);
+    swellGain.gain.exponentialRampToValueAtTime(0.0001, now + SND.swell + 1.5);
+    swell.connect(swellFilter).connect(swellGain).connect(ac.destination);
+    swell.start(now + SND.swell);
+    swell.stop(now + SND.swell + 1.6);
+  };
+
+  return { play };
+}
 
 /* ─── Hue palettes (driven by reactorHue from useReactorDrive) ───────── */
 
@@ -266,7 +351,13 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
       </defs>
 
       {/* ── Layer 1 · outer structural rings (Image 1's white orbit) ── */}
-      <g ref={gStruct} style={{ willChange: "transform" }}>
+      <motion.g
+        ref={gStruct}
+        style={{ willChange: "transform" }}
+        initial={{ scale: 1.5, opacity: 0, rotate: -30 }}
+        animate={{ scale: 1, opacity: 1, rotate: 0 }}
+        transition={{ delay: 1.5, type: "spring", stiffness: 160, damping: 17, mass: 0.9 }}
+      >
         <circle r={442} fill="none" stroke={c.white} strokeOpacity={0.14} strokeWidth={1} />
         <circle
           r={430}
@@ -301,10 +392,16 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
             />
           ))}
         </g>
-      </g>
+      </motion.g>
 
       {/* ── Layer 2 · tick ring ─────────────────────────────────────── */}
-      <g ref={gTicks} style={{ willChange: "transform" }}>
+      <motion.g
+        ref={gTicks}
+        style={{ willChange: "transform" }}
+        initial={{ scale: 0.3, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        transition={{ delay: 1.0, type: "spring", stiffness: 190, damping: 16, mass: 0.8 }}
+      >
         <circle
           r={370}
           fill="none"
@@ -322,10 +419,16 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
           strokeDasharray={DASH.ticksBright}
         />
         <circle r={352} fill="none" stroke={c.white} strokeOpacity={0.1} strokeWidth={1} />
-      </g>
+      </motion.g>
 
       {/* ── Layer 3 · voice-reactive particle belt ──────────────────── */}
-      <g ref={gBelt} style={{ willChange: "transform" }}>
+      <motion.g
+        ref={gBelt}
+        style={{ willChange: "transform" }}
+        initial={{ scale: 1.3, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        transition={{ delay: 0.75, type: "spring", stiffness: 170, damping: 18 }}
+      >
         <circle
           r={262}
           fill="none"
@@ -352,9 +455,14 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
             />
           );
         })}
-      </g>
+      </motion.g>
 
       {/* ── Layer 4 · segmented energy ring — THE blue circle (Image 1's hero) ── */}
+      <motion.g
+        initial={{ scale: 0.6, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        transition={{ delay: 1.25, type: "spring", stiffness: 180, damping: 15, mass: 0.8 }}
+      >
       {/* Soft glow underlay so the collar radiates without washing the page */}
       <circle
         ref={segGlow}
@@ -399,9 +507,16 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
         />
         <circle r={178} fill="none" stroke={c.ringBright} strokeOpacity={0.45} strokeWidth={2} />
       </g>
+      </motion.g>
 
       {/* ── Layer 5 · inner collar ──────────────────────────────────── */}
-      <g ref={gCollar} style={{ willChange: "transform" }}>
+      <motion.g
+        ref={gCollar}
+        style={{ willChange: "transform" }}
+        initial={{ scale: 0.5, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        transition={{ delay: 0.5, type: "spring", stiffness: 200, damping: 15, mass: 0.7 }}
+      >
         <circle
           r={150}
           fill="none"
@@ -412,10 +527,16 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
           strokeLinecap="round"
         />
         <circle r={134} fill="none" stroke={c.white} strokeOpacity={0.18} strokeWidth={1} />
-      </g>
+      </motion.g>
 
       {/* ── Layer 6 · core + state label ────────────────────────────── */}
-      <g ref={gCore} style={{ willChange: "transform", transformOrigin: "0 0" }}>
+      <motion.g
+        ref={gCore}
+        style={{ willChange: "transform", transformOrigin: "0 0" }}
+        initial={{ scale: 0, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        transition={{ delay: 0.15, type: "spring", stiffness: 210, damping: 14, mass: 0.6 }}
+      >
         {/* tight bloom — glows on the core, not the page */}
         <circle r={118} fill={c.accent} opacity={0.18} filter="url(#mk2-halo)" />
         <circle r={96} fill="url(#mk2-core)" />
@@ -459,10 +580,18 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
             </text>
           </motion.g>
         </AnimatePresence>
-      </g>
+      </motion.g>
 
       {/* ── Layer 7 · quiet telemetry on the outer field ────────────── */}
-      <g fontFamily="Orbitron, sans-serif" fontSize={13} letterSpacing={2.5} fill={c.white} opacity={0.4}>
+      <motion.g
+        fontFamily="Orbitron, sans-serif"
+        fontSize={13}
+        letterSpacing={2.5}
+        fill={c.white}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 0.4 }}
+        transition={{ delay: 2.2, duration: 0.8 }}
+      >
         <text x={-338} y={-336} textAnchor="start">
           CORE MK.II
         </text>
@@ -472,7 +601,7 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
         <text x={0} y={472} textAnchor="middle" fontSize={11} letterSpacing={4}>
           STARK INDUSTRIES · ARC REACTOR
         </text>
-      </g>
+      </motion.g>
     </svg>
   );
 }
@@ -485,6 +614,28 @@ export default function ArcReactor() {
   const [isClient, setIsClient] = useState(false);
   const hue = useJarvisStore((s) => s.reactorHue);
   const [size, setSize] = useState(0);
+  const audioRef = useRef<ReturnType<typeof createAssemblyAudio> | null>(null);
+
+  // Autoplay policy: browsers block audio until a user gesture. Arm the
+  // soundtrack on the very first interaction during boot; if boot finishes
+  // before any gesture, skip gracefully (silent assembly).
+  useEffect(() => {
+    if (!isClient) return;
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduced) return;
+    audioRef.current = createAssemblyAudio();
+    const arm = () => {
+      audioRef.current?.play();
+      window.removeEventListener("pointerdown", arm);
+      window.removeEventListener("keydown", arm);
+    };
+    window.addEventListener("pointerdown", arm);
+    window.addEventListener("keydown", arm);
+    return () => {
+      window.removeEventListener("pointerdown", arm);
+      window.removeEventListener("keydown", arm);
+    };
+  }, [isClient]);
 
   // Responsive: the reactor stays a centerpiece, never a sprawl —
   // scaled to the smaller viewport dimension and capped on big monitors.

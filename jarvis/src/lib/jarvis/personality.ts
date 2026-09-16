@@ -554,7 +554,7 @@ export async function parseIntentWithLLM(
       "Authorization": `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: "deepseek-ai/deepseek-v4-flash",
+      model: "nvidia/nemotron-3-super-120b-a12b",
       messages: [
         { role: "system", content: INTENT_SYSTEM_PROMPT },
         { role: "user", content: text },

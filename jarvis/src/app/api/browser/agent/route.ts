@@ -37,7 +37,7 @@ function llmCandidates(): LlmCandidate[] {
 
   if (nvidiaKey) {
     // -0731 suffix required: NVIDIA 410s the bare id (same fix as chat).
-    cands.push({ label: "nvidia", url: "https://integrate.api.nvidia.com/v1/chat/completions", key: nvidiaKey, model: "deepseek-ai/deepseek-v4-flash-0731" });
+    cands.push({ label: "nvidia", url: "https://integrate.api.nvidia.com/v1/chat/completions", key: nvidiaKey, model: "nvidia/nemotron-3-super-120b-a12b" });
   }
   if (groqKey) {
     for (const model of ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]) {

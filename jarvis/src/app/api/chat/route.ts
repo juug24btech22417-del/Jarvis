@@ -54,6 +54,7 @@ async function applyPersonalityWrapper(factualResponse: string, apiKey: string):
         ],
         temperature: 0.75,
         max_tokens: 512,
+        chat_template_kwargs: { thinking: false },
       }),
     }, 1500); // 1.5-second timeout — wrapper is decorative polish, must never dominate latency
 
@@ -161,11 +162,14 @@ async function tryOpenRouterFallback(
 // Groq is fast, has a generous free tier, and uses an OpenAI-compatible API.
 // Models rotate — keep a small chain so a single rate-limit doesn't kill us.
 // https://console.groq.com — free API key, no credit card.
+// Verified live Sep 2026: most legacy slugs (llama-3.3-70b-versatile,
+// llama-3.1-8b-instant, gemma2, mixtral) were decommissioned. These four
+// responded to a live probe on this account.
 const GROQ_FALLBACK_MODELS = [
-  "llama-3.3-70b-versatile",
-  "llama-3.1-8b-instant",
-  "gemma2-9b-it",
-  "mixtral-8x7b-32768",
+  "groq/compound-mini",      // fastest — 0.5s round-trip, no reasoning tokens
+  "openai/gpt-oss-20b",      // small reasoning model
+  "openai/gpt-oss-120b",     // bigger reasoning model
+  "groq/compound",           // agentic fallback
 ];
 
 async function tryGroqFallback(
@@ -207,6 +211,9 @@ async function tryGroqFallback(
           messages: groqMessages,
           max_tokens: 768,
           temperature: 0.75,
+          // gpt-oss models are reasoners — keep their monologue out of the
+          // reply and stop it from eating the token budget.
+          reasoning_effort: "low",
         }),
         signal: c.signal,
       });
@@ -1963,8 +1970,12 @@ const emailProgrammaticMatch =
             max_tokens: 768,
             temperature: 0.75,
             stream: true,
+            // nemotron-3 is a reasoning model: without this its monologue
+            // leaks into the stream (the "Okay, Boss says..." bug) and the
+            // thinking phase doubles latency. Thinking off ≈ 1s first token.
+            chat_template_kwargs: { thinking: false },
           }),
-        }, 3000); // 3-second timeout — NVIDIA NIM is currently unreliable; don't burn latency on it.
+        }, 5000); // 5s headroom — with thinking off, first token lands in ~1s.
 
         if (!response.ok) {
           const errorText = await response.text();

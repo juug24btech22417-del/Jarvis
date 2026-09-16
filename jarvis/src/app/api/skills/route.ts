@@ -55,7 +55,7 @@ Include ${durationDays} lessons, one for each day. Make content practical and en
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "meta/llama-3.1-8b-instruct",
+          model: "nvidia/nemotron-3-super-120b-a12b",
           messages: [
             {
               role: "system",
@@ -148,7 +148,7 @@ Make questions challenging but fair. Use 0-based index for correctAnswer.`;
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "meta/llama-3.1-8b-instruct",
+          model: "nvidia/nemotron-3-super-120b-a12b",
           messages: [
             {
               role: "system",

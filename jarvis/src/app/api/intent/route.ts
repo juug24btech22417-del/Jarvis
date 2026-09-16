@@ -44,7 +44,7 @@ export async function POST(req: NextRequest) {
             "Authorization": `Bearer ${NVIDIA_API_KEY}`,
           },
           body: JSON.stringify({
-            model: "meta/llama-3.1-8b-instruct",
+            model: "nvidia/nemotron-3-super-120b-a12b",
             messages: [
               { role: "system", content: INTENT_SYSTEM_PROMPT },
               { role: "user", content: text },
