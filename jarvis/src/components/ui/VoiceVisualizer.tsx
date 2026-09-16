@@ -6,9 +6,10 @@ import { useJarvisStore } from "@/store/jarvis.store";
 
 interface VoiceVisualizerProps {
   barCount?: number;
+  height?: number;
 }
 
-export default function VoiceVisualizer({ barCount = 32 }: VoiceVisualizerProps) {
+export default function VoiceVisualizer({ barCount = 32, height = 48 }: VoiceVisualizerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationRef = useRef<number>(0);
   const [audioData, setAudioData] = useState<number[]>(new Array(barCount).fill(0));
@@ -147,7 +148,9 @@ export default function VoiceVisualizer({ barCount = 32 }: VoiceVisualizerProps)
       initial={{ opacity: 0, scaleY: 0 }}
       animate={{ opacity: 1, scaleY: 1 }}
       exit={{ opacity: 0, scaleY: 0 }}
-      className="h-12 w-full"
+      transition={{ duration: 0.4, ease: "easeOut" }}
+      className="w-full"
+      style={{ height }}
     >
       <canvas
         ref={canvasRef}

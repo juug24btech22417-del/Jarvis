@@ -3819,27 +3819,65 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
 
   return (
     <motion.div
-      className="fixed bottom-8 left-0 right-0 z-50 px-6 py-3"
-      initial={{ y: 100, opacity: 0 }}
-      animate={{ y: 0, opacity: 1 }}
-      transition={{ duration: 0.5, delay: 5, ease: "easeOut" }}
+      className="fixed bottom-6 left-0 right-0 z-50 px-6"
+      initial={{ y: 80, opacity: 0, scale: 0.96 }}
+      animate={{ y: 0, opacity: 1, scale: 1 }}
+      transition={{ type: "spring", stiffness: 140, damping: 20, delay: 5 }}
     >
-      <div className="max-w-4xl mx-auto max-h-[40vh] overflow-y-auto custom-scrollbar">
-        {/* Voice Visualizer */}
-        <div className="mb-2">
-          <VoiceVisualizer barCount={32} />
-        </div>
-
-        <div className="holographic-panel flex items-center gap-3 px-4 py-3">
-          {/* Button group - mic and stop buttons side by side with proper spacing */}
-          <div className="flex items-center gap-2">
-            {/* Stop Speaking button - show when JARVIS is speaking OR thinking */}
+      <div className="max-w-2xl mx-auto">
+        {/* ─── Compact Voice Pill ─── */}
+        <div
+          className="holographic-panel rounded-[26px] px-4 pt-2 pb-2.5 shadow-[0_8px_40px_rgba(0,212,255,0.12),0_2px_16px_rgba(0,0,0,0.55)]"
+          style={{ borderRadius: 26 }}
+        >
+          {/* Header strip — channel label + live state */}
+          <div className="flex items-center justify-between px-1 mb-1">
+            <span className="font-orbitron text-[8px] tracking-[0.25em] text-text-secondary/50 uppercase">
+              ◉ Voice Channel · 24kHz
+            </span>
             <AnimatePresence mode="wait">
+              <motion.span
+                key={state}
+                initial={{ opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }}
+                transition={{ duration: 0.25, ease: "easeOut" }}
+                className={`font-orbitron text-[9px] font-bold tracking-[0.25em] uppercase ${
+                  state === "speaking"
+                    ? "text-accent-green drop-shadow-[0_0_8px_rgba(0,255,157,0.7)]"
+                    : state === "listening"
+                    ? "text-accent-green"
+                    : state === "thinking"
+                    ? "text-reactor-core animate-pulse"
+                    : "text-text-secondary/40"
+                }`}
+              >
+                {state === "idle" && "Standby"}
+                {state === "listening" && "Listening"}
+                {state === "thinking" && "Thinking"}
+                {state === "speaking" && "Speaking"}
+                {state === "sleep" && "Dormant"}
+              </motion.span>
+            </AnimatePresence>
+          </div>
+
+          {/* Waveform — lives inside the pill like a live voice channel */}
+          <div className="px-1 mb-1.5">
+            <VoiceVisualizer barCount={56} height={22} />
+          </div>
+
+          {/* Controls row */}
+          <div className="flex items-center gap-2">
+            {/* Stop button — appears while JARVIS speaks/thinks; siblings glide via layout */}
+            {/* Stop Speaking button - show when JARVIS is speaking OR thinking */}
+            <AnimatePresence mode="popLayout">
               {(state === "speaking" || state === "thinking") && (
                 <motion.button
-                  initial={{ opacity: 0, scale: 0.8 }}
+                  layout
+                  initial={{ opacity: 0, scale: 0.6 }}
                   animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.8 }}
+                  exit={{ opacity: 0, scale: 0.6 }}
+                  transition={{ type: "spring", stiffness: 400, damping: 28 }}
                   onClick={(e) => {
                     // Ripple effect
                     const btn = e.currentTarget as HTMLButtonElement;
@@ -3852,26 +3890,29 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
                     stopSpeaking();
                     setState("idle");
                   }}
-                  className="p-3 rounded-full bg-accent-red hover:bg-accent-red/80 animate-pulse flex-shrink-0 relative overflow-hidden"
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
+                  className="p-2 rounded-full bg-accent-red hover:bg-accent-red/90 shadow-[0_0_16px_rgba(255,45,85,0.55)] flex-shrink-0 relative overflow-hidden"
+                  whileHover={{ scale: 1.06 }}
+                  whileTap={{ scale: 0.92 }}
                   title="Stop JARVIS (Space bar or Escape)"
                 >
-                  <VolumeX className="w-5 h-5 text-white" />
+                  <VolumeX className="w-4 h-4 text-white" />
                 </motion.button>
               )}
             </AnimatePresence>
 
             {/* Voice button - shows send icon when listening with text */}
             {/* This button is ALWAYS clickable to manually activate mic */}
-            <button
+            <motion.button
+              layout
+              initial={false}
               ref={voiceBtnRef}
               onClick={(e) => {
                 e.stopPropagation(); // Prevent bubbling to ArcReactor overlay
                 createRipple(e, voiceBtnRef.current!, 'rgba(0, 212, 255, 0.4)');
                 handleVoiceToggle();
               }}
-              className={`p-3 rounded-full transition-all duration-300 flex-shrink-0 relative overflow-hidden ${
+              whileTap={{ scale: 0.92 }}
+              className={`p-2 rounded-full transition-all duration-300 flex-shrink-0 relative overflow-hidden ${
                 isActivelyListening
                   ? input.trim()
                     ? "bg-accent-green shadow-[0_0_15px_rgba(0,255,100,0.5)]"
@@ -3893,18 +3934,17 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
             >
               {isActivelyListening ? (
                 input.trim() ? (
-                  <Send className="w-5 h-5 text-white" />
+                  <Send className="w-4 h-4 text-white" />
                 ) : (
-                  <Square className="w-5 h-5 text-white" />
+                  <Square className="w-4 h-4 text-white" />
                 )
               ) : (
-                <Mic className={`w-5 h-5 ${alwaysListening && !isMuted ? "text-reactor-core animate-pulse" : "text-reactor-core/50"}`} />
+                <Mic className={`w-4 h-4 ${alwaysListening && !isMuted ? "text-reactor-core animate-pulse" : "text-reactor-core/50"}`} />
               )}
-            </button>
-          </div>
+            </motion.button>
 
-          {/* Text input */}
-          <div className="flex-1 relative">
+            {/* Text input */}
+            <div className="flex-1 relative rounded-full px-1 transition-colors duration-300 focus-within:bg-white/5">
             <input
               ref={inputRef}
               type="text"
@@ -3921,7 +3961,7 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
                   ? "Listening..."
                   : "Say 'Hey JARVIS' or type a command..."
               }
-              className="w-full bg-transparent border-none outline-none font-rajdhani text-text-primary placeholder:text-text-secondary/50"
+              className="w-full bg-transparent border-none outline-none font-rajdhani text-sm text-text-primary placeholder:text-text-secondary/40"
               disabled={isActivelyListening}
             />
 
@@ -3938,12 +3978,12 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
                     {[0, 1, 2, 3, 4].map((i) => (
                       <motion.div
                         key={i}
-                        className="w-1 bg-accent-green rounded-full"
+                        className="w-[3px] bg-accent-green rounded-full"
                         animate={{
-                          height: [4, 16, 4],
+                          height: [3, 12, 3],
                         }}
                         transition={{
-                          duration: 0.5,
+                          duration: 0.6,
                           delay: i * 0.1,
                           repeat: Infinity,
                           ease: "easeInOut",
@@ -3964,9 +4004,9 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
               handleSubmit();
             }}
             disabled={!input.trim() || isActivelyListening}
-            className="p-3 rounded-full bg-panel-glass hover:bg-panel-border disabled:opacity-30 disabled:cursor-not-allowed transition-colors relative overflow-hidden"
+            className="p-2 rounded-full bg-panel-glass hover:bg-panel-border disabled:opacity-30 disabled:cursor-not-allowed transition-colors relative overflow-hidden"
           >
-            <Send className="w-5 h-5 text-reactor-core" />
+            <Send className="w-4 h-4 text-reactor-core" />
           </button>
 
           {/* Screen Capture button */}
@@ -3976,44 +4016,32 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
               captureScreenshot();
             }}
             disabled={isCapturing}
-            className="p-3 rounded-full bg-panel-glass hover:bg-panel-border disabled:opacity-30 transition-colors relative overflow-hidden"
+            className="p-2 rounded-full bg-panel-glass hover:bg-panel-border disabled:opacity-30 transition-colors relative overflow-hidden"
             title="Take screenshot (copies to clipboard)"
           >
             {isCapturing ? (
-              <div className="w-5 h-5 border-2 border-reactor-core border-t-transparent rounded-full animate-spin" />
+              <div className="w-4 h-4 border-2 border-reactor-core border-t-transparent rounded-full animate-spin" />
             ) : (
-              <Camera className="w-5 h-5 text-reactor-core" />
+              <Camera className="w-4 h-4 text-reactor-core" />
             )}
           </button>
 
-          {/* Persona switcher — Tier 3B */}
-          <PersonaSwitcher />
+            {/* Persona switcher — Tier 3B */}
+            <PersonaSwitcher />
+          </div>
         </div>
 
-        {/* Status indicator */}
-        <div className="mt-2 flex justify-center items-center gap-2">
-          <span className={`text-xs font-rajdhani font-bold ${
-            state === "speaking" ? "text-accent-red animate-pulse" :
-            state === "listening" ? "text-accent-green" :
-            state === "thinking" ? "text-reactor-core animate-pulse" :
-            "text-text-secondary/50"
-          }`}>
-            {state === "idle" && "JARVIS Ready"}
-            {state === "listening" && "● Listening"}
-            {state === "thinking" && "◉ Thinking..."}
-            {state === "speaking" && "◉ Speaking... (Space to stop)"}
+        {/* Metadata strip — one quiet readout line under the pill */}
+        <div className="mt-2 flex justify-center items-center gap-2.5 font-orbitron text-[8px] tracking-[0.2em] uppercase text-text-secondary/35">
+          <span className={state === "speaking" ? "text-accent-green/60" : ""}>
+            {state === "speaking" ? "Core speaking" : "Core ready"}
           </span>
-        </div>
-
-        {/* Quick commands hint */}
-        <div className="mt-1 flex justify-center gap-4 text-xs text-text-secondary/50 font-rajdhani">
+          <span className="text-text-secondary/20">·</span>
           <span>&quot;Hey JARVIS&quot; to wake</span>
-          <span>•</span>
-          <span>Ctrl+Space to focus</span>
-          <span>•</span>
-          <span>Escape to cancel</span>
-          <span>•</span>
-          <span>Click camera for screenshot</span>
+          <span className="text-text-secondary/20">·</span>
+          <span>Ctrl+Space focus</span>
+          <span className="text-text-secondary/20">·</span>
+          <span>Space stop</span>
         </div>
       </div>
 
