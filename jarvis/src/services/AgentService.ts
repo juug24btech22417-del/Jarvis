@@ -144,7 +144,7 @@ const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 // its primary LLM. Included in the race so missions keep working when the
 // OpenRouter free tier is exhausted (429) or a slug is sunset (404).
 const NIM_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
-const NIM_MODEL = process.env.NVIDIA_MODEL || "deepseek-ai/deepseek-v4-flash-0731";
+const NIM_MODEL = process.env.NVIDIA_MODEL || "nvidia/nemotron-3-super-120b-a12b";
 // Additional OpenAI-compatible providers raced by the planner (see llmRace).
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";

@@ -47,7 +47,7 @@ async function applyPersonalityWrapper(factualResponse: string, apiKey: string):
         "Authorization": `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: "deepseek-ai/deepseek-v4-flash-0731",
+        model: process.env.NVIDIA_MODEL || "nvidia/nemotron-3-super-120b-a12b",
         messages: [
           { role: "system", content: PERSONALITY_WRAPPER_PROMPT },
           { role: "user", content: factualResponse },
@@ -1952,7 +1952,7 @@ const emailProgrammaticMatch =
             "Authorization": `Bearer ${nvidiaApiKey}`,
           },
           body: JSON.stringify({
-            model: process.env.NVIDIA_MODEL || "meta/llama-3.1-8b-instruct",
+            model: process.env.NVIDIA_MODEL || "nvidia/nemotron-3-super-120b-a12b",
             messages: [
               { role: "system", content: enhancedSystemPrompt },
               ...messages.map((msg: { role: string; content: string }) => ({

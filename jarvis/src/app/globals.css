@@ -11,7 +11,7 @@
   --accent-color: #7DF9FF;
 
   --bg-gradient-from: #000000;
-  --bg-gradient-via: #01060b;
+  --bg-gradient-via: #000000;
   --bg-gradient-to: #000000;
 
   --panel-glass: rgba(0, 180, 255, 0.06);
@@ -50,8 +50,8 @@ html, body {
 }
 
 body {
-  /* near-black with the faintest arc-blue bloom at the reactor's position */
-  background: radial-gradient(ellipse 900px 700px at 50% 44%, #030d14 0%, #01050a 45%, #000000 75%) !important;
+  /* the blackest black — pure #000, no bloom, no tint */
+  background: #000000 !important;
 }
 
 /* Force text colors */

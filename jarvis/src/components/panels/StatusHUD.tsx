@@ -197,7 +197,7 @@ export default function StatusHUD() {
         animate={{ y: 0, opacity: 1 }}
         transition={{ duration: 0.5, delay: 4, ease: "easeOut" }}
       >
-        {/* Left side - Date/Time */}
+        {/* Left side - Date/Time + status dots */}
         <div className="flex items-center gap-6">
           <div className="font-orbitron text-reactor-core text-lg tracking-wider drop-shadow-[0_0_8px_rgba(0,243,255,0.4)]">
             {currentTime.toLocaleTimeString("en-US", {
@@ -215,10 +215,7 @@ export default function StatusHUD() {
               day: "numeric",
             })}
           </div>
-        </div>
-
-        {/* Center - Status */}
-        <div className="flex items-center gap-3">
+          {/* Status pulse dots — live system heartbeat */}
           <div className="flex gap-1">
             {[0, 1, 2].map((i) => (
               <motion.div
@@ -241,6 +238,9 @@ export default function StatusHUD() {
             ))}
           </div>
         </div>
+
+        {/* Spacer — right cluster flows naturally from the edge */}
+        <div />
 
         {/* Right side - System indicators (clickable) */}
         <div className="flex items-center gap-4 pointer-events-auto">

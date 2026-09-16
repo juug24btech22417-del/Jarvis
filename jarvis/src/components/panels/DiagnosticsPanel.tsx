@@ -28,6 +28,7 @@ import {
   BarChart3,
 } from "lucide-react";
 import { useJarvisStore } from "@/store/jarvis.store";
+import { useToolLatency } from "@/hooks/useToolLatency";
 
 /**
  * Iron Man Diagnostics Panel — persistent right-side console.
@@ -146,6 +147,7 @@ function RingGauge({ value, size = 56, stroke = 4, color, label, sub }: {
 
 // ─── Main Panel ─────────────────────────────────────────────────────
 export default function DiagnosticsPanel() {
+  const toolLatency = useToolLatency();
   const [pcStats, setPcStats] = useState<PCStats | null>(null);
   const [cpuHistory, setCpuHistory] = useState<number[]>(Array(30).fill(0));
   const [ramHistory, setRamHistory] = useState<number[]>(Array(30).fill(0));
@@ -401,34 +403,44 @@ export default function DiagnosticsPanel() {
                   )}
                 </div>
 
-                {/* ─── SYSTEM STATE ─── */}
+                {/* ─── TOOL LATENCY ─── */}
                 <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="font-orbitron text-[8px] text-cyan-400/60 tracking-wider">SYSTEM STATE</span>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="font-orbitron text-[8px] text-white/35 tracking-[0.2em]">TOOL LATENCY</span>
+                    <span className="font-rajdhani text-[8px] text-text-secondary/30">EMA · 45s</span>
                   </div>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    <div className="flex items-center gap-1.5">
-                      <Radio className="w-2.5 h-2.5" style={{ color: sLabel.color }} />
-                      <span className="font-rajdhani text-[9px]" style={{ color: sLabel.color }}>{sLabel.text}</span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <Shield className="w-2.5 h-2.5" style={{ color: sentinelArmed ? "#8FDDB8" : "#5A6A78" }} />
-                      <span className="font-rajdhani text-[9px]" style={{ color: sentinelArmed ? "#8FDDB8" : "#5A6A78" }}>
-                        {sentinelArmed ? "ARMED" : "SAFE"}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <Eye className="w-2.5 h-2.5" style={{ color: biometricActive ? "#8FDDB8" : "#5A6A78" }} />
-                      <span className="font-rajdhani text-[9px]" style={{ color: biometricActive ? "#8FDDB8" : "#5A6A78" }}>
-                        BIO {biometricActive ? "ON" : "OFF"}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <Zap className="w-2.5 h-2.5" style={{ color: activeAlerts > 0 ? "#E8737F" : "#5A6A78" }} />
-                      <span className="font-rajdhani text-[9px]" style={{ color: activeAlerts > 0 ? "#E8737F" : "#5A6A78" }}>
-                        {activeAlerts} ALERT{activeAlerts !== 1 ? "S" : ""}
-                      </span>
-                    </div>
+                  <div className="space-y-2.5">
+                    {toolLatency.map((tool) => {
+                      // Scale: 0–2000ms maps to full width; anything beyond pins.
+                      const pct = tool.latency === null ? 0 : Math.min(100, (tool.latency / 2000) * 100);
+                      return (
+                        <div key={tool.id}>
+                          <div className="flex items-baseline justify-between mb-1">
+                            <span className="font-rajdhani text-[10px] tracking-[0.08em] text-white/75">
+                              {tool.label}
+                            </span>
+                            <span
+                              className="font-rajdhani text-[10px] font-medium tabular-nums"
+                              style={{ color: tool.latency === null ? "#5A6A78" : tool.color }}
+                            >
+                              {tool.latency === null ? "OFFLINE" : `${tool.latency}ms`}
+                            </span>
+                          </div>
+                          {/* Track */}
+                          <div className="h-[5px] rounded-full bg-white/[0.055] overflow-hidden">
+                            <motion.div
+                              className="h-full rounded-full"
+                              style={{
+                                background: `linear-gradient(90deg, ${tool.color}66, ${tool.color})`,
+                              }}
+                              initial={{ width: 0 }}
+                              animate={{ width: `${pct}%` }}
+                              transition={{ type: "spring", stiffness: 120, damping: 22 }}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
 
@@ -485,35 +497,6 @@ export default function DiagnosticsPanel() {
                       ))}
                     </div>
                   )}
-                </div>
-
-                {/* ─── AGENT ACTIVITY ─── */}
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="font-orbitron text-[8px] text-cyan-400/60 tracking-wider">LIVE FEED</span>
-                    <BarChart3 className="w-3 h-3 text-cyan-400/50" />
-                  </div>
-                  <div className="space-y-1">
-                    {recentMessages.length === 0 ? (
-                      <span className="font-rajdhani text-[9px] text-text-secondary/40 italic">No recent activity</span>
-                    ) : (
-                      recentMessages.map((m, i) => (
-                        <div key={m.id} className="flex items-start gap-1.5 py-0.5">
-                          <div className={`w-1 h-1 rounded-full mt-1.5 flex-shrink-0 ${
-                            m.role === "user" ? "bg-reactor-core" : "bg-accent-green"
-                          }`} />
-                          <div className="min-w-0 flex-1">
-                            <span className="font-rajdhani text-[8px] text-text-secondary/40 block">
-                              {m.role === "user" ? "YOU" : "JARVIS"} · {new Date(m.timestamp).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}
-                            </span>
-                            <span className="font-rajdhani text-[9px] text-text-secondary/70 block truncate">
-                              {m.content.slice(0, 60)}{m.content.length > 60 ? "…" : ""}
-                            </span>
-                          </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
                 </div>
 
                 {/* ─── DISKS ─── */}

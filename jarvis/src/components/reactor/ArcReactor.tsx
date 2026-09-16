@@ -15,6 +15,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useJarvisStore } from "@/store/jarvis.store";
+import { useAudioReactivity } from "@/hooks/useAudioReactivity";
 
 /* ─── Hue palettes (driven by reactorHue from useReactorDrive) ───────── */
 
@@ -103,6 +104,7 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
   const state = useJarvisStore((s) => s.state);
   const label = STATE_LABEL[state] ?? "STANDBY";
   const c = HUES[hue];
+  const audioRef = useAudioReactivity();
 
   // Mutable refs the rAF loop drives — zero re-renders per frame.
   const gStruct = useRef<SVGGElement>(null);   // outer structural ring
@@ -144,6 +146,9 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
 
       const voice = st.voiceLevel;
       const load = st.reactorLoad;
+      // Music reactivity — the collar dances when system audio plays.
+      const audio = audioRef.current;
+      const music = audio.musicPlaying ? audio.reactivity : 0;
 
       // Alert pulse (3s decay from reactorPulse).
       const since = st.reactorPulse > 0 ? (Date.now() - st.reactorPulse) / 1000 : 999;
@@ -159,9 +164,9 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
         if (gCollar.current) gCollar.current.setAttribute("transform", `rotate(${t * 9})`);
       }
 
-      // Core breathing + voice swell + alert thump.
+      // Core breathing + voice swell + music beat + alert thump.
       if (gCore.current) {
-        const breath = 1 + Math.sin(t * 1.35) * 0.022 + voice * 0.07 + alertBoost * 0.06;
+        const breath = 1 + Math.sin(t * 1.35) * 0.022 + voice * 0.07 + music * 0.09 + alertBoost * 0.06;
         gCore.current.setAttribute("transform", `scale(${breath})`);
       }
       if (coreDot.current) {
@@ -171,24 +176,35 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
         );
       }
 
-      // Segmented ring thickness tracks reactor load (hero ring).
+      // Segmented ring thickness tracks reactor load + music beats (hero ring).
       if (segRing.current) {
-        segRing.current.setAttribute("stroke-width", String(14 + load * 10 + alertBoost * 5));
+        segRing.current.setAttribute(
+          "stroke-width",
+          String(14 + load * 10 + music * 14 + alertBoost * 5)
+        );
       }
       if (segGlow.current) {
-        segGlow.current.setAttribute("stroke-width", String(20 + load * 14 + alertBoost * 6));
-        segGlow.current.setAttribute("stroke-opacity", String(0.22 + load * 0.25 + alertBoost * 0.2));
+        segGlow.current.setAttribute(
+          "stroke-width",
+          String(20 + load * 14 + music * 18 + alertBoost * 6)
+        );
+        segGlow.current.setAttribute(
+          "stroke-opacity",
+          String(0.22 + load * 0.25 + music * 0.4 + alertBoost * 0.2)
+        );
       }
+      // Belt dots also ride the beat.
+      const musicBoost = music;
 
-      // Voice-reactive particle belt.
+      // Voice- and music-reactive particle belt.
       for (let i = 0; i < BELT.length; i++) {
         const dot = beltDots.current[i];
         if (!dot) continue;
         const b = BELT[i];
         const wave = 0.5 + 0.5 * Math.sin(t * 4.2 + b.phase);
-        const r = b.size * (0.72 + wave * 0.28 + voice * wave * 0.9);
+        const r = b.size * (0.72 + wave * 0.28 + voice * wave * 0.9 + musicBoost * wave * 1.1);
         dot.setAttribute("r", r.toFixed(2));
-        dot.setAttribute("opacity", (0.28 + wave * 0.3 + voice * 0.42).toFixed(2));
+        dot.setAttribute("opacity", (0.28 + wave * 0.3 + voice * 0.42 + musicBoost * 0.4).toFixed(2));
       }
 
       // PWR telemetry at ~4Hz (cheap DOM write, tabular feel).
