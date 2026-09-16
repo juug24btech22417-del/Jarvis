@@ -144,6 +144,10 @@ interface JarvisStore {
   userName: string;
   setUserName: (name: string) => void;
 
+  // Weather telemetry — city shown on the reactor arc (persisted)
+  weatherCity: string;
+  setWeatherCity: (city: string) => void;
+
   // User Interaction
   userInteracted: boolean;
   setUserInteracted: (interacted: boolean) => void;
@@ -306,6 +310,15 @@ export const useJarvisStore = create<JarvisStore>((set) => ({
 
   // User
   userName: "Boss",
+  weatherCity: typeof window !== "undefined"
+    ? localStorage.getItem("jarvis-weather-city") || "Bangalore"
+    : "Bangalore",
+  setWeatherCity: (city) => {
+    set({ weatherCity: city });
+    if (typeof window !== "undefined") {
+      localStorage.setItem("jarvis-weather-city", city);
+    }
+  },
   setUserName: (userName) => set({ userName }),
 
   // User Interaction

@@ -4,7 +4,6 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import ArcReactor from "@/components/reactor/ArcReactor";
 import StatusHUD from "@/components/panels/StatusHUD";
-import TelemetryTicker from "@/components/panels/TelemetryTicker";
 import DiagnosticsPanel from "@/components/panels/DiagnosticsPanel";
 import { useWeatherAmbient } from "@/hooks/useWeatherAmbient";
 import ReactorTelemetry from "@/components/panels/ReactorTelemetry";
@@ -1517,9 +1516,6 @@ export default function Home() {
 
           {/* Iron Man Diagnostics Panel — right sidebar */}
           <DiagnosticsPanel />
-
-          {/* Live Telemetry Ticker — bottom HUD strip */}
-          <TelemetryTicker />
         </>
       )}
 

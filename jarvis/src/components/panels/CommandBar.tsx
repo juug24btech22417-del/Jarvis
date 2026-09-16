@@ -2642,6 +2642,8 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
       switch (parsed.intent) {
         case "weather": {
           const location = (parsed.params.location as string) || "London";
+          // Aim the reactor's weather arc at this city too.
+          useJarvisStore.getState().setWeatherCity(location);
           try {
             const response = await fetch(`/api/weather?city=${encodeURIComponent(location)}`);
             if (!response.ok) {
@@ -3420,6 +3422,8 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
 
         case "weather": {
           const city = parsed.params?.location || "London";
+          // Aim the reactor's weather arc at this city too.
+          useJarvisStore.getState().setWeatherCity(city);
           try {
             const response = await fetch(`/api/weather?city=${encodeURIComponent(city)}`);
             if (!response.ok) {

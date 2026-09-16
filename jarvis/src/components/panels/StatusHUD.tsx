@@ -205,9 +205,9 @@ export default function StatusHUD() {
 
   return (
     <>
-      {/* Top Holographic Navigation Bar */}
+      {/* Top floating metrics — no panel chrome, just glowing text in the dark */}
       <motion.div
-        className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-6 py-3 holographic-panel border-b border-cyan-500/20 bg-[#050b14]/85 backdrop-blur-md"
+        className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-6 py-3 pointer-events-none"
         initial={{ y: -100, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}
         transition={{ duration: 0.5, delay: 4, ease: "easeOut" }}
@@ -260,11 +260,11 @@ export default function StatusHUD() {
           </span>
         </div>
 
-        {/* Right side - System indicators */}
-        <div className="flex items-center gap-4">
+        {/* Right side - System indicators (clickable) */}
+        <div className="flex items-center gap-4 pointer-events-auto">
           {/* Quick Stats Preview */}
           <div
-            className="flex items-center gap-3 px-2.5 py-1 rounded-lg"
+            className="flex items-center gap-3"
             title="System diagnostics (see right panel)"
           >
             {/* CPU */}
@@ -302,7 +302,7 @@ export default function StatusHUD() {
           </div>
           
           {/* Autonomous Status Indicators */}
-          <div className="flex items-center gap-3 border-l border-panel-border pl-4">
+          <div className="flex items-center gap-3">
             <button
               onClick={() => setSentinelActive(!sentinelActive)}
               title={sentinelActive ? "Sentinel Eyes: ACTIVE — click to toggle" : "Sentinel Eyes: OFFLINE — click to toggle"}
@@ -398,7 +398,7 @@ export default function StatusHUD() {
           </button>
 
           {/* JARVIS Logo */}
-          <div className="font-orbitron text-reactor-core text-sm tracking-widest border-l border-panel-border pl-4 flex items-center">
+          <div className="font-orbitron text-reactor-core text-sm tracking-widest flex items-center">
             J.A.R.V.I.S.
             <span className="ml-2 text-[10px] text-accent-amber font-mono font-bold tracking-normal px-1 py-0.2 bg-amber-500/10 border border-amber-500/20 rounded">
               NVIDIA
