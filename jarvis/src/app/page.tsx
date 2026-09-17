@@ -52,6 +52,7 @@ import MissionControlPanel from "@/components/panels/MissionControlPanel";
 import AnalyticsPanel from "@/components/panels/AnalyticsPanel";
 import MacroPanel from "@/components/panels/MacroPanel";
 import { useJarvisStore } from "@/store/jarvis.store";
+import { playRepulsor } from "@/lib/sounds";
 import { useTextToSpeech } from "@/hooks/useVoice";
 
 // Boot sequence — power gate. Pure black screen; one press starts the
@@ -367,49 +368,11 @@ export default function Home() {
 
   useEffect(() => {
     if (bootComplete && userInteracted) {
-      const playStartupSound = async () => {
-        try {
-          const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-          if (audioCtx.state === "suspended") await audioCtx.resume();
-          
-          // Sound 1: Hologram sweep
-          const oscillator = audioCtx.createOscillator();
-          const gainNode = audioCtx.createGain();
-          
-          oscillator.type = 'sine';
-          oscillator.frequency.setValueAtTime(200, audioCtx.currentTime);
-          oscillator.frequency.exponentialRampToValueAtTime(1200, audioCtx.currentTime + 0.5);
-          
-          gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
-          gainNode.gain.linearRampToValueAtTime(0.2, audioCtx.currentTime + 0.1);
-          gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.8);
-          
-          oscillator.connect(gainNode);
-          gainNode.connect(audioCtx.destination);
-          
-          oscillator.start();
-          oscillator.stop(audioCtx.currentTime + 1);
-
-          // Sound 2: High-frequency "ping"
-          const ping = audioCtx.createOscillator();
-          const pingGain = audioCtx.createGain();
-          ping.type = 'triangle';
-          ping.frequency.setValueAtTime(2400, audioCtx.currentTime + 0.3);
-          pingGain.gain.setValueAtTime(0, audioCtx.currentTime + 0.3);
-          pingGain.gain.linearRampToValueAtTime(0.1, audioCtx.currentTime + 0.35);
-          pingGain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.6);
-          ping.connect(pingGain);
-          pingGain.connect(audioCtx.destination);
-          ping.start(audioCtx.currentTime + 0.3);
-          ping.stop(audioCtx.currentTime + 0.6);
-        } catch (e) {
-          console.warn("Audio context failed to start:", e);
-        }
-      };
-
-      playStartupSound();
+      // Boot sound — the same repulsor blast as the toggle, fired the moment
+      // the reactor finishes assembling (already unlocked by the gate press).
+      playRepulsor();
     }
-  }, [bootComplete]);
+  }, [bootComplete, userInteracted]);
 
   useEffect(() => {
     if (bootComplete && userInteracted && !hasGreetedRef.current) {

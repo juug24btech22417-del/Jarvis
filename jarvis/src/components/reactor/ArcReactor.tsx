@@ -19,31 +19,9 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useJarvisStore } from "@/store/jarvis.store";
 import { useAudioReactivity } from "@/hooks/useAudioReactivity";
+import { playRepulsor, primeRepulsor } from "@/lib/sounds";
 
 /* ─── Hue palettes (driven by reactorHue from useReactorDrive) ───────── */
-
-/**
- * Repulsor blast — fires on every dormant ↔ standby toggle. A shared,
- * preloaded Audio element: browsers keep it unlocked after the power-gate
- * click, so the blast lands on the same frame as the state flip.
- */
-let repulsorEl: HTMLAudioElement | null = null;
-function playRepulsor() {
-  if (typeof window === "undefined") return;
-  try {
-    if (!repulsorEl) {
-      repulsorEl = new Audio("/sounds/repulsor.mp3");
-      repulsorEl.preload = "auto";
-      repulsorEl.volume = 0.55;
-    }
-    repulsorEl.currentTime = 0;
-    void repulsorEl.play().catch(() => {
-      /* autoplay block — silently skip */
-    });
-  } catch {
-    /* never let sound break the toggle */
-  }
-}
 
 const HUES = {
   cyan: { accent: "#00D4FF", soft: "#7DF9FF", deep: "#0E5F7A", white: "#CFEFFC", ring: "#0A6EE0", ringBright: "#2E9BFF" },
@@ -592,6 +570,9 @@ export default function ArcReactor() {
   const startBoot = useCallback(() => {
     if (useJarvisStore.getState().assemblyStarted) return;
     useJarvisStore.getState().startAssembly();
+    // Warm the repulsor sound inside this gesture so every later toggle
+    // (even the first one right after a refresh) blasts instantly.
+    primeRepulsor();
 
     const steps = [
       { progress: 0, delay: 0 },
