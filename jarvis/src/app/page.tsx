@@ -565,9 +565,11 @@ export default function Home() {
 
   const { isSpeaking, state, setState } = useJarvisStore();
 
-  // Sync global speaking state to JARVIS state
+  // Sync global speaking state to JARVIS state — but NEVER stomp an explicit
+  // DORMANT (sleep) choice: speech may not force the reactor awake, and an
+  // utterance ending may not wake it either. Idle is the only auto state.
   useEffect(() => {
-    if (isSpeaking && state !== "speaking") {
+    if (isSpeaking && state !== "speaking" && state !== "sleep") {
       setState("speaking");
     } else if (!isSpeaking && state === "speaking") {
       setState("idle");
