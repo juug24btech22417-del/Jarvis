@@ -55,6 +55,9 @@ interface JarvisStore {
   setBootProgress: (progress: number) => void;
   bootComplete: boolean;
   setBootComplete: (complete: boolean) => void;
+  /** Latches true the moment the power gate is pressed — starts the reactor assembly. */
+  assemblyStarted: boolean;
+  startAssembly: () => void;
 
   // Messages
   messages: Message[];
@@ -192,6 +195,9 @@ export const useJarvisStore = create<JarvisStore>((set) => ({
   setBootProgress: (bootProgress) => set({ bootProgress }),
   bootComplete: false,
   setBootComplete: (bootComplete) => set({ bootComplete }),
+  assemblyStarted: false,
+  startAssembly: () =>
+    set((s) => (s.assemblyStarted ? s : { assemblyStarted: true })),
 
   // Messages
   messages: [],

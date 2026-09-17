@@ -20,89 +20,30 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useJarvisStore } from "@/store/jarvis.store";
 import { useAudioReactivity } from "@/hooks/useAudioReactivity";
 
-/* ─── Boot assembly soundtrack (synthesized — zero assets) ─────────────── */
+/* ─── Hue palettes (driven by reactorHue from useReactorDrive) ───────── */
 
 /**
- * Layer-landing timestamps (seconds) — must match ASSEMBLY delays below.
- * hum → snaps per layer → final power swell.
+ * Repulsor blast — fires on every dormant ↔ standby toggle. A shared,
+ * preloaded Audio element: browsers keep it unlocked after the power-gate
+ * click, so the blast lands on the same frame as the state flip.
  */
-const SND = { hum: 0.05, snaps: [0.15, 0.5, 0.75, 1.0, 1.25, 1.5], swell: 1.75 };
-
-function createAssemblyAudio() {
-  let ctx: AudioContext | null = null;
-  let played = false;
-
-  const ensureCtx = (): AudioContext | null => {
-    if (typeof window === "undefined") return null;
-    if (!ctx) {
-      const AC = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-      if (!AC) return null;
-      ctx = new AC();
+let repulsorEl: HTMLAudioElement | null = null;
+function playRepulsor() {
+  if (typeof window === "undefined") return;
+  try {
+    if (!repulsorEl) {
+      repulsorEl = new Audio("/sounds/repulsor.mp3");
+      repulsorEl.preload = "auto";
+      repulsorEl.volume = 0.55;
     }
-    if (ctx.state === "suspended") void ctx.resume();
-    return ctx.state === "running" ? ctx : null;
-  };
-
-  const snap = (ac: AudioContext, t: number, freq: number) => {
-    // Soft mechanical clink — short sine with fast pitch drop + quick decay.
-    const osc = ac.createOscillator();
-    const gain = ac.createGain();
-    osc.type = "sine";
-    osc.frequency.setValueAtTime(freq, t);
-    osc.frequency.exponentialRampToValueAtTime(freq * 0.72, t + 0.09);
-    gain.gain.setValueAtTime(0.0001, t);
-    gain.gain.exponentialRampToValueAtTime(0.07, t + 0.012);
-    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
-    osc.connect(gain).connect(ac.destination);
-    osc.start(t);
-    osc.stop(t + 0.16);
-  };
-
-  const play = () => {
-    const ac = ensureCtx();
-    if (!ac || played) return;
-    played = true;
-    const now = ac.currentTime + 0.02;
-
-    // Rising hum — the reactor "waking up" under the assembly.
-    const hum = ac.createOscillator();
-    const humGain = ac.createGain();
-    hum.type = "triangle";
-    hum.frequency.setValueAtTime(52, now + SND.hum);
-    hum.frequency.exponentialRampToValueAtTime(108, now + SND.hum + 1.6);
-    humGain.gain.setValueAtTime(0.0001, now + SND.hum);
-    humGain.gain.exponentialRampToValueAtTime(0.045, now + SND.hum + 0.5);
-    humGain.gain.exponentialRampToValueAtTime(0.0001, now + SND.swell + 1.4);
-    hum.connect(humGain).connect(ac.destination);
-    hum.start(now + SND.hum);
-    hum.stop(now + SND.swell + 1.5);
-
-    // One clink per layer landing — pitch rises as the stack builds.
-    const snapFreqs = [340, 392, 466, 523, 622, 700];
-    SND.snaps.forEach((s, i) => snap(ac, now + s, snapFreqs[i]));
-
-    // Final power swell — warm chord bloom as the core ignites.
-    const swell = ac.createOscillator();
-    const swellGain = ac.createGain();
-    const swellFilter = ac.createBiquadFilter();
-    swell.type = "sawtooth";
-    swell.frequency.setValueAtTime(110, now + SND.swell);
-    swell.frequency.exponentialRampToValueAtTime(220, now + SND.swell + 0.9);
-    swellFilter.type = "lowpass";
-    swellFilter.frequency.setValueAtTime(400, now + SND.swell);
-    swellFilter.frequency.exponentialRampToValueAtTime(2400, now + SND.swell + 0.9);
-    swellGain.gain.setValueAtTime(0.0001, now + SND.swell);
-    swellGain.gain.exponentialRampToValueAtTime(0.09, now + SND.swell + 0.25);
-    swellGain.gain.exponentialRampToValueAtTime(0.0001, now + SND.swell + 1.5);
-    swell.connect(swellFilter).connect(swellGain).connect(ac.destination);
-    swell.start(now + SND.swell);
-    swell.stop(now + SND.swell + 1.6);
-  };
-
-  return { play };
+    repulsorEl.currentTime = 0;
+    void repulsorEl.play().catch(() => {
+      /* autoplay block — silently skip */
+    });
+  } catch {
+    /* never let sound break the toggle */
+  }
 }
-
-/* ─── Hue palettes (driven by reactorHue from useReactorDrive) ───────── */
 
 const HUES = {
   cyan: { accent: "#00D4FF", soft: "#7DF9FF", deep: "#0E5F7A", white: "#CFEFFC", ring: "#0A6EE0", ringBright: "#2E9BFF" },
@@ -204,15 +145,25 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
   const pwrText = useRef<SVGTextElement>(null);
   const flecks = useRef<SVGGElement>(null);    // alert flecks
   const segGlow = useRef<SVGCircleElement>(null); // collar glow underlay
+  const gSegWrap = useRef<SVGGElement>(null);  // hero ring assembly wrapper
+  const gTele = useRef<SVGGElement>(null);     // quiet telemetry block
   const beltDots = useRef<(SVGCircleElement | null)[]>([]);
 
-  // Single animation loop — every ring, every dot, every breath.
+  // Single animation loop — every ring, every dot, every breath, and the
+  // whole boot assembly. One clock, so motion and beats stay in perfect sync.
   // All store values read via getState() (no subscriptions, no re-renders).
   useEffect(() => {
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     let raf = 0;
     let last = performance.now();
-    let t = 0; // seconds of accumulated animation time
+    let t = 0;                            // seconds of accumulated animation time
+    let bootStart: number | null = null;  // timestamp of the power-gate press
+
+    // Apple-style ease-out — fast attack, long silky settle.
+    const easeOut = (x: number) => (x <= 0 ? 0 : 1 - Math.pow(1 - x, 4));
+    /** Assembly progress of one layer: delay/duration in seconds since press. */
+    const stage = (boot: number, delay: number, dur: number) =>
+      easeOut(Math.min(1, Math.max(0, (boot - delay) / dur)));
 
     const frame = (now: number) => {
       raf = requestAnimationFrame(frame);
@@ -224,6 +175,9 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
       last = now;
 
       const st = useJarvisStore.getState();
+      if (st.assemblyStarted && bootStart === null) bootStart = now;
+      const boot = bootStart === null ? -1 : (now - bootStart) / 1000;
+
       // Sleep = barely alive; booting = cautious spin-up.
       const speed =
         st.state === "sleep" ? 0.12 : st.state === "booting" ? 0.55 : 1;
@@ -239,25 +193,63 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
       const since = st.reactorPulse > 0 ? (Date.now() - st.reactorPulse) / 1000 : 999;
       const alertBoost = since < 3 ? 1 - since / 3 : 0;
 
+      // Boot assembly choreography:
+      // core ignites > collar snaps > belt blooms > hero ring lands >
+      // tick ring collapses in > outer orbit settles > telemetry fades.
+      const pCore   = reduced ? 1 : stage(boot, 0.0, 0.9);
+      const pCollar = reduced ? 1 : stage(boot, 0.35, 0.9);
+      const pBelt   = reduced ? 1 : stage(boot, 0.6, 0.9);
+      const pRing   = reduced ? 1 : stage(boot, 0.9, 1.0);
+      const pTicks  = reduced ? 1 : stage(boot, 1.25, 0.9);
+      const pOrbit  = reduced ? 1 : stage(boot, 1.6, 1.1);
+      const pTele   = reduced ? 1 : stage(boot, 2.3, 0.9);
+
+      if (gCore.current) {
+        const breath =
+          (1 + Math.sin(t * 1.35) * 0.022 + voice * 0.07 + music * 0.09 + alertBoost * 0.06) *
+          Math.max(0.0001, pCore);
+        gCore.current.setAttribute("transform", "scale(" + breath.toFixed(4) + ")");
+        gCore.current.setAttribute("opacity", pCore.toFixed(3));
+      }
+      if (gCollar.current) {
+        const s = 0.5 + 0.5 * pCollar;
+        gCollar.current.setAttribute("transform", "rotate(" + (t * 9).toFixed(2) + ") scale(" + s.toFixed(4) + ")");
+        gCollar.current.setAttribute("opacity", pCollar.toFixed(3));
+      }
+      if (gBelt.current) {
+        const s = 1.3 - 0.3 * pBelt;
+        gBelt.current.setAttribute("transform", "rotate(" + (t * 7).toFixed(2) + ") scale(" + s.toFixed(4) + ")");
+        gBelt.current.setAttribute("opacity", pBelt.toFixed(3));
+      }
+      if (gSegWrap.current) {
+        const s = 0.6 + 0.4 * pRing;
+        gSegWrap.current.setAttribute("transform", "scale(" + s.toFixed(4) + ")");
+        gSegWrap.current.setAttribute("opacity", pRing.toFixed(3));
+      }
+      if (gTicks.current) {
+        const s = 0.3 + 0.7 * pTicks;
+        gTicks.current.setAttribute("transform", "rotate(" + (-t * 4.5).toFixed(2) + ") scale(" + s.toFixed(4) + ")");
+        gTicks.current.setAttribute("opacity", pTicks.toFixed(3));
+      }
+      if (gStruct.current) {
+        const s = 1.5 - 0.5 * pOrbit;
+        const rot = -30 * (1 - pOrbit) + t * 2.2;
+        gStruct.current.setAttribute("transform", "rotate(" + rot.toFixed(2) + ") scale(" + s.toFixed(4) + ")");
+        gStruct.current.setAttribute("opacity", pOrbit.toFixed(3));
+      }
+      if (gTele.current) {
+        gTele.current.setAttribute("opacity", (0.4 * pTele).toFixed(3));
+      }
+      // Inner counter-rotating segments live inside the hero wrapper.
       if (!reduced) {
-        // Layered rotation — each ring its own speed & direction.
-        if (gStruct.current) gStruct.current.setAttribute("transform", `rotate(${t * 2.2})`);
-        if (gTicks.current) gTicks.current.setAttribute("transform", `rotate(${-t * 4.5})`);
-        if (gBelt.current) gBelt.current.setAttribute("transform", `rotate(${t * 7})`);
-        if (gSeg.current) gSeg.current.setAttribute("transform", `rotate(${t * 20})`);
-        if (gSegB.current) gSegB.current.setAttribute("transform", `rotate(${-t * 13})`);
-        if (gCollar.current) gCollar.current.setAttribute("transform", `rotate(${t * 9})`);
+        if (gSeg.current) gSeg.current.setAttribute("transform", "rotate(" + (t * 20).toFixed(2) + ")");
+        if (gSegB.current) gSegB.current.setAttribute("transform", "rotate(" + (-t * 13).toFixed(2) + ")");
       }
 
-      // Core breathing + voice swell + music beat + alert thump.
-      if (gCore.current) {
-        const breath = 1 + Math.sin(t * 1.35) * 0.022 + voice * 0.07 + music * 0.09 + alertBoost * 0.06;
-        gCore.current.setAttribute("transform", `scale(${breath})`);
-      }
       if (coreDot.current) {
         coreDot.current.setAttribute(
           "opacity",
-          String(0.75 + Math.sin(t * 1.35) * 0.1 + voice * 0.15)
+          String((0.75 + Math.sin(t * 1.35) * 0.1 + voice * 0.15) * pCore)
         );
       }
 
@@ -271,15 +263,13 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
       if (segGlow.current) {
         segGlow.current.setAttribute(
           "stroke-width",
-          String(20 + load * 14 + music * 18 + alertBoost * 6)
+          String(15 + load * 8 + music * 12 + alertBoost * 4)
         );
         segGlow.current.setAttribute(
           "stroke-opacity",
-          String(0.22 + load * 0.25 + music * 0.4 + alertBoost * 0.2)
+          String(0.14 + load * 0.16 + music * 0.3 + alertBoost * 0.12)
         );
       }
-      // Belt dots also ride the beat.
-      const musicBoost = music;
 
       // Voice- and music-reactive particle belt.
       for (let i = 0; i < BELT.length; i++) {
@@ -287,14 +277,14 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
         if (!dot) continue;
         const b = BELT[i];
         const wave = 0.5 + 0.5 * Math.sin(t * 4.2 + b.phase);
-        const r = b.size * (0.72 + wave * 0.28 + voice * wave * 0.9 + musicBoost * wave * 1.1);
+        const r = b.size * (0.72 + wave * 0.28 + voice * wave * 0.9 + music * wave * 1.1);
         dot.setAttribute("r", r.toFixed(2));
-        dot.setAttribute("opacity", (0.28 + wave * 0.3 + voice * 0.42 + musicBoost * 0.4).toFixed(2));
+        dot.setAttribute("opacity", (0.28 + wave * 0.3 + voice * 0.42 + music * 0.4).toFixed(2));
       }
 
       // PWR telemetry at ~4Hz (cheap DOM write, tabular feel).
       if (pwrText.current && Math.floor(t * 4) !== Math.floor((t - dt * speed) * 4)) {
-        pwrText.current.textContent = `PWR ${String(Math.round(load * 100)).padStart(3, "0")}%`;
+        pwrText.current.textContent = "PWR " + String(Math.round(load * 100)).padStart(3, "0") + "%";
       }
 
       // Alert flecks: whisper-faint at idle, pulsing red on alert.
@@ -339,7 +329,7 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
           </feMerge>
         </filter>
         <filter id="mk2-halo" x="-80%" y="-80%" width="260%" height="260%">
-          <feGaussianBlur stdDeviation="16" />
+          <feGaussianBlur stdDeviation="9" />
         </filter>
         <filter id="mk2-text" x="-40%" y="-40%" width="180%" height="180%">
           <feGaussianBlur stdDeviation="1.6" result="b" />
@@ -351,13 +341,7 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
       </defs>
 
       {/* ── Layer 1 · outer structural rings (Image 1's white orbit) ── */}
-      <motion.g
-        ref={gStruct}
-        style={{ willChange: "transform" }}
-        initial={{ scale: 1.5, opacity: 0, rotate: -30 }}
-        animate={{ scale: 1, opacity: 1, rotate: 0 }}
-        transition={{ delay: 1.5, type: "spring", stiffness: 160, damping: 17, mass: 0.9 }}
-      >
+      <g ref={gStruct} style={{ willChange: "transform" }}>
         <circle r={442} fill="none" stroke={c.white} strokeOpacity={0.14} strokeWidth={1} />
         <circle
           r={430}
@@ -392,16 +376,10 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
             />
           ))}
         </g>
-      </motion.g>
+      </g>
 
       {/* ── Layer 2 · tick ring ─────────────────────────────────────── */}
-      <motion.g
-        ref={gTicks}
-        style={{ willChange: "transform" }}
-        initial={{ scale: 0.3, opacity: 0 }}
-        animate={{ scale: 1, opacity: 1 }}
-        transition={{ delay: 1.0, type: "spring", stiffness: 190, damping: 16, mass: 0.8 }}
-      >
+      <g ref={gTicks} style={{ willChange: "transform" }}>
         <circle
           r={370}
           fill="none"
@@ -419,16 +397,10 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
           strokeDasharray={DASH.ticksBright}
         />
         <circle r={352} fill="none" stroke={c.white} strokeOpacity={0.1} strokeWidth={1} />
-      </motion.g>
+      </g>
 
       {/* ── Layer 3 · voice-reactive particle belt ──────────────────── */}
-      <motion.g
-        ref={gBelt}
-        style={{ willChange: "transform" }}
-        initial={{ scale: 1.3, opacity: 0 }}
-        animate={{ scale: 1, opacity: 1 }}
-        transition={{ delay: 0.75, type: "spring", stiffness: 170, damping: 18 }}
-      >
+      <g ref={gBelt} style={{ willChange: "transform" }}>
         <circle
           r={262}
           fill="none"
@@ -455,22 +427,18 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
             />
           );
         })}
-      </motion.g>
+      </g>
 
       {/* ── Layer 4 · segmented energy ring — THE blue circle (Image 1's hero) ── */}
-      <motion.g
-        initial={{ scale: 0.6, opacity: 0 }}
-        animate={{ scale: 1, opacity: 1 }}
-        transition={{ delay: 1.25, type: "spring", stiffness: 180, damping: 15, mass: 0.8 }}
-      >
+      <g ref={gSegWrap} style={{ willChange: "transform" }}>
       {/* Soft glow underlay so the collar radiates without washing the page */}
       <circle
         ref={segGlow}
         r={204}
         fill="none"
         stroke={c.ringBright}
-        strokeOpacity={0.3}
-        strokeWidth={20}
+        strokeOpacity={0.16}
+        strokeWidth={15}
         strokeDasharray={DASH.segBright}
         filter="url(#mk2-halo)"
         style={{ willChange: "transform" }}
@@ -507,16 +475,10 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
         />
         <circle r={178} fill="none" stroke={c.ringBright} strokeOpacity={0.45} strokeWidth={2} />
       </g>
-      </motion.g>
+      </g>
 
       {/* ── Layer 5 · inner collar ──────────────────────────────────── */}
-      <motion.g
-        ref={gCollar}
-        style={{ willChange: "transform" }}
-        initial={{ scale: 0.5, opacity: 0 }}
-        animate={{ scale: 1, opacity: 1 }}
-        transition={{ delay: 0.5, type: "spring", stiffness: 200, damping: 15, mass: 0.7 }}
-      >
+      <g ref={gCollar} style={{ willChange: "transform" }}>
         <circle
           r={150}
           fill="none"
@@ -527,18 +489,12 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
           strokeLinecap="round"
         />
         <circle r={134} fill="none" stroke={c.white} strokeOpacity={0.18} strokeWidth={1} />
-      </motion.g>
+      </g>
 
       {/* ── Layer 6 · core + state label ────────────────────────────── */}
-      <motion.g
-        ref={gCore}
-        style={{ willChange: "transform", transformOrigin: "0 0" }}
-        initial={{ scale: 0, opacity: 0 }}
-        animate={{ scale: 1, opacity: 1 }}
-        transition={{ delay: 0.15, type: "spring", stiffness: 210, damping: 14, mass: 0.6 }}
-      >
+      <g ref={gCore} style={{ willChange: "transform", transformOrigin: "0 0" }}>
         {/* tight bloom — glows on the core, not the page */}
-        <circle r={118} fill={c.accent} opacity={0.18} filter="url(#mk2-halo)" />
+        <circle r={118} fill={c.accent} opacity={0.1} filter="url(#mk2-halo)" />
         <circle r={96} fill="url(#mk2-core)" />
         <circle r={78} fill="url(#mk2-iris)" />
         {/* filled center disc — the MARK II's blue heart (contained, no blur) */}
@@ -580,17 +536,16 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
             </text>
           </motion.g>
         </AnimatePresence>
-      </motion.g>
+      </g>
 
       {/* ── Layer 7 · quiet telemetry on the outer field ────────────── */}
-      <motion.g
+      <g
+        ref={gTele}
         fontFamily="Orbitron, sans-serif"
         fontSize={13}
         letterSpacing={2.5}
         fill={c.white}
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 0.4 }}
-        transition={{ delay: 2.2, duration: 0.8 }}
+        opacity={0}
       >
         <text x={-338} y={-336} textAnchor="start">
           CORE MK.II
@@ -601,7 +556,7 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
         <text x={0} y={472} textAnchor="middle" fontSize={11} letterSpacing={4}>
           STARK INDUSTRIES · ARC REACTOR
         </text>
-      </motion.g>
+      </g>
     </svg>
   );
 }
@@ -614,28 +569,6 @@ export default function ArcReactor() {
   const [isClient, setIsClient] = useState(false);
   const hue = useJarvisStore((s) => s.reactorHue);
   const [size, setSize] = useState(0);
-  const audioRef = useRef<ReturnType<typeof createAssemblyAudio> | null>(null);
-
-  // Autoplay policy: browsers block audio until a user gesture. Arm the
-  // soundtrack on the very first interaction during boot; if boot finishes
-  // before any gesture, skip gracefully (silent assembly).
-  useEffect(() => {
-    if (!isClient) return;
-    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (reduced) return;
-    audioRef.current = createAssemblyAudio();
-    const arm = () => {
-      audioRef.current?.play();
-      window.removeEventListener("pointerdown", arm);
-      window.removeEventListener("keydown", arm);
-    };
-    window.addEventListener("pointerdown", arm);
-    window.addEventListener("keydown", arm);
-    return () => {
-      window.removeEventListener("pointerdown", arm);
-      window.removeEventListener("keydown", arm);
-    };
-  }, [isClient]);
 
   // Responsive: the reactor stays a centerpiece, never a sprawl —
   // scaled to the smaller viewport dimension and capped on big monitors.
@@ -651,35 +584,49 @@ export default function ArcReactor() {
 
   useEffect(() => {
     setIsClient(true);
+  }, []);
 
-    const bootSequence = async () => {
-      const steps = [
-        { progress: 0, delay: 0 },
-        { progress: 10, delay: 500 },
-        { progress: 30, delay: 1000 },
-        { progress: 50, delay: 1800 },
-        { progress: 70, delay: 2500 },
-        { progress: 85, delay: 3000 },
-        { progress: 100, delay: 3500 },
-      ];
+  // The power gate calls this in its onClick — the same user gesture that
+  // clears the overlay, so the AudioContext is unlocked right as the
+  // assembly begins. Sound and motion start in the same instant.
+  const startBoot = useCallback(() => {
+    if (useJarvisStore.getState().assemblyStarted) return;
+    useJarvisStore.getState().startAssembly();
 
+    const steps = [
+      { progress: 0, delay: 0 },
+      { progress: 10, delay: 500 },
+      { progress: 30, delay: 1000 },
+      { progress: 50, delay: 1800 },
+      { progress: 70, delay: 2500 },
+      { progress: 85, delay: 3000 },
+      { progress: 100, delay: 3500 },
+    ];
+
+    (async () => {
       for (const step of steps) {
         await new Promise((resolve) =>
           setTimeout(resolve, step.delay - (steps[steps.indexOf(step) - 1]?.delay || 0))
         );
         setBootProgress(step.progress);
       }
-
       setBootComplete(true);
       setState("idle");
-    };
-
-    bootSequence();
+    })();
   }, [setBootProgress, setBootComplete, setState]);
+
+  // Expose the boot trigger to the power-gate overlay via a custom event —
+  // the gate lives in page.tsx, the reactor + audio live here.
+  useEffect(() => {
+    const onGate = () => startBoot();
+    window.addEventListener("jarvis:power-gate", onGate);
+    return () => window.removeEventListener("jarvis:power-gate", onGate);
+  }, [startBoot]);
 
   const handleWake = useCallback(() => {
     if (!bootComplete) return;
     const currentState = useJarvisStore.getState().state;
+    playRepulsor();
     setState(currentState === "sleep" ? "idle" : "sleep");
   }, [bootComplete, setState]);
 

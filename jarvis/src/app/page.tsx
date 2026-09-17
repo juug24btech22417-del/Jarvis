@@ -54,175 +54,127 @@ import MacroPanel from "@/components/panels/MacroPanel";
 import { useJarvisStore } from "@/store/jarvis.store";
 import { useTextToSpeech } from "@/hooks/useVoice";
 
-// Boot sequence overlay
+// Boot sequence — power gate. Pure black screen; one press starts the
+// reactor assembly, the soundtrack, and the greeting in a single gesture.
 function BootSequence() {
-  const { bootProgress, bootComplete, userInteracted, setUserInteracted } = useJarvisStore();
-  const [showWelcome, setShowWelcome] = useState(false);
+  const bootComplete = useJarvisStore((s) => s.bootComplete);
+  const setUserInteracted = useJarvisStore((s) => s.setUserInteracted);
+  const [powered, setPowered] = useState(false);
   const [bootFinished, setBootFinished] = useState(false);
 
   useEffect(() => {
-    if (bootComplete) {
-      const timer = setTimeout(() => setShowWelcome(true), 100);
+    if (bootComplete && powered) {
+      const timer = setTimeout(() => setBootFinished(true), 3600);
       return () => clearTimeout(timer);
     }
-  }, [bootComplete]);
+  }, [bootComplete, powered]);
 
-  useEffect(() => {
-    if (userInteracted) {
-      const timer = setTimeout(() => {
-        setBootFinished(true);
-      }, 3000);
-      return () => clearTimeout(timer);
-    }
-  }, [userInteracted]);
-
-  if (bootFinished) return null;
-
-  if (bootComplete && showWelcome) {
-    return (
-      <AnimatePresence>
-        {!userInteracted ? (
-          <motion.div
-            key="authorization-overlay"
-            initial={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 1 }}
-            className="fixed inset-0 z-[60] flex items-center justify-center bg-deep-space/80 backdrop-blur-md"
-          >
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              className="text-center"
-            >
-              <motion.div
-                animate={{ scale: [1, 1.05, 1], opacity: [0.7, 1, 0.7] }}
-                transition={{ duration: 2, repeat: Infinity }}
-                className="mb-8"
-              >
-                <div className="w-24 h-24 mx-auto rounded-full border-2 border-reactor-core/30 flex items-center justify-center">
-                  <div className="w-16 h-16 rounded-full bg-reactor-core/20 animate-pulse" />
-                </div>
-              </motion.div>
-              
-              <h1 className="font-orbitron text-3xl text-reactor-core mb-2">SYSTEM READY</h1>
-              <p className="font-rajdhani text-text-secondary mb-8 tracking-widest uppercase">Waiting for Authorization</p>
-              
-              <motion.button
-                whileHover={{ scale: 1.05, boxShadow: "0 0 20px rgba(0, 243, 255, 0.5)" }}
-                whileTap={{ scale: 0.95 }}
-                onClick={() => {
-                  setUserInteracted(true);
-                  // Optional: Prime audio engine immediately with a short chime or silent speak
-                  if (typeof window !== 'undefined' && window.speechSynthesis) {
-                    const silence = new SpeechSynthesisUtterance("");
-                    window.speechSynthesis.speak(silence);
-                  }
-                }}
-                className="px-8 py-3 bg-transparent border border-reactor-core text-reactor-core font-orbitron text-sm tracking-widest hover:bg-reactor-core/10 transition-all"
-              >
-                INITIALIZE PROTOCOLS
-              </motion.button>
-            </motion.div>
-          </motion.div>
-        ) : (
-          <motion.div
-            initial={{ opacity: 1 }}
-            animate={{ opacity: 0 }}
-            transition={{ duration: 1, delay: 2 }}
-            className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none"
-          >
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              transition={{ duration: 0.5 }}
-              className="text-center"
-            >
-              <motion.h1
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.2 }}
-                className="font-orbitron text-4xl md:text-6xl text-reactor-core glow-text mb-4"
-              >
-                J.A.R.V.I.S.
-              </motion.h1>
-              <motion.p
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                transition={{ delay: 0.5 }}
-                className="font-rajdhani text-xl text-text-secondary tracking-widest"
-              >
-                Just A Rather Very Intelligent System
-              </motion.p>
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                transition={{ delay: 1 }}
-                className="mt-8 text-text-secondary/50 font-rajdhani text-sm"
-              >
-                Systems online. Good {getGreeting()}, Boss.
-              </motion.div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    );
-  }
+  const pressPower = useCallback(() => {
+    setPowered((p) => {
+      if (p) return p;
+      setUserInteracted(true);
+      // Prime the speech engine inside the same gesture (autoplay policy).
+      if (typeof window !== "undefined" && window.speechSynthesis) {
+        window.speechSynthesis.speak(new SpeechSynthesisUtterance(""));
+      }
+      // The reactor listens for this — starts assembly + soundtrack.
+      window.dispatchEvent(new Event("jarvis:power-gate"));
+      return true;
+    });
+  }, [setUserInteracted]);
 
   return (
-    <div className="fixed inset-0 z-50 bg-deep-space flex items-center justify-center">
-      <div className="w-96">
-        {/* Progress bar */}
-        <div className="relative h-1 bg-panel-border/30 rounded-full overflow-hidden">
+    <AnimatePresence>
+      {bootFinished ? null : bootComplete && powered ? (
+        /* ── Welcome card — fades over the freshly assembled reactor ── */
+        <motion.div
+          key="welcome"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0, transition: { duration: 0.8 } }}
+          className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none"
+        >
+          <div className="text-center">
+            <motion.h1
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.2, duration: 0.7, ease: [0.16, 1, 0.3, 1] }}
+              className="font-orbitron text-4xl md:text-6xl text-reactor-core glow-text mb-4"
+            >
+              J.A.R.V.I.S.
+            </motion.h1>
+            <motion.p
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 0.5, duration: 0.6 }}
+              className="font-rajdhani text-xl text-text-secondary tracking-widest"
+            >
+              Just A Rather Very Intelligent System
+            </motion.p>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 1 }}
+              className="mt-8 text-text-secondary/50 font-rajdhani text-sm"
+            >
+              Systems online. Good {getGreeting()}, Boss.
+            </motion.div>
+          </div>
+        </motion.div>
+      ) : (
+        /* ── Power gate — the only thing on screen until pressed ── */
+        !powered ? (
           <motion.div
-            className="absolute top-0 left-0 h-full bg-gradient-to-r from-reactor-core to-reactor-glow rounded-full"
-            initial={{ width: 0 }}
-            animate={{ width: `${bootProgress}%` }}
-            transition={{ duration: 0.3, ease: "easeOut" }}
+            key="gate"
+            initial={{ opacity: 1 }}
+            exit={{ opacity: 0, transition: { duration: 1.1, ease: "easeInOut" } }}
+            onClick={pressPower}
+            className="fixed inset-0 z-[60] flex flex-col items-center justify-center bg-black cursor-pointer select-none"
+          >
+            <motion.div
+              animate={{ scale: [1, 1.06, 1], opacity: [0.55, 1, 0.55] }}
+              transition={{ duration: 2.6, repeat: Infinity, ease: "easeInOut" }}
+              className="w-20 h-20 rounded-full border border-white/25 flex items-center justify-center"
+            >
+              <div className="w-9 h-9 rounded-full bg-white/10 border border-white/20" />
+            </motion.div>
+            <motion.h1
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.3, duration: 0.9, ease: [0.16, 1, 0.3, 1] }}
+              className="mt-10 font-orbitron text-2xl md:text-3xl text-white/90 tracking-[0.45em] pl-[0.45em]"
+            >
+              ARC REACTOR
+            </motion.h1>
+            <motion.p
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 0.7, duration: 0.8 }}
+              className="mt-3 font-rajdhani text-sm text-white/40 tracking-[0.35em] pl-[0.35em]"
+            >
+              MARK II · STARK INDUSTRIES
+            </motion.p>
+            <motion.p
+              animate={{ opacity: [0.25, 0.8, 0.25] }}
+              transition={{ duration: 2.2, repeat: Infinity, ease: "easeInOut" }}
+              className="mt-14 font-rajdhani text-xs text-white/60 tracking-[0.4em] pl-[0.4em]"
+            >
+              PRESS TO POWER ON
+            </motion.p>
+          </motion.div>
+        ) : (
+          /* Black flash after the press — lifts immediately so the core
+             ignition and every assembly beat stay in full view */
+          <motion.div
+            key="hold"
+            initial={{ opacity: 1 }}
+            animate={{ opacity: 0 }}
+            transition={{ duration: 1.0, ease: "easeInOut" }}
+            className="fixed inset-0 z-[60] bg-black pointer-events-none"
           />
-        </div>
-
-        {/* Boot text */}
-        <div className="mt-4 font-rajdhani text-xs text-text-secondary/50 space-y-1">
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: bootProgress > 10 ? 1 : 0 }}
-          >
-            {'>'} Initializing arc reactor core...
-          </motion.div>
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: bootProgress > 30 ? 1 : 0 }}
-          >
-            {'>'} Loading energy segments...
-          </motion.div>
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: bootProgress > 50 ? 1 : 0 }}
-          >
-            {'>'} Calibrating ring rotation...
-          </motion.div>
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: bootProgress > 70 ? 1 : 0 }}
-          >
-            {'>'} Initializing particle field...
-          </motion.div>
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: bootProgress > 90 ? 1 : 0 }}
-          >
-            {'>'} Systems nominal. Welcome back, Boss.
-          </motion.div>
-        </div>
-
-        {/* Progress percentage */}
-        <div className="mt-4 text-center">
-          <span className="font-orbitron text-2xl text-reactor-core">
-            {Math.round(bootProgress)}%
-          </span>
-        </div>
-      </div>
-    </div>
+        )
+      )}
+    </AnimatePresence>
   );
 }
 
