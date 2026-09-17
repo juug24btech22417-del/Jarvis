@@ -19,7 +19,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useJarvisStore } from "@/store/jarvis.store";
 import { useAudioReactivity } from "@/hooks/useAudioReactivity";
-import { playRepulsor, primeRepulsor } from "@/lib/sounds";
+import { playRepulsor } from "@/lib/sounds";
 
 /* ─── Hue palettes (driven by reactorHue from useReactorDrive) ───────── */
 
@@ -570,9 +570,10 @@ export default function ArcReactor() {
   const startBoot = useCallback(() => {
     if (useJarvisStore.getState().assemblyStarted) return;
     useJarvisStore.getState().startAssembly();
-    // Warm the repulsor sound inside this gesture so every later toggle
-    // (even the first one right after a refresh) blasts instantly.
-    primeRepulsor();
+    // The gate click is a real user gesture: this play both fires the
+    // ignition blast AND loads/unlocks the element, so every later toggle
+    // (even the first one right after a restart) sounds instantly.
+    playRepulsor();
 
     const steps = [
       { progress: 0, delay: 0 },

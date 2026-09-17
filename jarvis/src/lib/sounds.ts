@@ -1,61 +1,101 @@
 /**
- * Repulsor blast — shared, preload-once sound player.
+ * Repulsor blast — WebAudio one-shot, decoded from EMBEDDED bytes.
  *
- * Two browser quirks killed the old per-component Audio:
- *  1. `currentTime = 0` on a lazily-created element often raced the load,
- *     so the first play after a refresh was silent.
- *  2. Replaying one shared element can't overlap itself and can hit
- *     play() deferral.
+ * Why not an <audio src="/sounds/repulsor.mp3">: the dashboard holds
+ * several long-lived HTTP connections (SSE /api/events/stream, polling,
+ * HMR websocket) and Chromium caps ~6 per host — the media request landed
+ * behind them and stalled forever (loadstart → stalled, readyState 0),
+ * so the blast was silent even though play() fired on every trigger.
+ * data: URIs are rejected by Chromium's media stack and blob: URLs failed
+ * the same way; the media-element route is simply too fragile here.
  *
- * Fix: preload the element at the power-gate press (inside a user gesture,
- * so the fetch + decode are unlocked), then every play() clones the node —
- * clones start instantly, overlap freely, and never block each other.
+ * WebAudio (decodeAudioData + BufferSource) needs no network at all — the
+ * mp3 is embedded as base64 and decoded once, in-memory. For short one-shot
+ * SFX this is the standard game-audio path: instant, reliable, polyphonic.
+ *
+ * The first call happens inside the power-gate press (a real user gesture):
+ * that both fires the ignition blast and unlocks the AudioContext. Every
+ * later call just starts a fresh source node — instant and reliable.
  */
 
-let src: HTMLAudioElement | null = null;
-let primed = false;
+import { REPULSOR_B64 } from "./repulsorData";
 
-function ensureElement(): HTMLAudioElement | null {
+let ctx: AudioContext | null = null;
+let buffer: AudioBuffer | null = null;
+let decoding: Promise<AudioBuffer | null> | null = null;
+
+function getCtx(): AudioContext | null {
   if (typeof window === "undefined") return null;
-  if (!src) {
-    src = new Audio("/sounds/repulsor.mp3");
-    src.preload = "auto";
-    src.volume = 0.55;
+  if (!ctx) {
+    const AC =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext;
+    if (!AC) return null;
+    ctx = new AC();
   }
-  return src;
+  return ctx;
 }
 
-/** Call inside a user gesture (power-gate press) to warm the sound. */
+/** Decode the embedded mp3 once; reuse the AudioBuffer for every blast. */
+function decode(): Promise<AudioBuffer | null> {
+  if (buffer) return Promise.resolve(buffer);
+  if (decoding) return decoding;
+  const c = getCtx();
+  if (!c) return Promise.resolve(null);
+  const bin = atob(REPULSOR_B64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  decoding = c.decodeAudioData(bytes.buffer).then(
+    (b) => {
+      buffer = b;
+      return b;
+    },
+    (e) => {
+      console.warn("[sounds] repulsor decode failed:", e && e.name);
+      return null;
+    }
+  );
+  return decoding;
+}
+
+/** Optional warm-up: start decoding early so the first blast has zero lag. */
 export function primeRepulsor() {
-  const el = ensureElement();
-  if (!el || primed) return;
-  primed = true;
-  // Load + decode now; a muted play() also unlocks the element itself.
-  el.muted = true;
-  el.play()
-    .then(() => {
-      el!.pause();
-      el!.currentTime = 0;
-      el!.muted = false;
-    })
-    .catch(() => {
-      // Even if the muted play is refused, load() still warms the cache.
-      el!.load();
-      el!.muted = false;
-    });
+  getCtx();
+  void decode();
 }
 
-/** Fire the blast. Safe to call rapidly; overlapping plays are allowed. */
-export function playRepulsor() {
-  const el = ensureElement();
-  if (!el) return;
+// Kick off decoding the moment this module loads (client-side), so the
+// ignition blast at the power gate has zero decode lag. The AudioContext
+// starts suspended but decodeAudioData works regardless of state.
+if (typeof window !== "undefined") {
   try {
-    const blast = el.cloneNode(true) as HTMLAudioElement;
-    blast.volume = 0.55;
-    void blast.play().catch(() => {
-      /* autoplay block — silently skip */
-    });
+    primeRepulsor();
   } catch {
-    /* never let sound break the toggle */
+    /* lazy path in playRepulsor covers it */
   }
+}
+
+/** Fire the blast. Repeated calls overlap freely — fine for a blast. */
+export function playRepulsor() {
+  void (async () => {
+    try {
+      const c = getCtx();
+      if (!c) return;
+      // Must run inside a user gesture the first time (autoplay policy).
+      if (c.state === "suspended") await c.resume();
+      const buf = await decode();
+      if (!buf) return;
+      const src = c.createBufferSource();
+      src.buffer = buf;
+      const gain = c.createGain();
+      gain.gain.value = 0.55;
+      src.connect(gain).connect(c.destination);
+      src.start(0);
+    } catch (e) {
+      // Loud enough to see in devtools if playback is ever blocked again —
+      // silent swallowing is how this bug hid for so long.
+      console.warn("[sounds] repulsor play failed:", e);
+    }
+  })();
 }
