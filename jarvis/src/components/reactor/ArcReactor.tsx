@@ -11,10 +11,13 @@
  * Boot: the reactor ASSEMBLES — layers snap in core-first with spring
  * physics and a synthesized power-up soundtrack (WebAudio, no assets).
  *
- * Music: a butter-smooth beat engine runs inside the rAF loop — asymmetric
- * attack/release envelopes (hits punch in instantly, tails melt slowly),
- * adaptive onset threshold, one-shot hit flash, and music-modulated
- * rotation speed. Every ring, tick, and belt dot dances to it.
+ * Music: the belt and the hero ring are a circular equalizer. MusicSpectrum
+ * turns the system peak meter into 28 amplitude bands — interpolated onto
+ * this animation clock so nothing staircases — and every belt cluster and
+ * flare arc reads its own band: columns grow outward with the music and
+ * settle back as it falls. Nothing is random; the same bar always reads the
+ * same way. While no music is playing the spectrum fades to zero and the
+ * reactor is exactly its calm self.
  *
  * Replaces the old WebGL orb: no scene fog (which tinted the whole page
  * cyan), no canvas glare — sits cleanly on a pure black background.
@@ -24,6 +27,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useJarvisStore } from "@/store/jarvis.store";
 import { useAudioReactivity } from "@/hooks/useAudioReactivity";
+import { MusicSpectrum, bandAtAngle, SPECTRUM_BANDS } from "@/lib/audio/MusicSpectrum";
 import { playRepulsor } from "@/lib/sounds";
 
 /* ─── Hue palettes (driven by reactorHue from useReactorDrive) ───────── */
@@ -58,38 +62,71 @@ const DASH = (() => {
   };
 })();
 
-/* ─── Particle belt layout (deterministic — no hydration drift) ───────── */
+/* ─── Amplitude response tuning (the "butter" numbers) ──────────────────
+ * Band energy → displacement, then a slew-limited follower. The bands are
+ * already smoothed (crisp attack, silky release) by MusicSpectrum, so these
+ * exist to bound per-frame motion, not to do the shaping: set them too slow
+ * and they eat the very amplitude swing they are meant to carry. A kick
+ * rises in 5ms; an element needs a few frames to swell, never a teleport. */
+/* ─── Amplitude response tuning (Apple-grade fluid physics) ─────────────
+ * Band energy → radial expansion + stepped waveform follower.
+ * Crisp attack (~20/s) gives immediate punch on kicks and transients;
+ * silky release (~7.5/s) gives luxurious Apple-like float back. */
+const BELT_REACH = 30; // max radial travel of outermost stepped dot
+const BELT_ATTACK = 22; // 1/s — crisp attack (immediate punch)
+const BELT_RELEASE = 10.5; // 1/s — silky exponential decay
+const ARC_ATTACK = 18; // 1/s — flare arcs ride the band directly
+const ARC_RELEASE = 8;
+
+/* ─── Circular Stepped Waveform Layout (Pic 1 & Pic 2) ──────────────────
+ * Radiating outward directly from EVERYWHERE along the blue reactor strip.
+ * 48 radial columns wrap the full 360° perimeter (every 7.5°).
+ * Each column has discrete stepped dots that erupt outward on beats. */
+
+export const TOTAL_COLUMNS = 48;
+export const STEPS_PER_COL = 5;
 
 interface BeltDot {
-  angle: number; // degrees
-  radius: number;
-  size: number;
-  phase: number;
-  colorIdx: number;
-  band: number;  // 0..1 pseudo-frequency band — dots pop on beats per-band
+  angle: number;   // degrees
+  radius: number;  // base radius in viewBox units
+  size: number;    // base dot radius
+  phase: number;   // idle breath phase
+  colorIdx: number;// index into palette [accent, soft, white, deep]
+  band: number;    // 0..1 shimmer seed
+  bandIdx: number; // spectrum band this column reads
+  slot: number;    // 0..1 radial fraction in the column
+  stepIdx: number; // 0..STEPS_PER_COL - 1
+  colIdx: number;  // 0..TOTAL_COLUMNS - 1
 }
 
 function buildBelt(): BeltDot[] {
   const dots: BeltDot[] = [];
-  const palette = [0, 1, 2, 1, 0, 3]; // accent, soft, white, deep…
-  let seed = 7;
-  const rand = () => {
-    // Deterministic LCG — same belt on server & client.
-    seed = (seed * 16807) % 2147483647;
-    return seed / 2147483647;
-  };
-  for (let c = 0; c < 14; c++) {
-    const baseAngle = c * (360 / 14) + rand() * 14;
-    const baseRadius = 238 + rand() * 42;
-    const clusterSize = 3 + Math.floor(rand() * 3);
-    for (let d = 0; d < clusterSize; d++) {
+  for (let c = 0; c < TOTAL_COLUMNS; c++) {
+    // Distributed evenly across all 360 degrees of the reactor perimeter
+    const angle = (c * 360) / TOTAL_COLUMNS;
+    const bandIdx = bandAtAngle(angle);
+    for (let s = 0; s < STEPS_PER_COL; s++) {
+      // Base radius steps outward directly from the blue reactor collar (~212)
+      const radius = 222 + s * 14;
+      // Dot size: subtle outward graduation (3.0 to 4.0, within 0.8 < r < 6)
+      const size = 3.0 + s * 0.25;
+      // Palette progression: base accent cyan -> soft glowing cyan -> bright white
+      const colorIdx = s <= 1 ? 0 : s <= 2 ? 1 : 2;
+      const slot = s / (STEPS_PER_COL - 1);
+      const phase = ((c * 0.45 + s * 0.35) % (Math.PI * 2));
+      const band = ((c * 19 + s * 29) % 100) / 100;
+
       dots.push({
-        angle: baseAngle + d * (5 + rand() * 6),
-        radius: baseRadius + (rand() - 0.5) * 26,
-        size: 3 + rand() * 5.5,
-        phase: rand() * Math.PI * 2,
-        colorIdx: palette[Math.floor(rand() * palette.length)],
-        band: rand(),
+        angle,
+        radius,
+        size,
+        phase,
+        colorIdx,
+        band,
+        bandIdx,
+        slot,
+        stepIdx: s,
+        colIdx: c,
       });
     }
   }
@@ -99,14 +136,16 @@ function buildBelt(): BeltDot[] {
 const BELT = buildBelt();
 
 /* ─── Hero-ring flare segments (deterministic — circular equalizer) ──────
- * The big blue ring is divided into arcs; each fires independently on
- * beats (scattered lottery) — thick, bright, nudged outward — like the
- * reference reactor's hot patches that rearrange around the rim. */
+ * The big blue ring is divided into arcs; each arc reads its own spectrum
+ * band and flares thicker, brighter and nudged outward with that band's
+ * amplitude — the reference HUD's hot patches, but driven by the music
+ * instead of by chance. */
 
 interface HeroSeg {
   a0: number; // start angle, degrees
   a1: number; // end angle, degrees
   band: number; // 0..1 — shapes attack/tail per segment
+  bandIdx: number; // spectrum band this arc reads
 }
 
 function buildHeroSegs(): HeroSeg[] {
@@ -125,6 +164,7 @@ function buildHeroSegs(): HeroSeg[] {
       a0,
       a1: a0 + span - 3.4 + rand() * 1.2,
       band: rand(),
+      bandIdx: bandAtAngle(a0),
     });
   }
   return segs;
@@ -193,20 +233,14 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
     // changes ACCELERATE smoothly instead of teleporting the angle.
     let rotCollar = 0, rotBelt = 0, rotTicks = 0, rotStruct = 0, rotSegA = 0, rotSegB = 0;
 
-    // Beat-clock music engine state — lives in this closure, mutated in rAF.
-    let m: {
-      lastSampleT: number; prevLevel: number; avg: number; peakMax: number;
-      onsets: number[];                                  // recent hit timestamps
-      clockOn: boolean; period: number; origin: number;  // metronome PLL
-      beatsFired: number; lastBeatAt: number;
-      body: number; spinE: number;                       // smoothed fullness / spin
-      lastAccent: number; lastAccentRolls: Float32Array; // real-hit accents
-      lastRolls: Float32Array;                           // per-beat dot lottery
-      segRolls: Float32Array; segCur: Float32Array;      // hero-seg lottery/followers
-      segAccentRolls: Float32Array;
-      prevRolls: Float32Array; prevSegRolls: Float32Array; rollAt: number;
-      jumpCur: Float32Array;                             // per-dot displacement state
-    } | null = null;
+    // Amplitude equalizer state. The engine owns the DSP — timeline,
+    // auto-gain, band splitting (lib/audio/MusicSpectrum.ts). This closure
+    // owns only per-element follower state, which is inherently visual.
+    let spec: MusicSpectrum | null = null;
+    let lastSeq = -1;                                  // newest meter batch fed
+    let spinE = 0;                                     // smoothed spin accent
+    const jumpCur = new Float32Array(BELT.length);     // per-dot column state
+    const segCur = new Float32Array(HERO_SEGS.length); // per-arc flare state
 
     // Apple-style ease-out — fast attack, long silky settle.
     const easeOut = (x: number) => (x <= 0 ? 0 : 1 - Math.pow(1 - x, 4));
@@ -235,149 +269,38 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
       const voice = st.voiceLevel;
       const load = st.reactorLoad;
 
-      /* ── Butter music engine ──────────────────────────────────────
-       * Input: 8Hz system peak meter. Output: per-frame envelopes that
-       * behave like Apple motion — instant punch, silky tails.
-       * All state lives in `m` (per-effect closure), so hot reloads and
-       * component remounts start fresh.
+      /* ── Read the circular equalizer ───────────────────────────────
+       * The engine owns the DSP: it interpolates the raw meter samples onto
+       * this animation clock, normalizes loudness (a whisper-quiet session
+       * animates as hard as a club rig), and splits the envelope into 28
+       * amplitude bands with crisp attack / silky release. We only read —
+       * no per-frame randomness, no metronome, no beat guessing. A late or
+       * dropped poll is absorbed by the playback delay, so it can never
+       * stall or step the animation.
        */
       const audio = audioRef.current;
-      if (!m) {
-        m = {
-          lastSampleT: 0, prevLevel: 0, avg: 0.09, peakMax: 0.09,
-          onsets: [],
-          clockOn: false, period: 500, origin: 0, beatsFired: 0, lastBeatAt: -9,
-          body: 0, spinE: 0,
-          lastAccent: -9, lastAccentRolls: new Float32Array(BELT.length),
-          lastRolls: new Float32Array(BELT.length),
-          segRolls: new Float32Array(HERO_SEGS.length),
-          segCur: new Float32Array(HERO_SEGS.length),
-          segAccentRolls: new Float32Array(HERO_SEGS.length),
-          prevRolls: new Float32Array(BELT.length),
-          prevSegRolls: new Float32Array(HERO_SEGS.length),
-          rollAt: 0,
-          jumpCur: new Float32Array(BELT.length),
-        };
-      }
-      const s = audio.musicPlaying ? audio.reactivity : 0;
-      // Feed at ~8Hz (the meter's cadence), not every frame.
-      if (s > 0 || now - m.lastSampleT > 300) {
-        if (now - m.lastSampleT >= 110) {
-          // Slow-adaptive mean of recent energy — self-calibrating so quiet
-          // rooms and loud clubs both produce visible hits.
-          m.avg = m.avg * 0.98 + s * 0.02;
-          // Running peak with ~6s half-life — the song's own loudness
-          // reference. Everything visual is scaled RELATIVE to this, so a
-          // quiet laptop volume animates just as big as a club rig.
-          m.peakMax = Math.max(m.peakMax * Math.exp(-0.125 / 6), s);
-          m.lastSampleT = now;
-          // Onset = RISING EDGE over the adaptive-average gate.
-          const gate = Math.max(0.03, m.avg * 1.4);
-          const lastOn = m.onsets.length ? m.onsets[m.onsets.length - 1] : -9e9;
-          const onset = s > gate && m.prevLevel <= gate && now - lastOn > 200;
-          m.prevLevel = s;
-          if (onset) {
-            m.onsets.push(now);
-            if (m.onsets.length > 12) m.onsets.shift();
-            // Accent lottery: some dots get an extra snap on real hits.
-            for (let i = 0; i < m.lastAccentRolls.length; i++) {
-              m.lastAccentRolls[i] = Math.random() < 0.55 ? 1 : 0;
-            }
-            for (let i = 0; i < m.segAccentRolls.length; i++) {
-              m.segAccentRolls[i] = Math.random() < 0.5 ? 1 : 0;
-            }
-            m.lastAccent = now;
-            // Tempo estimate: median of inter-onset intervals folded into
-            // the musical range (240..960ms) — resolves half/double confusion.
-            const iv: number[] = [];
-            for (let i = 1; i < m.onsets.length; i++) {
-              let d = m.onsets[i] - m.onsets[i - 1];
-              while (d < 240) d *= 2;
-              while (d > 960) d /= 2;
-              iv.push(d);
-            }
-            if (iv.length >= 3) {
-              iv.sort((a, b) => a - b);
-              const med = iv[Math.floor(iv.length / 2)];
-              // Phase-locked loop: nudge clock phase 35% toward the real
-              // hit, drift period 25% toward the song's tempo. Re-syncs
-              // smoothly, never jumps.
-              const ph = ((now - m.origin) / m.period) % 1;
-              const err = ph > 0.5 ? ph - 1 : ph;
-              m.origin += err * m.period * 0.35;
-              m.period += (med - m.period) * 0.25;
-              m.period = Math.min(960, Math.max(260, m.period));
-            }
-          }
+      if (!spec) spec = new MusicSpectrum();
+      if (audio.seq !== lastSeq) {
+        lastSeq = audio.seq;
+        if (audio.envelope.length >= 2) {
+          spec.pushEnvelope(audio.envelope, audio.envelopeT, now);
+        } else {
+          spec.pushLevel(audio.level, now);
         }
       }
+      spec.update(dt, now, audio.musicPlaying);
 
-      // ── Beat clock: the reactor's own metronome, welded to the song ──
-      // Runs CONTINUOUSLY while music plays — a discrete thump on EVERY
-      // beat, even in quiet passages. Real hits steer it (PLL above) and
-      // add accents; the grid keeps the pulse relentless and in time.
-      if (audio.musicPlaying && !m.clockOn) {
-        m.clockOn = true;
-        m.origin = now;
-        m.beatsFired = 0;
-        m.lastBeatAt = now;
-      } else if (!audio.musicPlaying) {
-        m.clockOn = false;
-      }
-      if (m.clockOn) {
-        const beatIdx = Math.floor((now - m.origin) / m.period);
-        if (beatIdx > m.beatsFired) {
-          m.beatsFired = beatIdx;
-          m.lastBeatAt = m.origin + beatIdx * m.period;
-          // Fresh dot lottery EVERY beat — but CROSSFADED over ~120ms from
-          // the previous roll: scatter rearranges while every target stays
-          // continuous. No steps, even when a whole new hand is dealt.
-          m.prevRolls.set(m.lastRolls);
-          for (let i = 0; i < m.lastRolls.length; i++) {
-            m.lastRolls[i] = Math.random() < 0.75 ? 0.3 + Math.random() * 0.7 : Math.random() * 0.2;
-          }
-          // Hero-segment lottery: ~45% of arcs fire per beat — hot patches
-          // rearrange (circular equalizer), crossfaded like the dots.
-          m.prevSegRolls.set(m.segRolls);
-          for (let i = 0; i < m.segRolls.length; i++) {
-            m.segRolls[i] = Math.random() < 0.45 ? 0.5 + Math.random() * 0.5 : Math.random() * 0.15;
-          }
-          m.rollAt = now;
-        }
-      }
-
-      // ── Envelopes: pure functions of time-since-event (the butter) ──
-      // No follower dynamics → zero overshoot, zero jitter, perfectly
-      // repeatable crisp-attack / silky-decay curves.
-      const tsBeat = m.clockOn ? Math.max(0, (now - m.lastBeatAt) / 1000) : 9;
-      const tsOn = Math.max(0, (now - m.lastAccent) / 1000);
-      // Continuous shapes: each beat's envelope OVERLAPS the previous one's
-      // tail (max-carry) — at a beat boundary the new rise replaces the old
-      // fall exactly where it stands, so dots redirect mid-air. Zero cut,
-      // zero snap-back, no matter the tempo.
-      const thumpA = (age: number) =>
-        Math.min(1, age / 0.05) * Math.exp(-Math.max(0, age - 0.05) / 0.26);
-      const thumpShape = Math.max(thumpA(tsBeat), thumpA(tsBeat + m.period / 1000));
-      const accentA = (age: number) =>
-        Math.min(1, age / 0.03) * Math.exp(-Math.max(0, age - 0.03) / 0.18);
-      const lastGap = m.onsets.length >= 2 ? m.onsets[m.onsets.length - 1] - m.onsets[m.onsets.length - 2] : 1e9;
-      const accentShape = m.lastAccent < 0 ? 0 : Math.max(accentA(tsOn), accentA(tsOn + Math.min(lastGap, 2e9) / 1000));
-      // Body: slow fullness — moderately fast in, slow out.
-      m.body += (s - m.body) * (s > m.body ? Math.min(1, dt * 10) : Math.min(1, dt * 1.8));
-      // Normalized energy RELATIVE to the song's own recent peak (floor
-      // 0.5): every beat reads at full amplitude regardless of the
-      // machine's volume setting — quiet parts still pulse at half power.
-      const energyN = audio.musicPlaying
-        ? Math.min(1, Math.max(0.5, (s * 1.5) / Math.max(m.peakMax, 0.07)))
-        : 0;
-      const thumpVal = thumpShape * energyN * (0.62 + 0.38 * Math.min(1, accentShape * 1.2 + m.body * 0.5));
-      const musicBass = m.body;                                 // slow fullness
-      const musicHit = thumpVal + accentShape * 0.5 * energyN;  // transient layer
-      const music = Math.min(1, m.body * 0.5 + thumpVal * 0.7); // overall dance amount
+      const bands = spec.bands;
+      const active = spec.active;    // music presence — fades in and out
+      const music = spec.energy;     // overall dance amount
+      const musicBass = spec.bass;   // sustained low-end body
+      const musicHit = spec.hit;     // transient accents
+      // Beat punch = the kick band plus the transient layer.
+      const thumpVal = Math.min(1, spec.mid * 0.8 + musicHit * 0.45);
       // Spin accent, SMOOTHED then INTEGRATED below — never multiplies `t`
-      // directly, so tempo changes accelerate instead of teleporting.
-      m.spinE += (m.body * 0.5 + thumpVal * 0.5 - m.spinE) * Math.min(1, dt * 4);
-      const spin = baseSpeed * (1 + Math.min(1, m.spinE) * 0.3);
+      // directly, so energy changes accelerate instead of teleporting.
+      spinE += (musicBass * 0.6 + musicHit * 0.4 - spinE) * Math.min(1, dt * 4);
+      const spin = baseSpeed * (1 + Math.min(1, spinE) * 0.3);
       rotCollar += dt * 9 * spin;
       rotBelt += dt * 7 * spin;
       rotTicks -= dt * 4.5 * spin;
@@ -454,109 +377,101 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
       if (coreDot.current) {
         coreDot.current.setAttribute(
           "opacity",
-          String((0.75 + Math.sin(t * 1.35) * 0.1 + voice * 0.15 + thumpVal * 0.3 + accentShape * 0.12) * pCore)
+          String((0.75 + Math.sin(t * 1.35) * 0.1 + voice * 0.15 + thumpVal * 0.3 + musicHit * 0.3) * pCore)
         );
       }
 
-      // Hero ring: thickness breathes with the music's bass+transient.
+      // Hero ring: the uniform collar stays a calm frame — it breathes with
+      // overall fullness while the flare arcs below carry the equalizer.
+      // (A thumping base ring reads as disco; a steady one reads as a HUD.)
       if (segRing.current) {
         segRing.current.setAttribute(
           "stroke-width",
-          String(14 + load * 10 + musicBass * 9 + musicHit * 2.5 + alertBoost * 5)
+          String(14 + load * 10 + musicBass * 3.5 + musicHit * 1.5 + alertBoost * 5)
         );
       }
       if (segGlow.current) {
         segGlow.current.setAttribute(
           "stroke-width",
-          String(15 + load * 8 + musicBass * 7 + musicHit * 3 + alertBoost * 4)
+          String(15 + load * 8 + musicBass * 3 + musicHit * 1.5 + alertBoost * 4)
         );
         segGlow.current.setAttribute(
           "stroke-opacity",
-          String(0.14 + load * 0.16 + musicBass * 0.2 + musicHit * 0.08 + alertBoost * 0.12)
+          String(0.14 + load * 0.16 + musicBass * 0.16 + musicHit * 0.07 + alertBoost * 0.12)
         );
       }
 
-      // Voice- and music-reactive particle belt. Each dot owns a pseudo-band:
-      // band 0 pops on the transient, band 1 rides the body — beats scatter
-      // around the ring like an equalizer instead of pulsing uniformly.
+      // ── Circular Stepped Waveform Equalizer (Pic 1 & Pic 2) ──
+      // 28 columns radiate from the blue reactor strip.
+      // Driven directly by the spectrum bands for zero lag and Apple-silky physics.
       for (let i = 0; i < BELT.length; i++) {
         const dot = beltDots.current[i];
         if (!dot) continue;
         const b = BELT[i];
         const rad = (b.angle * Math.PI) / 180;
-        // Per-dot wave rate (derived from band) — decorrelates the bass body.
-        const wave = 0.5 + 0.5 * Math.sin(t * (2.6 + b.band * 3.2) + b.phase);
-        // THE JUMP: each dot physically leaps OUTWARD along its spoke on
-        // every beat — own distance, own float-back. Scatter rearranges
-        // every beat (fresh lottery), like the reference. A slew-rate-
-        // limited follower chases the target: fast attack launches the
-        // leap, slow release floats it home — and even a brand-new bigger
-        // jump mid-float can only accelerate the dot smoothly. No teleports.
-        const atk = 0.05 + (b.phase / (Math.PI * 2)) * 0.05;   // 50..100ms launch
-        const tau = 0.24 + b.band * 0.18;                      // 240..420ms float
-        const jumpA = (age: number) =>
-          Math.min(1, age / atk) * Math.exp(-Math.max(0, age - atk) / tau);
-        const jumpShape = Math.max(jumpA(tsBeat), jumpA(tsBeat + m.period / 1000));
-        const bonusA = (age: number) =>
-          Math.min(1, age / 0.03) * Math.exp(-Math.max(0, age - 0.03) / 0.15);
-        const bonusShape =
-          m.lastAccentRolls[i] *
-          (m.lastAccent < 0 ? 0 : Math.max(bonusA(tsOn), bonusA(tsOn + Math.min(lastGap, 2e9) / 1000)));
-        const mixR = Math.min(1, tsBeat / 0.12);
-        const roll = m.prevRolls[i] + (m.lastRolls[i] - m.prevRolls[i]) * mixR;
-        const target =
-          (reduced ? 0 : 1) *
-          (roll * (30 + b.band * 46) * energyN * jumpShape +
-            bonusShape * 20 * energyN);
-        // Asymmetric follower: attack 14/s (punchy launch), release 5.5/s
-        // (silky float home). dt is clamped, so steps are bounded.
-        const cur = m.jumpCur[i];
-        const k = target > cur ? 14 : 5.5;
-        const next = Math.min(34, cur + (target - cur) * Math.min(1, dt * k));
-        m.jumpCur[i] = next;
+
+        // Band amplitude from circular equalizer + beat punch
+        const bandVal = bands[b.bandIdx];
+        const amt = active > 0.001 ? 0.02 * active + 0.60 * bandVal + 0.42 * thumpVal : 0;
+        const reachScale = 0.45 + 0.55 * b.slot;
+        const target = reduced ? 0 : BELT_REACH * reachScale * amt;
+        const cur = jumpCur[i];
+        const next =
+          cur + (target - cur) * Math.min(1, dt * (target > cur ? BELT_ATTACK : BELT_RELEASE));
+        jumpCur[i] = next;
+
         const R = b.radius + next;
         dot.setAttribute("cx", (Math.cos(rad) * R).toFixed(2));
         dot.setAttribute("cy", (Math.sin(rad) * R).toFixed(2));
-        // Size stays crisp — the leap carries the beat, not balloon-glow.
-        const r = b.size * (0.74 + wave * 0.2 + voice * wave * 0.5 + m.lastRolls[i] * jumpShape * 0.7);
-        dot.setAttribute("r", r.toFixed(2));
-        dot.setAttribute(
-          "opacity",
-          Math.min(0.85, 0.3 + wave * 0.22 + jumpShape * m.lastRolls[i] * 0.38).toFixed(2)
-        );
+
+        const wave = 0.5 + 0.5 * Math.sin(t * (2.4 + b.band * 2.8) + b.phase);
+
+        // Stepped waveform illumination (Pic 2):
+        // Height of the stepped column tracks the smoothed excursion
+        const cAmp = Math.min(1, Math.max(0, next / (BELT_REACH * reachScale || 1)));
+        const step = b.stepIdx;
+        const totalSteps = STEPS_PER_COL; // 6
+        const activeLevel = cAmp * totalSteps;
+
+        if (active > 0.001 && cAmp > 0.03) {
+          if (step < Math.floor(activeLevel)) {
+            // Fully illuminated step
+            const r = b.size * (1.0 + 0.14 * cAmp);
+            const op = Math.min(0.96, 0.72 + 0.24 * (step / totalSteps));
+            dot.setAttribute("r", r.toFixed(2));
+            dot.setAttribute("opacity", op.toFixed(3));
+          } else if (step === Math.floor(activeLevel)) {
+            // Crest step: the glowing tip of the stepped column
+            const frac = activeLevel - step;
+            const r = b.size * (1.0 + 0.30 * frac);
+            const op = Math.min(0.92, 0.25 + 0.70 * frac);
+            dot.setAttribute("r", r.toFixed(2));
+            dot.setAttribute("opacity", op.toFixed(3));
+          } else {
+            // Dormant step above current peak — completely hidden
+            dot.setAttribute("opacity", "0");
+          }
+        } else {
+          // Zero audio / idle standby — completely hidden (no ghost dots)
+          dot.setAttribute("opacity", "0");
+        }
       }
 
-      // ── Hero-ring circular equalizer: arcs flare individually ──
-      // Same physics as the dots: slew-limited follower per arc (crisp
-      // flare, silky relax) chasing a per-beat scattered lottery target.
-      // Thickness + brightness + outward nudge — hot patches rearrange
-      // every beat while the ring's overall silhouette stays steady.
+      // ── Hero-ring circular equalizer: one arc per band ──
+      // The 28 arcs map 1:1 onto the 28 bands, so the ring lights up as a
+      // real equalizer: the low bands at the sides sit long and heavy while
+      // the top and bottom flicker with the transients. Same butter physics
+      // as the dots — crisp flare, silky relax, bounded per frame.
       for (let i = 0; i < HERO_SEGS.length; i++) {
         const p = segFlare.current[i];
         if (!p) continue;
         const hs = HERO_SEGS[i];
-        const atkS = 0.03 + hs.band * 0.04;   // 30..70ms flare
-        const tauS = 0.16 + hs.band * 0.26;   // 160..420ms relax
-        // Rim-sweep: arcs ignite in a wave chasing around the rim (~55ms
-        // full circle) — the flare travels like the reference, and every
-        // arc peaks at its own moment.
-        const delayS = (hs.a0 / 360) * 0.055;
-        const flareA = (age: number) =>
-          age <= 0 ? 0 : Math.min(1, age / atkS) * Math.exp(-Math.max(0, age - atkS) / tauS);
-        const shapeS = Math.max(
-          flareA(tsBeat - delayS),
-          flareA(tsBeat - delayS + m.period / 1000)
-        );
-        const bonusS =
-          m.segAccentRolls[i] *
-          (m.lastAccent < 0 ? 0 : Math.max(accentA(tsOn), accentA(tsOn + Math.min(lastGap, 2e9) / 1000)));
-        const mixS = Math.min(1, tsBeat / 0.12);
-        const rollS = m.prevSegRolls[i] + (m.segRolls[i] - m.prevSegRolls[i]) * mixS;
-        const targetS = (reduced ? 0 : 1) * energyN * (rollS * shapeS + bonusS * shapeS * 0.5);
-        const curS = m.segCur[i];
-        const kS = targetS > curS ? 20 : 6;
-        const nextS = curS + (targetS - curS) * Math.min(1, dt * kS);
-        m.segCur[i] = nextS;
+        const amtS = active > 0.001 ? 0.1 * active + 0.9 * bands[hs.bandIdx] : 0;
+        const targetS = reduced ? 0 : amtS;
+        const curS = segCur[i];
+        const nextS =
+          curS + (targetS - curS) * Math.min(1, dt * (targetS > curS ? ARC_ATTACK : ARC_RELEASE));
+        segCur[i] = nextS;
         // Flare = thicker + brighter + nudged outward along the rim.
         const radS = 200 + nextS * 10;
         p.setAttribute("d", arcPath(radS, hs.a0, hs.a1));
@@ -681,17 +596,8 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
         <circle r={352} fill="none" stroke={c.white} strokeOpacity={0.1} strokeWidth={1} />
       </g>
 
-      {/* ── Layer 3 · voice-reactive particle belt ──────────────────── */}
+      {/* ── Layer 3 · circular stepped waveform equalizer (Pic 1 & Pic 2) ── */}
       <g ref={gBelt} style={{ willChange: "transform" }}>
-        <circle
-          r={262}
-          fill="none"
-          stroke={c.accent}
-          strokeOpacity={0.16}
-          strokeWidth={2.5}
-          strokeDasharray={DASH.dots}
-          strokeLinecap="round"
-        />
         {BELT.map((b, i) => {
           const rad = (b.angle * Math.PI) / 180;
           const colors = [c.accent, c.soft, c.white, c.deep];
@@ -701,11 +607,12 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
               ref={(el) => {
                 beltDots.current[i] = el;
               }}
+              data-band={b.bandIdx}
               cx={Math.cos(rad) * b.radius}
               cy={Math.sin(rad) * b.radius}
               r={b.size}
               fill={colors[b.colorIdx]}
-              opacity={0.4}
+              opacity={0}
             />
           );
         })}
@@ -745,13 +652,15 @@ function MarkIIReactor({ hue }: { hue: HueKey }) {
           strokeLinecap="round"
           filter="url(#mk2-soft)"
         />
-        {/* circular-equalizer flare arcs — each fires independently on beats */}
+        {/* circular-equalizer flare arcs — one per spectrum band.
+            data-band is for the reactor test suites (scratch/test-*.mjs). */}
         {HERO_SEGS.map((hs, i) => (
           <path
             key={i}
             ref={(el) => {
               segFlare.current[i] = el;
             }}
+            data-band={hs.bandIdx}
             d={arcPath(200, hs.a0, hs.a1)}
             fill="none"
             stroke={c.ringBright}
@@ -883,11 +792,15 @@ export default function ArcReactor() {
     setIsClient(true);
   }, []);
 
+  const assemblyStarted = useJarvisStore((s) => s.assemblyStarted);
+  const bootTriggered = useRef(false);
+
   // The power gate calls this in its onClick — the same user gesture that
   // clears the overlay, so the AudioContext is unlocked right as the
   // assembly begins. Sound and motion start in the same instant.
   const startBoot = useCallback(() => {
-    if (useJarvisStore.getState().assemblyStarted) return;
+    if (bootTriggered.current) return;
+    bootTriggered.current = true;
     useJarvisStore.getState().startAssembly();
     // The gate click is a real user gesture: this play both fires the
     // ignition blast AND loads/unlocks the element, so every later toggle
@@ -916,13 +829,21 @@ export default function ArcReactor() {
     })();
   }, [setBootProgress, setBootComplete, setState]);
 
-  // Expose the boot trigger to the power-gate overlay via a custom event —
-  // the gate lives in page.tsx, the reactor + audio live here.
+  // Expose the boot trigger to the power-gate overlay via custom event + store state
   useEffect(() => {
     const onGate = () => startBoot();
     window.addEventListener("jarvis:power-gate", onGate);
+    if (useJarvisStore.getState().assemblyStarted) {
+      startBoot();
+    }
     return () => window.removeEventListener("jarvis:power-gate", onGate);
   }, [startBoot]);
+
+  useEffect(() => {
+    if (assemblyStarted) {
+      startBoot();
+    }
+  }, [assemblyStarted, startBoot]);
 
   const handleWake = useCallback(() => {
     if (!bootComplete) return;

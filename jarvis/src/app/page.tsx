@@ -71,18 +71,19 @@ function BootSequence() {
   }, [bootComplete, powered]);
 
   const pressPower = useCallback(() => {
-    setPowered((p) => {
-      if (p) return p;
-      setUserInteracted(true);
-      // Prime the speech engine inside the same gesture (autoplay policy).
+    if (powered) return;
+    setPowered(true);
+    setUserInteracted(true);
+    // Prime the speech engine inside the same gesture (autoplay policy).
+    try {
       if (typeof window !== "undefined" && window.speechSynthesis) {
         window.speechSynthesis.speak(new SpeechSynthesisUtterance(""));
       }
-      // The reactor listens for this — starts assembly + soundtrack.
-      window.dispatchEvent(new Event("jarvis:power-gate"));
-      return true;
-    });
-  }, [setUserInteracted]);
+    } catch {}
+    // The reactor listens for this — starts assembly + soundtrack.
+    useJarvisStore.getState().startAssembly();
+    window.dispatchEvent(new Event("jarvis:power-gate"));
+  }, [powered, setUserInteracted]);
 
   return (
     <AnimatePresence>

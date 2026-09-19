@@ -5,6 +5,12 @@
 // calls the watcher check endpoint every 10 minutes, server-side, no
 // UI required. Per-watcher interval guards inside the endpoint make
 // duplicate ticks harmless.
+//
+// DB warmup: the first Prisma query after a cold start can take tens
+// of seconds (engine spawn + schema check), which used to land right
+// in the middle of the first chat message. We touch the DB in the
+// background at boot instead, so a "whats up" at t+5s gets answered
+// by an already-warm connection.
 
 export async function register() {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
@@ -30,4 +36,21 @@ export async function register() {
   setInterval(tick, 10 * 60_000);
 
   console.log("[WatcherHeartbeat] armed — watchers tick every 10 min, no panel needed");
+
+  // ── Background DB warmup (fire-and-forget, never blocks boot) ──
+  (async () => {
+    const t0 = Date.now();
+    try {
+      const { prisma } = await import("@/lib/db/queries");
+      await prisma.$queryRaw`SELECT 1`;
+      // Touch the two tables chat reads so their plans/caches are hot.
+      await Promise.allSettled([
+        prisma.followUpThread.findMany({ take: 1 }),
+        prisma.moodSample.findMany({ take: 1 }),
+      ]);
+      console.log(`[DBWarmup] warm in ${Date.now() - t0}ms`);
+    } catch (err) {
+      console.warn(`[DBWarmup] failed after ${Date.now() - t0}ms (non-fatal):`, (err as Error)?.message);
+    }
+  })();
 }

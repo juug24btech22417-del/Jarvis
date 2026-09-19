@@ -8,8 +8,12 @@
  * We latch "music playing" while any of the last ~4 seconds spiked
  * above the threshold — beats dip, so we smooth over the gaps.
  *
- * Consumed by the reactor (beats/pulses with the music) and available
- * for "is anything playing?" queries.
+ * Consumers get three views of the same data:
+ *   - level / reactivity   → smoothed 0..1 for simple "how loud?" checks
+ *   - envelope + envelopeT → the RAW peak history, timestamped, which the
+ *     reactor interpolates into a circular equalizer (see
+ *     lib/audio/MusicSpectrum.ts). Raw + timestamped is the whole point:
+ *     a pre-smoothed scalar aliases badly at any poll rate.
  */
 
 import { spawn, ChildProcess } from "child_process";
@@ -20,6 +24,7 @@ interface AudioSample {
 }
 
 const HISTORY_MS = 5000;
+const ENVELOPE_WINDOW_MS = 600; // raw peaks handed to the reactor
 const MUSIC_THRESHOLD = 0.06; // 6% peak — well above silence, below speech
 const LATCH_MS = 4000;
 
@@ -31,7 +36,7 @@ let restartTimer: NodeJS.Timeout | null = null;
 
 /**
  * Polls the render device's peak meter (IAudioMeterInformation) via a
- * tiny C# COM interop type in an MTA PowerShell process ~20×/sec and
+ * tiny C# COM interop type in an MTA PowerShell process ~40×/sec and
  * prints P=<0..1> lines. All COM calls stay inside C# — PowerShell
  * cannot late-bind IAudioMeterInformation on a raw __ComObject.
  */
@@ -78,11 +83,19 @@ public static class AudioMeter {
     return p;
   }
 }'
-if ([AudioMeter]::Init() -ne 1) { Write-Output 'ERR=nometer'; exit }
+if ([AudioMeter]::Init() -ne 1) { [Console]::WriteLine('ERR=nometer'); exit }
 while ($true) {
   $p = [AudioMeter]::Peak()
-  if ($p -ge 0) { Write-Output ('P=' + $p.ToString('F3', [System.Globalization.CultureInfo]::InvariantCulture)) }
-  Start-Sleep -Milliseconds 50
+  if ($p -ge 0) {
+    # Timestamp AT THE SOURCE and write straight to the console: PowerShell
+    # buffers Write-Output when stdout is a pipe, which delivers a burst of
+    # lines whose arrival times are all identical. Stamping on arrival then
+    # time-compresses real audio into steps — the exact staircase the
+    # reactor is built to avoid.
+    $t = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    [Console]::WriteLine('T=' + $t + ' P=' + $p.ToString('F3', [System.Globalization.CultureInfo]::InvariantCulture))
+  }
+  Start-Sleep -Milliseconds 20
 }
 `;
 
@@ -102,15 +115,17 @@ function ensureProc() {
       while ((i = buf.indexOf("\n")) !== -1) {
         const line = buf.slice(0, i).trim();
         buf = buf.slice(i + 1);
-        const m = /^P=([\d.]+)$/.exec(line);
-        if (m) {
-          const peak = Math.min(1, parseFloat(m[1]) || 0);
-          lastPeak = peak;
-          const now = Date.now();
-          samples.push({ t: now, peak });
-          // Trim history
-          while (samples.length && now - samples[0].t > HISTORY_MS) samples.shift();
-        }
+        // T=<epoch ms> P=<0..1> — T is stamped by the meter itself. The
+        // bare P= form is still accepted (arrival-stamped) for robustness.
+        const m = /^T=(\d+)\s+P=([\d.]+)$/.exec(line) || /^P=([\d.]+)$/.exec(line);
+        if (!m) continue;
+        const stamped = m.length === 3;
+        const peak = Math.min(1, parseFloat(stamped ? m[2] : m[1]) || 0);
+        lastPeak = peak;
+        samples.push({ t: stamped ? Number(m[1]) : Date.now(), peak });
+        const newest = samples[samples.length - 1].t;
+        // Trim history
+        while (samples.length && newest - samples[0].t > HISTORY_MS) samples.shift();
       }
     });
     proc.on("exit", () => {
@@ -161,6 +176,45 @@ export function getMusicReactivity(): number {
   return Math.min(1, Math.max(lastPeak * 0.6 + maxPeak * 0.6, 0));
 }
 
+/**
+ * Raw peak envelope for the last ENVELOPE_WINDOW_MS, oldest first, with
+ * the timestamp of every sample. The client re-maps these onto its own
+ * clock using the LAST timestamp, so poll jitter can never reach the
+ * animation — only the freshest reading decides "now".
+ */
+function recentEnvelope(): { vals: number[]; ts: number[]; dt: number } {
+  const newest = samples.length ? samples[samples.length - 1].t : Date.now();
+  const cut = newest - ENVELOPE_WINDOW_MS;
+  let from = samples.length;
+  for (let i = 0; i < samples.length; i++) {
+    if (samples[i].t >= cut) {
+      from = i;
+      break;
+    }
+  }
+  const vals: number[] = [];
+  const ts: number[] = [];
+  for (let i = from; i < samples.length; i++) {
+    vals.push(Number(samples[i].peak.toFixed(4)));
+    ts.push(samples[i].t);
+  }
+  // Nominal spacing from the healthy gaps only.
+  const gaps: number[] = [];
+  for (let i = 1; i < ts.length; i++) {
+    const g = ts[i] - ts[i - 1];
+    if (g > 0) gaps.push(g);
+  }
+  gaps.sort((a, b) => a - b);
+  const dt = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 20;
+  // Guarantee a strictly increasing timeline. The client interpolates
+  // between these stamps, so a duplicated one would render as a step —
+  // better to re-space it at the nominal cadence and keep the motion smooth.
+  for (let i = 1; i < ts.length; i++) {
+    if (ts[i] <= ts[i - 1]) ts[i] = ts[i - 1] + dt;
+  }
+  return { vals, ts, dt };
+}
+
 /** Diagnostic snapshot for tests / status panels. */
 export function getAudioMeterStatus(): {
   available: boolean;
@@ -168,14 +222,21 @@ export function getAudioMeterStatus(): {
   musicPlaying: boolean;
   reactivity: number;
   samples: number;
+  envelope: number[];
+  envelopeT: number[];
+  envelopeDt: number;
 } {
   ensureProc();
+  const env = recentEnvelope();
   return {
     available: running,
     level: Number(getAudioLevel().toFixed(3)),
     musicPlaying: isMusicPlaying(),
     reactivity: Number(getMusicReactivity().toFixed(3)),
     samples: samples.length,
+    envelope: env.vals,
+    envelopeT: env.ts,
+    envelopeDt: env.dt,
   };
 }
 

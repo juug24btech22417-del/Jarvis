@@ -109,7 +109,10 @@ async function tryOneOpenRouterModel(
         "HTTP-Referer": "http://localhost:3000",
         "X-Title": "JARVIS AI Assistant",
       },
-      body: JSON.stringify({ model, messages: orMessages, max_tokens: 768, temperature: 0.75 }),
+      // max_tokens raised (was 768): Code Forge replies embed a complete
+      // single-file web app; a tight cap truncated them mid-artifact.
+      // Non-code replies still stop at EOS, so this costs nothing normally.
+      body: JSON.stringify({ model, messages: orMessages, max_tokens: 4096, temperature: 0.75 }),
       signal: c.signal,
     });
   } finally {
@@ -209,7 +212,8 @@ async function tryGroqFallback(
         body: JSON.stringify({
           model,
           messages: groqMessages,
-          max_tokens: 768,
+          // Code Forge needs headroom for a full single-file app (see note above).
+          max_tokens: 4096,
           temperature: 0.75,
           // gpt-oss models are reasoners — keep their monologue out of the
           // reply and stop it from eating the token budget.
@@ -776,21 +780,20 @@ export async function POST(request: Request) {
     }
 
     const lastUserMessage = messages.find((m: { role: string }) => m.role === "user")?.content || "";
-    extractAndStoreMemories(lastUserMessage).catch(err => {
-      console.error("[Chat] Memory extraction failed:", err);
-    });
-
-    // Companion care: detect emotional signals (exams, stress, moods, wins)
-    // and persist them as follow-up threads / mood samples. Fire-and-forget.
-    recordCareSignals(lastUserMessage).catch(err => {
-      console.warn("[Chat] Care signal recording failed (non-fatal):", err?.message);
-    });
-
-    // Journey log: "we shipped vision capture" / "remember this: first mood
-    // sync" become milestones, so "how far have we come" stays truthful.
-    maybeAutoMilestone(lastUserMessage).catch(err => {
-      console.warn("[Chat] Milestone auto-detect failed (non-fatal):", err?.message);
-    });
+    // ── Deferred side-writes ──
+    // Memory extraction, care signals, milestones and event logs all hit
+    // Prisma. Run a few seconds AFTER the reply so they can never compete
+    // with the response for the DB connection or the event loop.
+    const defer = (fn: () => Promise<unknown>, label: string, warn = false) =>
+      setTimeout(() => {
+        fn().catch((err) => {
+          const log = warn ? console.warn : console.error;
+          log(`[Chat] ${label} failed (non-fatal):`, err?.message ?? err);
+        });
+      }, 4000);
+    defer(() => extractAndStoreMemories(lastUserMessage), "Memory extraction");
+    defer(() => recordCareSignals(lastUserMessage), "Care signal recording", true);
+    defer(() => maybeAutoMilestone(lastUserMessage), "Milestone auto-detect", true);
 
     // Journey questions ("how far have we come?") get live-computed answers
     // straight from the data — git history, presence, memory, milestones.
@@ -818,31 +821,73 @@ export async function POST(request: Request) {
     }
 
     // Tier 1C: observe that the user is searching/asking — feeds pattern detection.
-    recordEvent("chat", {
-      query: lastUserMessage.slice(0, 200),
-      at: new Date().toISOString(),
-    }).catch(() => {});
+    // Deferred like the other side-writes so it never touches the hot path.
+    setTimeout(() => {
+      recordEvent("chat", {
+        query: lastUserMessage.slice(0, 200),
+        at: new Date().toISOString(),
+      }).catch(() => {});
+    }, 4000);
+
+    // ── Context gathering: ALL sources in parallel, each capped ──
+    // Chat latency budget: context must never cost more than ~0.9s total.
+    // Previously memory ran first (3s cap) and care context ran after it
+    // with NO cap — a cold Prisma connection turned "whats up" into a
+    // 40-second silence. Now everything races one shared deadline.
+    // Messages handled by offline/command paths (time, jokes, app control…)
+    // never reach the LLM, so they skip context gathering entirely.
+    const OFFLINE_FAST = [
+      /what'?s?\s*time|current\s*time|time\s*is\s*it|tell\s*me\s*the\s*time|what\s*time/i,
+      /^(what'?s?\s*)?(today'?s?\s*)?date|what\s*day\s+is\s+it|current\s*date$/i,
+      /joke|funny|make me laugh|tell.*joke/i,
+      /flip a coin|coin flip|heads or tails/i,
+      /roll a dice?|roll die|random number/i,
+      /^help$/i,
+    ];
+    // Pure small talk never uses memory/care context — the persona is
+    // already in the system prompt. Skip the DB entirely and let the LLM
+    // start immediately.
+    const SMALL_TALK = /^(whats up|what'?s up|wassup|sup|yo|hey|heyy+|hi|hello|howdy|how are you|how are ya|hows it going|how'?s it going|good (?:morning|afternoon|evening|night)|you (?:there|awake|good)|you up)\s*[!.?]*\s*$/i;
+    const skipContext = OFFLINE_FAST.some((p) => p.test(lastUserMessage)) || SMALL_TALK.test(lastUserMessage.trim());
+    const CONTEXT_TIMEOUT_MS = 900;
+    const withTimeout = <T>(p: Promise<T>, ms: number, fallback: T): Promise<T> =>
+      new Promise<T>((resolve) => {
+        const t = setTimeout(() => resolve(fallback), ms);
+        p.then((v) => { clearTimeout(t); resolve(v); }).catch(() => { clearTimeout(t); resolve(fallback); });
+      });
+
+    const [memoryData, care] = skipContext
+      ? [null, null]
+      : await Promise.all([
+      withTimeout(
+        retrieveRelevantMemories(lastUserMessage, {
+          maxEntities: 5,
+          maxHops: 2,
+          includePreferences: true,
+        }),
+        CONTEXT_TIMEOUT_MS,
+        null
+      ),
+      // Care context was previously awaited UNCAPPED — the silent killer.
+        withTimeout(getCareContext(), CONTEXT_TIMEOUT_MS, {
+          presence: null,
+          openThreads: [],
+          recentMoods: [],
+          quietPeople: [],
+          rituals: { dominantTimeBand: null, favoritePanel: null, sampleSize: 0 },
+          promptBlock: "",
+        } as Awaited<ReturnType<typeof getCareContext>>),
+      ]);
 
     let memoryContext = "";
     let retrievedEntityIds: string[] = [];
-    try {
-      // Cap memory retrieval at 3 seconds to prevent slow DB from blocking chat
-      const memoryPromise = retrieveRelevantMemories(lastUserMessage, {
-        maxEntities: 5,
-        maxHops: 2,
-        includePreferences: true,
-      });
-      const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000));
-      const memoryData = await Promise.race([memoryPromise, timeoutPromise]);
-      if (memoryData) {
-        memoryContext = formatMemoryContextAsPrompt(memoryData);
-        retrievedEntityIds = memoryData.entityIds;
-      } else {
-        console.warn("[Chat] Memory retrieval timed out (3s) — skipping context");
-      }
-    } catch (err) {
-      console.error("[Chat] Memory retrieval failed:", err);
+    if (memoryData) {
+      memoryContext = formatMemoryContextAsPrompt(memoryData);
+      retrievedEntityIds = memoryData.entityIds;
+    } else {
+      console.warn("[Chat] Memory/care context skipped (1.5s deadline) — prioritizing reply speed");
     }
+    const carePromptBlock = care?.promptBlock ?? "";
 
     // Tier 1A: reinforce the memories that actually fed this answer.
     // Fire-and-forget — don't block the chat response on a write.
@@ -855,16 +900,6 @@ export async function POST(request: Request) {
     const lastMessage = messages[messages.length - 1]?.content?.toLowerCase() || "";
     const isStatusQuery = /(?:system\s+)?status|diagnostics|system\s+health|battery\s+(?:level|status|percent)|cpu\s+(?:load|usage|temp)|ram\s+(?:usage|free|status)|storage\s+(?:space|free|status)/i.test(lastMessage);
     const stats = isStatusQuery ? await getSystemStatus() : null;
-
-    // Companion care context: presence gap, open follow-up threads, recent
-    // mood — the stuff that makes JARVIS feel like he actually knows you.
-    let carePromptBlock = "";
-    try {
-      const care = await getCareContext();
-      carePromptBlock = care.promptBlock;
-    } catch (err) {
-      console.warn("[Chat] Care context failed (non-fatal):", err);
-    }
 
     let enhancedSystemPrompt = memoryContext ? `${systemPrompt}\n\n${memoryContext}` : systemPrompt;
     if (carePromptBlock) enhancedSystemPrompt += carePromptBlock;
@@ -1950,6 +1985,58 @@ const emailProgrammaticMatch =
       });
     }
 
+    // ── Code Forge model routing ─────────────────────────────────
+    // Code requests deserve a stronger coder. nemotron-3 is a fine talker
+    // but a mediocre vanilla-JS author — sampled generations shipped
+    // artifacts whose init died silently (page renders, every click dead).
+    // gpt-oss-120b (Groq) is a far stronger reasoner/coder. Try it FIRST
+    // for code requests, falling back to the standard chain on any failure
+    // so normal chat availability never regresses.
+    const isCodeForgeRequest =
+      /\b(?:write|create|generate|make|build|code|develop)\b[^.?!]{0,80}\b(?:html|css|javascript|js|code|calculator|game|page|website|app|snippet|script|timer|clock|form|portfolio|todo|landing)\b/i.test(lastUserMessage);
+    if (isCodeForgeRequest && process.env.GROQ_API_KEY) {
+      try {
+        const c = new AbortController();
+        const t = setTimeout(() => c.abort(), 20000);
+        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
+          },
+          body: JSON.stringify({
+            model: "openai/gpt-oss-120b",
+            messages: [
+              { role: "system", content: enhancedSystemPrompt },
+              ...messages.map((msg: { role: string; content: string }) => ({
+                role: msg.role,
+                content: msg.content,
+              })),
+            ],
+            max_tokens: 12288,
+            temperature: 0.3, // low variance — correctness over flourishes
+            reasoning_effort: "medium",
+            stream: true,
+          }),
+          signal: c.signal,
+        });
+        clearTimeout(t);
+        if (response.ok) {
+          console.log("[Chat] Code Forge request → gpt-oss-120b (Groq)");
+          return new Response(response.body, {
+            headers: {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              Connection: "keep-alive",
+            },
+          });
+        }
+        console.warn("[Chat] Groq code route HTTP", response.status, "— falling to standard chain");
+      } catch (groqErr: any) {
+        console.warn("[Chat] Groq code route failed:", groqErr?.name || groqErr?.message, "— falling to standard chain");
+      }
+    }
+
     if (useNvidia) {
       try {
         const response = await fetchWithTimeout("https://integrate.api.nvidia.com/v1/chat/completions", {
@@ -1967,7 +2054,13 @@ const emailProgrammaticMatch =
                 content: msg.content,
               }))
             ],
-            max_tokens: 768,
+            // Code Forge replies embed a complete single-file web app inside
+            // <<<FORGE:...>>> — a 768 cap truncated the artifact mid-stream so
+            // the closing marker never arrived and nothing routed to the panel.
+            // A truncated <script> is worse: it renders but interactions die
+            // after the first click. 8k covers a full polished app; chat-only
+            // replies still stop at EOS, so the headroom is free.
+            max_tokens: 8192,
             temperature: 0.75,
             stream: true,
             // nemotron-3 is a reasoning model: without this its monologue
@@ -2056,7 +2149,7 @@ const emailProgrammaticMatch =
         },
         body: JSON.stringify({
           model: "claude-3-haiku-20240307",
-          max_tokens: 1024,
+          max_tokens: 4096, // headroom for Code Forge single-file apps
           system: enhancedSystemPrompt,
           messages: messages.map((msg: { role: string; content: string }) => ({
             role: msg.role,

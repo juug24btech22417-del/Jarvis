@@ -26,6 +26,17 @@ export interface SentinelSuggestion {
   metadata?: Record<string, any>;
 }
 
+/** A code artifact the Code Forge panel can display and (for web code) run. */
+export interface GeneratedCodeArtifact {
+  language: string;
+  code: string;
+  description: string;
+  /** Whether the sandboxed runner can execute this language. */
+  runnable: boolean;
+  /** Timestamp — lets the panel keep a session history of generations. */
+  createdAt: number;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -160,8 +171,8 @@ interface JarvisStore {
   setCurrentVideo: (video: JarvisStore["currentVideo"]) => void;
   clearCurrentVideo: () => void;
 
-  // Generated Code
-  generatedCode: { language: string; code: string; description: string } | null;
+  // Generated Code (Code Forge)
+  generatedCode: GeneratedCodeArtifact | null;
   setGeneratedCode: (code: JarvisStore["generatedCode"]) => void;
   clearGeneratedCode: () => void;
   currentScreenshot: string | null;
@@ -336,7 +347,7 @@ export const useJarvisStore = create<JarvisStore>((set) => ({
   setCurrentVideo: (currentVideo) => set({ currentVideo }),
   clearCurrentVideo: () => set({ currentVideo: null }),
 
-  // Generated Code
+  // Generated Code (Code Forge)
   generatedCode: null,
   setGeneratedCode: (generatedCode) => set({ generatedCode }),
   clearGeneratedCode: () => set({ generatedCode: null }),
