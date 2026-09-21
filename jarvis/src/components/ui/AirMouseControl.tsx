@@ -17,6 +17,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Hand, MousePointerClick } from "lucide-react";
 import { useHandControl, HandFrame } from "@/hooks/useHandControl";
 import { OneEuroFilter } from "@/lib/oneEuro";
+import { pipSupported } from "@/lib/documentPiP";
 import {
   claimVision,
   releaseVision,
@@ -401,7 +402,7 @@ export default function AirMouseControl() {
         whileHover={{ scale: 1.1 }}
         whileTap={{ scale: 0.95 }}
         title={enabled ? "Disable air-mouse (Ctrl+M)" : "Enable air-mouse (Ctrl+M)"}
-        className={`fixed bottom-[9.5rem] right-6 z-50 p-3 rounded-full transition-colors ${
+        className={`fixed bottom-[13rem] right-6 z-50 p-3 rounded-full transition-colors ${
           enabled
             ? "bg-reactor-core text-deep-space"
             : "bg-panel-glass text-text-secondary hover:bg-panel-border"
@@ -417,13 +418,28 @@ export default function AirMouseControl() {
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 24 }}
             transition={{ type: "spring", stiffness: 260, damping: 26 }}
-            className="fixed bottom-[12.5rem] right-6 z-50 w-60 rounded-2xl border border-panel-border/60 bg-deep-space/80 backdrop-blur-md p-3.5 pointer-events-none shadow-[0_0_30px_rgba(0,212,255,0.08)]"
+            className="fixed bottom-[13rem] right-[5.75rem] z-50 w-60 rounded-2xl border border-panel-border/60 bg-deep-space/80 backdrop-blur-md p-3.5 pointer-events-none shadow-[0_0_30px_rgba(0,212,255,0.08)]"
           >
             {/* Header */}
             <div className="flex items-center justify-between mb-2.5">
               <span className="font-orbitron text-[10px] tracking-[0.25em] text-text-secondary/70">
                 AIR GESTURES
               </span>
+              <div className="flex items-center gap-2">
+                {pipSupported() && (
+                  <button
+                    onClick={() =>
+                      window.dispatchEvent(new CustomEvent("jarvis:open-practice-monitor"))
+                    }
+                    title="Pop out the live monitor — keeps tracking alive while other apps are focused"
+                    className="text-text-secondary/60 hover:text-reactor-core pointer-events-auto"
+                  >
+                    <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M15 3h6v6M21 3l-9 9M10 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5" />
+                    </svg>
+                  </button>
+                )}
+              </div>
               <motion.span
                 key={mode}
                 initial={{ scale: 0.7, opacity: 0 }}

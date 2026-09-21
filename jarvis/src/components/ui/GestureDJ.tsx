@@ -25,7 +25,7 @@ import {
 const SWIPE_VEL = 0.35; // normalized x units/sec (was 0.55 — too strict)
 const SWIPE_MIN_TRAVEL = 0.1; // and at least this far in x
 const SWIPE_COOLDOWN_MS = 500;
-const SWIPE_TRAIL_MS = 260; // velocity window — must span several frames
+const SWIPE_TRAIL_MS = 320; // velocity window — must span several frames
 const FIST_ON = 0.65;
 const FIST_OFF = 0.5; // hysteresis
 const FIST_HOLD_MS = 280; // hold this long to toggle
@@ -64,10 +64,14 @@ export default function GestureDJ() {
       const now = performance.now();
 
       if (!f.handFound) {
-        if (now - lastSeen.current > DEADMAN_MS) setStatus("show your hand ✋");
-        trail.current = [];
-        fistDown.current = false;
-        fistSince.current = null;
+        // Brief tracking dropouts (fast swipes blur or leave the crop) must
+        // NOT wipe the swipe trail — only a real absence (DEADMAN) resets.
+        if (now - lastSeen.current > DEADMAN_MS) {
+          setStatus("show your hand ✋");
+          trail.current = [];
+          fistDown.current = false;
+          fistSince.current = null;
+        }
         return;
       }
       lastSeen.current = now;
@@ -192,7 +196,7 @@ export default function GestureDJ() {
         whileHover={{ scale: 1.1 }}
         whileTap={{ scale: 0.95 }}
         title={enabled ? "Disable Gesture DJ (Ctrl+Shift+J)" : "Enable Gesture DJ (Ctrl+Shift+J)"}
-        className={`fixed bottom-[16.5rem] right-6 z-50 p-3 rounded-full transition-colors ${
+        className={`fixed bottom-[18.5rem] right-6 z-50 p-3 rounded-full transition-colors ${
           enabled ? "bg-reactor-core text-deep-space" : "bg-panel-glass text-text-secondary hover:bg-panel-border"
         }`}
       >
@@ -206,7 +210,7 @@ export default function GestureDJ() {
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 10 }}
-            className="fixed bottom-[17.8rem] right-6 z-50 font-rajdhani text-xs text-text-secondary/80 bg-deep-space/70 border border-panel-border/50 rounded-full px-3 py-1.5 pointer-events-none"
+            className="fixed bottom-[18.5rem] right-[5.75rem] z-50 font-rajdhani text-xs text-text-secondary/80 bg-deep-space/70 border border-panel-border/50 rounded-full px-3 py-1.5 pointer-events-none"
           >
             {error
               ? "DJ: camera error"
@@ -225,7 +229,7 @@ export default function GestureDJ() {
             initial={{ opacity: 0, scale: 0.6 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 1.4 }}
-            className="fixed bottom-[19.5rem] right-6 z-50 p-3 rounded-full bg-reactor-core/20 border border-reactor-core/60 text-reactor-core pointer-events-none"
+            className="fixed bottom-[20.5rem] right-6 z-50 p-3 rounded-full bg-reactor-core/20 border border-reactor-core/60 text-reactor-core pointer-events-none"
           >
             {flash.icon === "next" ? (
               <SkipForward className="w-6 h-6" />

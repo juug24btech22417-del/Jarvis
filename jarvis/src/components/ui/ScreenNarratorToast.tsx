@@ -71,7 +71,7 @@ export default function ScreenNarratorToast() {
         whileHover={{ scale: 1.1 }}
         whileTap={{ scale: 0.95 }}
         title="Narrate my screen (Ctrl+Shift+D)"
-        className="fixed bottom-[13rem] right-6 z-50 p-3 rounded-full bg-panel-glass text-text-secondary hover:bg-panel-border transition-colors"
+        className="fixed bottom-[16.5rem] right-6 z-50 p-3 rounded-full bg-panel-glass text-text-secondary hover:bg-panel-border transition-colors"
       >
         <ScanEye className="w-5 h-5" />
       </motion.button>
@@ -84,7 +84,7 @@ export default function ScreenNarratorToast() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -10 }}
-            className="fixed bottom-52 right-6 z-50 max-w-xs holographic-panel px-4 py-3 font-rajdhani text-sm text-reactor-core"
+            className="fixed bottom-[16.5rem] right-[5.75rem] z-50 max-w-xs holographic-panel px-4 py-3 font-rajdhani text-sm text-reactor-core"
           >
             <div className="text-[10px] tracking-widest text-text-secondary/60 mb-1">
               SCREEN NARRATOR

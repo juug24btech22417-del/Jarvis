@@ -13,6 +13,9 @@ export interface GazeFrame {
   /** Normalized gaze point on screen, 0..1 (mirrored: your right = screen right). */
   x: number;
   y: number;
+  /** RAW un-mapped eye-look signals — input for the calibration fit. */
+  rawH: number;
+  rawV: number;
   /** Blendshape magnitude 0..1 — how wide open the eyes are. */
   openness: number;
   faceFound: boolean;
@@ -68,13 +71,12 @@ export function useEyeControl({ enabled, onFrame }: Options) {
         await video.play();
         videoRef.current = video;
 
-        const fileset = await FilesetResolver.forVisionTasks(
-          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
-        );
+        // Self-hosted runtime (public/mediapipe) — the app CSP blocks
+        // external script loads, and this keeps eye control fully offline.
+        const fileset = await FilesetResolver.forVisionTasks("/mediapipe/vision");
         const landmarker = await FaceLandmarker.createFromOptions(fileset, {
           baseOptions: {
-            modelAssetPath:
-              "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+            modelAssetPath: "/mediapipe/models/face_landmarker.task",
             delegate: "GPU",
           },
           outputFaceBlendshapes: true,
@@ -126,11 +128,20 @@ export function useEyeControl({ enabled, onFrame }: Options) {
                 onFrameRef.current?.({
                   x: expand(hRaw),
                   y: expand(-vRaw),
+                  rawH: hRaw,
+                  rawV: -vRaw,
                   openness,
                   faceFound: true,
                 });
               } else {
-                onFrameRef.current?.({ x: 0.5, y: 0.5, openness: 1, faceFound: false });
+                onFrameRef.current?.({
+                  x: 0.5,
+                  y: 0.5,
+                  rawH: 0,
+                  rawV: 0,
+                  openness: 1,
+                  faceFound: false,
+                });
               }
             } catch {
               // frame skipped (video resize etc.)
@@ -141,7 +152,8 @@ export function useEyeControl({ enabled, onFrame }: Options) {
         rafRef.current = requestAnimationFrame(loop);
       } catch (err) {
         console.error("[EyeControl] init failed:", err);
-        setError(String(err));
+        const e = err as Error & { name?: string };
+        setError(e.name ? `${e.name}: ${e.message}` : String(err));
       }
     };
 

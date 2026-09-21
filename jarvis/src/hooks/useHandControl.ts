@@ -74,6 +74,10 @@ export function useHandControl({ enabled, onFrame }: Options) {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     setReady(false);
+    // Clear shared telemetry so monitors don't display a dead stream.
+    handTelemetry.videoEl = null;
+    handTelemetry.landmarks = null;
+    handTelemetry.fps = 0;
   }, []);
 
   useEffect(() => {

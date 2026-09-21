@@ -25,7 +25,13 @@ import {
   HandFrame,
 } from "@/hooks/useHandControl";
 import type { NormalizedLandmark } from "@mediapipe/hands";
-import { claimVision, releaseVision, visionHolder, onVisionLockChange } from "@/lib/visionLock";
+import {
+  claimVision,
+  releaseVision,
+  visionHolder,
+  onVisionLockChange,
+  onVisionRequest,
+} from "@/lib/visionLock";
 import { pipSupported, openPiPWith, pipWindow } from "@/lib/documentPiP";
 
 // Hand skeleton connections (MediaPipe Hands topology).
@@ -125,7 +131,20 @@ export default function GesturePractice() {
         if (claimVision("practice")) setMode("own");
       }
     });
-    return off;
+    // Auto-yield: if a real controller (DJ/air-mouse/eyes) wants the camera
+    // while practice owns it, step aside to share mode so it never blocks
+    // the actual features.
+    const offReq = onVisionRequest((requester) => {
+      if (mode === "own" && requester !== "practice") {
+        releaseVision("practice");
+        setHolder(requester);
+        setMode("share");
+      }
+    });
+    return () => {
+      off();
+      offReq();
+    };
   }, [mode]);
 
   useEffect(() => {
@@ -168,6 +187,8 @@ export default function GesturePractice() {
         v.style.transform = "scaleX(-1)"; // mirrored like a mirror
         slot.appendChild(v);
         attached = v;
+        // Document moves (PiP round-trips) can leave the element paused.
+        v.play?.().catch(() => {});
       }
       return true;
     };
@@ -257,6 +278,19 @@ export default function GesturePractice() {
     return () => clearInterval(id);
   }, [pip]);
 
+  // Cross-component shortcut: air-mouse's ↗ button opens this monitor and
+  // pops it out in one go (events, because they're sibling components).
+  useEffect(() => {
+    const open = () => {
+      enable();
+      setTimeout(() => {
+        popOut();
+      }, 450); // let the stage render before moving it into the PiP window
+    };
+    window.addEventListener("jarvis:open-practice-monitor", open);
+    return () => window.removeEventListener("jarvis:open-practice-monitor", open);
+  }, [enable, popOut]);
+
   const pose: Pose = frame ? classify(frame) : "none";
   const waiting = mode === "share" && !handTelemetry.videoEl;
 
@@ -268,7 +302,7 @@ export default function GesturePractice() {
         whileHover={{ scale: 1.1 }}
         whileTap={{ scale: 0.95 }}
         title="Gesture practice — see what the camera sees (Ctrl+Shift+P)"
-        className={`fixed bottom-[22.5rem] right-6 z-50 p-3 rounded-full transition-colors ${
+        className={`fixed bottom-[20.5rem] right-6 z-50 p-3 rounded-full transition-colors ${
           mode !== "off"
             ? "bg-reactor-core text-deep-space"
             : "bg-panel-glass text-text-secondary hover:bg-panel-border"
@@ -283,7 +317,7 @@ export default function GesturePractice() {
             initial={{ opacity: 0, x: 24 }}
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 24 }}
-            className="fixed bottom-[25rem] right-6 z-50 w-64 rounded-2xl border border-panel-border/60 bg-deep-space/90 backdrop-blur-md p-3 shadow-[0_0_30px_rgba(0,212,255,0.08)]"
+            className="fixed bottom-[22rem] right-[5.75rem] z-50 w-64 rounded-2xl border border-panel-border/60 bg-deep-space/90 backdrop-blur-md p-3 shadow-[0_0_30px_rgba(0,212,255,0.08)]"
           >
             <div className="flex items-center justify-between mb-2">
               <span className="font-orbitron text-[10px] tracking-[0.25em] text-text-secondary/70">
