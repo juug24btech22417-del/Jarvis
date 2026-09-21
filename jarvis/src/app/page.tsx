@@ -14,8 +14,12 @@ import GestureDetector from "@/components/ui/GestureDetector";
 import VideoPlayer from "@/components/ui/VideoPlayer";
 import CodePanel from "@/components/panels/CodePanel";
 import WhatsAppPanel from "@/components/panels/WhatsAppPanel";
-import InstagramPanel from "@/components/panels/InstagramPanel";
 import TelegramPanel from "@/components/panels/TelegramPanel";
+import EyeControlOverlay from "@/components/ui/EyeControlOverlay";
+import AirMouseControl from "@/components/ui/AirMouseControl";
+import GestureDJ from "@/components/ui/GestureDJ";
+import PhoneRemotePanel from "@/components/panels/PhoneRemotePanel";
+import ScreenNarratorToast from "@/components/ui/ScreenNarratorToast";
 import ConnectedPanel from "@/components/panels/ConnectedPanel";
 import CommunicationHub from "@/components/panels/CommunicationHub";
 import SecurityPanel from "@/components/panels/SecurityPanel";
@@ -579,8 +583,8 @@ export default function Home() {
   const { calculations, lastCalculation, addCalculation, clearHistory, deleteCalculation } = useCalculatorHistory();
   const [calculatorOpen, setCalculatorOpen] = useState(true);
   const [whatsappOpen, setWhatsappOpen] = useState(false);
-  const [instagramOpen, setInstagramOpen] = useState(false);
   const [telegramOpen, setTelegramOpen] = useState(false);
+  const [phoneRemoteOpen, setPhoneRemoteOpen] = useState(false);
   const [connectedOpen, setConnectedOpen] = useState(false);
   const [commHubOpen, setCommHubOpen] = useState(false);
   const [securityOpen, setSecurityOpen] = useState(false);
@@ -837,8 +841,8 @@ export default function Home() {
               setCalculatorOpen(true);
             }}
             onOpenWhatsapp={() => { recordPanelOpen("whatsapp"); setWhatsappOpen(true); }}
-            onOpenInstagram={() => { recordPanelOpen("instagram"); setInstagramOpen(true); }}
             onOpenTelegram={() => { recordPanelOpen("telegram"); setTelegramOpen(true); }}
+            onOpenPhoneRemote={() => { recordPanelOpen("phone-remote"); setPhoneRemoteOpen(true); }}
             onOpenCommHub={() => { recordPanelOpen("comm-hub"); setCommHubOpen(true); }}
             onOpenSecurity={() => { recordPanelOpen("security"); setSecurityOpen(true); }}
             onOpenVault={() => { recordPanelOpen("vault"); setVaultOpen(true); }}
@@ -879,18 +883,6 @@ export default function Home() {
             )}
           </AnimatePresence>
 
-          {/* Instagram Panel */}
-          <AnimatePresence>
-            {instagramOpen && (
-              <InstagramPanel
-                onClose={() => setInstagramOpen(false)}
-                onSendMessage={(name, message) => {
-                  speak(`Instagram message sent to ${name}, Boss.`);
-                }}
-              />
-            )}
-          </AnimatePresence>
-
           {/* Telegram Panel */}
           <AnimatePresence>
             {telegramOpen && (
@@ -899,6 +891,25 @@ export default function Home() {
               />
             )}
           </AnimatePresence>
+
+          {/* Phone-as-arc-remote — QR pairing + status */}
+          <AnimatePresence>
+            {phoneRemoteOpen && (
+              <PhoneRemotePanel onClose={() => setPhoneRemoteOpen(false)} />
+            )}
+          </AnimatePresence>
+
+          {/* ── Flex features: eyes · air-mouse · gesture DJ ── */}
+          <EyeControlOverlay
+            onOpenSpotify={() => { recordPanelOpen("spotify"); setSpotifyOpen(true); }}
+            onOpenWeather={() => { recordPanelOpen("weather"); setWeatherOpen(true); }}
+            onOpenNews={() => { recordPanelOpen("news"); setNewsOpen(true); }}
+            onOpenCalendar={() => { recordPanelOpen("calendar"); setCalendarOpen(true); }}
+            onOpenVoiceNotes={() => { recordPanelOpen("voice-notes"); setVoiceNotesOpen(true); }}
+          />
+          <AirMouseControl />
+          <GestureDJ />
+          <ScreenNarratorToast />
 
           {/* Connected Apps Panel */}
           <AnimatePresence>

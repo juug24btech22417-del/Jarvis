@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useCallback, useState } from "react";
-import { Hands, Results } from "@mediapipe/hands";
-import { Camera } from "@mediapipe/camera_utils";
+import type { Hands, Results } from "@mediapipe/hands";
+import type { Camera } from "@mediapipe/camera_utils";
+import { loadHandsClass, loadCameraClass } from "@/lib/mediapipeLoader";
 import { useJarvisStore } from "@/store/jarvis.store";
 
 // Gesture types
@@ -158,41 +159,56 @@ export function useGesture(
     }
   }, [setState, setGestureDetected]);
 
-  // Initialize MediaPipe Hands
+  // Initialize MediaPipe Hands — legacy packages load as plain CDN scripts
+  // (webpack-bundling them corrupts the WASM glue).
   useEffect(() => {
     if (!enabled || !videoRef.current) return;
+    let cancelled = false;
 
-    const hands = new Hands({
-      locateFile: (file) => {
-        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
-      },
-    });
+    (async () => {
+      try {
+        const HandsCtor = (await loadHandsClass()) as unknown as new (config: {
+          locateFile: (file: string) => string;
+        }) => Hands;
+        const hands = new HandsCtor({
+          locateFile: (file) => `/mediapipe/hands/${file}`,
+        });
 
-    hands.setOptions({
-      maxNumHands: 1,
-      modelComplexity: 1,
-      minDetectionConfidence: 0.5,
-      minTrackingConfidence: 0.5,
-    });
+        hands.setOptions({
+          maxNumHands: 1,
+          modelComplexity: 1,
+          minDetectionConfidence: 0.5,
+          minTrackingConfidence: 0.5,
+        });
 
-    hands.onResults(onResults);
-    handsRef.current = hands;
+        hands.onResults(onResults);
+        handsRef.current = hands;
 
-    // Initialize camera
-    const camera = new Camera(videoRef.current, {
-      onFrame: async () => {
-        await hands.send({ image: videoRef.current! });
-      },
-      width: 320,
-      height: 240,
-    });
+        const CameraCtor = (await loadCameraClass()) as unknown as new (
+          videoEl: HTMLVideoElement,
+          config: { onFrame: () => Promise<void>; width?: number; height?: number }
+        ) => Camera;
+        const camera = new CameraCtor(videoRef.current!, {
+          onFrame: async () => {
+            if (videoRef.current) await hands.send({ image: videoRef.current });
+          },
+          width: 320,
+          height: 240,
+        });
 
-    cameraRef.current = camera;
-    camera.start();
+        cameraRef.current = camera;
+        if (!cancelled) await camera.start();
+      } catch (err) {
+        console.error("[Gesture] init failed:", err);
+      }
+    })();
 
     return () => {
-      camera.stop();
-      hands.close();
+      cancelled = true;
+      cameraRef.current?.stop();
+      cameraRef.current = null;
+      handsRef.current?.close();
+      handsRef.current = null;
     };
   }, [enabled, videoRef, onResults]);
 

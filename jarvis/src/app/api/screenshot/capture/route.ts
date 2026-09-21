@@ -85,9 +85,23 @@ function isLikelyBlackScreen(base64: string): boolean {
   return false;
 }
 
-export async function GET() {
+export async function GET(req: Request) {
   let tempScriptPath: string | null = null;
   try {
+    // ?context=1 → skip the bitmap capture and just return the desktop
+    // context (foreground window + process). Used by /api/screen/describe
+    // when it has an image but can't caption it (no HF key, HF down).
+    if (new URL(req.url).searchParams.get("context") === "1") {
+      const context = await getDesktopContext();
+      return NextResponse.json({
+        success: true,
+        image: null,
+        desktopContext: context,
+        fallback: true,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
     // Write the PS script to a temp file so $variables are preserved.
     const psScript = [
       "Add-Type -AssemblyName System.Windows.Forms, System.Drawing",

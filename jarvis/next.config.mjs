@@ -2,7 +2,7 @@
 const nextConfig = {
   experimental: {
     instrumentationHook: true, // enables src/instrumentation.ts (watcher heartbeat)
-    serverComponentsExternalPackages: ['puppeteer-extra-plugin-stealth', 'playwright-extra', 'playwright', 'edge-tts', 'pdf-parse', 'mammoth', 'form-data'],
+    serverComponentsExternalPackages: ['puppeteer-extra-plugin-stealth', 'playwright-extra', 'playwright', 'edge-tts', 'pdf-parse', 'mammoth', 'form-data', 'koffi', 'screenshot-desktop'],
   },
   reactStrictMode: true,
   images: {

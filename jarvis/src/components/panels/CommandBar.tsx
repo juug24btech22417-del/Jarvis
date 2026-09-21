@@ -120,7 +120,7 @@ function matchMissionCommand(text: string): string | null {
 interface CommandBarProps {
   onCalculate?: (expression: string, result: string) => void;
   onOpenWhatsapp?: () => void;
-  onOpenInstagram?: () => void;
+  onOpenPhoneRemote?: () => void;
   onOpenTelegram?: () => void;
   onOpenCommHub?: () => void;
   onOpenSecurity?: () => void;
@@ -149,7 +149,7 @@ interface CommandBarProps {
   onOpenFirecrawl?: () => void;
 }
 
-export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagram, onOpenTelegram, onOpenCommHub, onOpenSecurity, onOpenVault, onOpenDungeon, onOpenHabits, onOpenTimeCapsule, onOpenVoiceNotes, onOpenWeather, onOpenSpotify, onOpenNews, onOpenCalendar, onOpenAutomation }: CommandBarProps = {}) {
+export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRemote, onOpenTelegram, onOpenCommHub, onOpenSecurity, onOpenVault, onOpenDungeon, onOpenHabits, onOpenTimeCapsule, onOpenVoiceNotes, onOpenWeather, onOpenSpotify, onOpenNews, onOpenCalendar, onOpenAutomation }: CommandBarProps = {}) {
   const [input, setInput] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const voiceBtnRef = useRef<HTMLButtonElement>(null);
@@ -1363,25 +1363,11 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenInstagra
       }
     }
 
-    // INSTAGRAM COMMANDS
-    if (lower.includes("instagram") || lower.includes("insta") || lower.includes("dm")) {
-      // Open Instagram - opens in browser since no desktop app
-      if (lower.includes("open") || lower.includes("show") || lower.includes("check") || lower.includes("launch")) {
-        const result = await openDesktopApp("instagram");
-        if (result.success) {
-          onOpenInstagram?.();
-          return "Opening Instagram in browser, Boss.";
-        }
-      }
-
-      // Send Instagram DM
-      const igSendMatch = lower.match(/(?:send|message|msg)\s+(?:instagram|dm|insta)\s+(?:to\s+)?([a-z0-9_.]+)[:\s]+\s*(.+)/i);
-      if (igSendMatch && onOpenInstagram) {
-        const [, recipient, message] = igSendMatch;
-
-        // For now, open Instagram and let user select
-        onOpenInstagram();
-        return `Opening Instagram to message ${recipient}. Please select the contact, Boss.`;
+    // PHONE REMOTE COMMANDS (replaces Instagram commands)
+    if (lower.includes("phone remote") || lower.includes("pair my phone") || lower.includes("qr remote")) {
+      if (onOpenPhoneRemote) {
+        onOpenPhoneRemote();
+        return "Generating pairing QR, Boss. Scan it with your phone.";
       }
     }
 

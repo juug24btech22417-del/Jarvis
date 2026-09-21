@@ -2,10 +2,10 @@
 
 import { useState, useEffect, useRef, useLayoutEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { MessageSquare, X, Wifi, WifiOff, Send, Users, Phone, Camera, MessageCircle } from "lucide-react";
+import { MessageSquare, X, Wifi, WifiOff, Send, Users, Phone, MessageCircle } from "lucide-react";
 import { animateStagger, animatePanelOpen, animatePanelClose, addHoverScale, createRipple } from "@/lib/animations/gsap";
 
-type Platform = "whatsapp" | "instagram" | "telegram" | "all";
+type Platform = "whatsapp" | "telegram" | "all";
 
 interface TelegramMessage {
   message_id: number;
@@ -17,7 +17,7 @@ interface TelegramMessage {
 
 interface Conversation {
   id: string;
-  platform: "whatsapp" | "instagram" | "telegram";
+  platform: "whatsapp" | "telegram";
   name: string;
   lastMessage: string;
   timestamp: number;
@@ -46,7 +46,6 @@ export default function CommunicationHub({
 
   // Platform connection status
   const [whatsappConnected, setWhatsappConnected] = useState(false);
-  const [instagramConnected, setInstagramConnected] = useState(false);
   const [telegramConnected, setTelegramConnected] = useState(false);
 
   // GSAP entrance animation
@@ -119,34 +118,6 @@ export default function CommunicationHub({
       }
     }
 
-    // Fetch Instagram
-    if (selectedPlatform === "all" || selectedPlatform === "instagram") {
-      try {
-        const res = await fetch("/api/instagram/status");
-        const status = await res.json();
-        setInstagramConnected(status.loggedIn);
-
-        if (status.loggedIn) {
-          const threadsRes = await fetch("/api/instagram/threads");
-          const threadsData = await threadsRes.json();
-          if (threadsData.success) {
-            const instagramConvs: Conversation[] = threadsData.threads.map((thread: any) => ({
-              id: `ig-${thread.id}`,
-              platform: "instagram" as const,
-              name: thread.title,
-              lastMessage: thread.lastMessage,
-              timestamp: thread.timestamp,
-              unreadCount: thread.unreadCount,
-              isGroup: thread.isGroup,
-            }));
-            allConversations.push(...instagramConvs);
-          }
-        }
-      } catch (error) {
-        console.error("[CommHub] Instagram fetch failed:", error);
-      }
-    }
-
     // Fetch Telegram
     if (selectedPlatform === "all" || selectedPlatform === "telegram") {
       try {
@@ -209,19 +180,6 @@ export default function CommunicationHub({
         if (data.success) {
           onSendMessage?.("WhatsApp", selectedConversation.name, messageInput.trim());
         }
-      } else if (platform === "ig") {
-        const res = await fetch("/api/instagram/send", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            recipient: selectedConversation.name,
-            message: messageInput.trim(),
-          }),
-        });
-        const data = await res.json();
-        if (data.success) {
-          onSendMessage?.("Instagram", selectedConversation.name, messageInput.trim());
-        }
       } else if (platform === "tg") {
         const chatId = parseInt(recipientId);
         const res = await fetch("/api/telegram/send", {
@@ -266,8 +224,6 @@ export default function CommunicationHub({
     switch (platform) {
       case "whatsapp":
         return <Phone className="w-5 h-5 text-green-500" />;
-      case "instagram":
-        return <Camera className="w-5 h-5 text-pink-500" />;
       case "telegram":
         return <MessageCircle className="w-5 h-5 text-cyan-500" />;
       default:
@@ -279,8 +235,6 @@ export default function CommunicationHub({
     switch (platform) {
       case "whatsapp":
         return "border-green-500/50 hover:bg-green-500/10";
-      case "instagram":
-        return "border-pink-500/50 hover:bg-pink-500/10";
       case "telegram":
         return "border-cyan-500/50 hover:bg-cyan-500/10";
       default:
@@ -303,10 +257,6 @@ export default function CommunicationHub({
               <span className="flex items-center gap-1">
                 <Wifi className={`w-3 h-3 ${whatsappConnected ? "text-green-500" : "text-gray-500"}`} />
                 WhatsApp
-              </span>
-              <span className="flex items-center gap-1">
-                <Wifi className={`w-3 h-3 ${instagramConnected ? "text-green-500" : "text-gray-500"}`} />
-                Instagram
               </span>
               <span className="flex items-center gap-1">
                 <Wifi className={`w-3 h-3 ${telegramConnected ? "text-green-500" : "text-gray-500"}`} />
@@ -347,17 +297,6 @@ export default function CommunicationHub({
         >
           <Phone className="w-4 h-4" />
           WhatsApp
-        </button>
-        <button
-          onClick={() => setSelectedPlatform("instagram")}
-          className={`px-4 py-2 rounded-lg font-rajdhani text-sm transition-colors flex items-center gap-2 ${
-            selectedPlatform === "instagram"
-              ? "bg-pink-500/30 text-pink-400 border border-pink-500"
-              : "bg-panel-glass/30 text-text-secondary hover:bg-panel-glass/50"
-          }`}
-        >
-          <Camera className="w-4 h-4" />
-          Instagram
         </button>
         <button
           onClick={() => setSelectedPlatform("telegram")}
