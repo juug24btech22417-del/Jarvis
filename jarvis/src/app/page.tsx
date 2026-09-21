@@ -19,6 +19,7 @@ import EyeControlOverlay from "@/components/ui/EyeControlOverlay";
 import AirMouseControl from "@/components/ui/AirMouseControl";
 import GestureDJ from "@/components/ui/GestureDJ";
 import PhoneRemotePanel from "@/components/panels/PhoneRemotePanel";
+import GesturePractice from "@/components/ui/GesturePractice";
 import ScreenNarratorToast from "@/components/ui/ScreenNarratorToast";
 import ConnectedPanel from "@/components/panels/ConnectedPanel";
 import CommunicationHub from "@/components/panels/CommunicationHub";
@@ -909,6 +910,7 @@ export default function Home() {
           />
           <AirMouseControl />
           <GestureDJ />
+          <GesturePractice />
           <ScreenNarratorToast />
 
           {/* Connected Apps Panel */}

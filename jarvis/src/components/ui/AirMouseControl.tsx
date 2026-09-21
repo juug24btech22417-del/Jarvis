@@ -28,7 +28,7 @@ const MOVE_INTERVAL_MS = 40; // ~25 cursor updates/sec
 const PINCH_ON = 0.75; // pinch strength to trigger click/drag
 const PINCH_OFF = 0.5; // hysteresis — release must drop below this
 const DEADMAN_MS = 700; // no hand → stop driving the cursor
-const DEBOUNCE_FRAMES = 3; // consecutive frames before a pose becomes a mode
+const DEBOUNCE_FRAMES = 2; // consecutive frames before a pose becomes a mode
 const DRAG_AFTER_MS = 320; // pinch held this long becomes a drag
 const PALM_FREEZE_MS = 1000; // open-palm hold to trigger panic freeze
 const SWIPE_THRESHOLD = 0.14; // fist horizontal travel to fire alt-tab
@@ -109,6 +109,10 @@ export default function AirMouseControl() {
   // thumb right-click
   const lastRightClick = useRef(0);
 
+  // unrecognizable-pose run length (stranded-mode reset) + live fps
+  const noneCount = useRef(0);
+  const fpsRef = useRef(0);
+
   const setModeBoth = (m: Mode) => {
     if (modeRef.current === m) return;
     modeRef.current = m;
@@ -137,26 +141,53 @@ export default function AirMouseControl() {
       const now = performance.now();
 
       if (!f.handFound) {
+        // Hand vanished mid-drag → release the held button immediately,
+        // otherwise the OS keeps dragging with no way to stop it.
+        if (dragArmed.current) {
+          dragArmed.current = false;
+          pinching.current = false;
+          sendInput({ action: "up" });
+          setModeBoth("idle");
+        }
         if (now - lastSeen.current > DEADMAN_MS) setStatus("show your hand ✋");
         return;
       }
       lastSeen.current = now;
+      fpsRef.current = f.fps;
 
       // ─── Pose classification ────────────────────────────────────────────
       const { fingers, pinch, fist } = f;
       let pose: Pose;
-      if (fingers.index && fingers.middle && fingers.ring && fingers.pinky && fingers.thumb) {
+      // Relaxed rules: ring/pinky flicker tolerated on two/thumb/point (the
+      // hysteresis in useHandControl removes most flicker upstream), palm
+      // ignores the wandering thumb, fist only needs the four fingers down.
+      if (fingers.index && fingers.middle && fingers.ring && fingers.pinky) {
         pose = "palm";
-      } else if (!fingers.index && !fingers.middle && !fingers.ring && !fingers.pinky && fist > 0.75) {
+      } else if (!fingers.index && !fingers.middle && !fingers.ring && fist > 0.65) {
         pose = "fist";
-      } else if (fingers.index && fingers.middle && !fingers.ring && !fingers.pinky) {
+      } else if (fingers.index && fingers.middle && !fingers.ring) {
         pose = "two";
-      } else if (fingers.thumb && !fingers.index && !fingers.middle && !fingers.ring && !fingers.pinky) {
+      } else if (fingers.thumb && !fingers.index && !fingers.middle && !fingers.ring) {
         pose = "thumb";
-      } else if (fingers.index && !fingers.middle && !fingers.ring && !fingers.pinky) {
+      } else if (fingers.index && !fingers.middle && !fingers.ring) {
         pose = "point";
       } else {
         pose = "none";
+      }
+
+      // Stranded-mode reset: pose unrecognizable for ~1s while in a gesture
+      // mode → fall back to pointing instead of staying stuck.
+      if (pose === "none") {
+        noneCount.current++;
+        if (
+          noneCount.current > 25 &&
+          (modeRef.current === "drag" || modeRef.current === "scroll" || modeRef.current === "fist")
+        ) {
+          setModeBoth("idle");
+          setStatus("gesture lost — pointing");
+        }
+      } else {
+        noneCount.current = 0;
       }
 
       // Debounce: pose must hold DEBOUNCE_FRAMES consecutive frames.
@@ -334,11 +365,12 @@ export default function AirMouseControl() {
     return () => clearInterval(t);
   }, [enabled]);
   const lastFrameStatus = () => {
+    const fps = fpsRef.current ? ` · ${fpsRef.current | 0}fps` : "";
     if (modeRef.current === "frozen") return "frozen — point to resume";
-    if (modeRef.current === "drag") return "dragging…";
-    if (modeRef.current === "scroll") return "scrolling…";
-    if (modeRef.current === "fist") return "swipe ← → to switch apps";
-    return "point · pinch to click";
+    if (modeRef.current === "drag") return `dragging…${fps}`;
+    if (modeRef.current === "scroll") return `scrolling…${fps}`;
+    if (modeRef.current === "fist") return `swipe ← → to switch apps${fps}`;
+    return `point · pinch to click${fps}`;
   };
 
   // Ctrl+M toggles.

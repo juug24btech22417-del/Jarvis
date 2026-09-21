@@ -19,13 +19,17 @@ import {
   onVisionLockChange,
 } from "@/lib/visionLock";
 
-const SWIPE_VEL = 0.55; // normalized x units/sec
-const SWIPE_MIN_TRAVEL = 0.14; // and at least this far in x
-const SWIPE_COOLDOWN_MS = 700;
-const FIST_ON = 0.75;
-const FIST_OFF = 0.55; // hysteresis
-const FIST_HOLD_MS = 350; // hold this long to toggle
-const FIST_COOLDOWN_MS = 900;
+// Tuned for real-world tracking: MediaPipe lite runs ~15-25fps with jitter,
+// so thresholds are lenient (a slow medium-speed swipe should register) and
+// cooldowns prevent double-fires.
+const SWIPE_VEL = 0.35; // normalized x units/sec (was 0.55 — too strict)
+const SWIPE_MIN_TRAVEL = 0.1; // and at least this far in x
+const SWIPE_COOLDOWN_MS = 500;
+const SWIPE_TRAIL_MS = 260; // velocity window — must span several frames
+const FIST_ON = 0.65;
+const FIST_OFF = 0.5; // hysteresis
+const FIST_HOLD_MS = 280; // hold this long to toggle
+const FIST_COOLDOWN_MS = 700;
 const DEADMAN_MS = 800; // hand lost → abort any pending gesture
 
 export default function GestureDJ() {
@@ -87,10 +91,12 @@ export default function GestureDJ() {
 
       // ── Swipe → next/prev (velocity over a short trail) ──
       trail.current.push({ x: f.x, t: now });
-      while (trail.current.length > 2 && now - trail.current[0].t > 180) {
+      while (trail.current.length > 2 && now - trail.current[0].t > SWIPE_TRAIL_MS) {
         trail.current.shift();
       }
-      if (trail.current.length >= 2 && now - lastSwipe.current > SWIPE_COOLDOWN_MS && f.fist < FIST_OFF) {
+      // Swipe fires with a mostly-open hand; only a confirmed held fist
+      // (play/pause) suppresses it.
+      if (trail.current.length >= 2 && now - lastSwipe.current > SWIPE_COOLDOWN_MS && f.fist < 0.9) {
         const first = trail.current[0];
         const last = trail.current[trail.current.length - 1];
         const dt = (last.t - first.t) / 1000;
@@ -148,8 +154,8 @@ export default function GestureDJ() {
       const f = lastFrame.current;
       if (!f) return setStatus("warming up…");
       if (!f.handFound) return setStatus("show your hand ✋");
-      if (f.fist > FIST_OFF) return setStatus("fist detected — hold…");
-      setStatus("swipe ⏭ ⏮ · fist ⏯");
+      if (f.fist > FIST_OFF) return setStatus("fist detected — hold it");
+      setStatus(`swipe ⏭ ⏮ · fist ⏯ · ${f.fps | 0}fps`);
     }, 400);
     return () => clearInterval(t);
   }, [enabled]);

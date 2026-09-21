@@ -3,7 +3,7 @@
 // latency and steal each other's frames — first claim wins, and the loser's
 // hook reports "camera busy" until the winner releases.
 
-export type VisionOwner = "air-mouse" | "eyes" | "dj";
+export type VisionOwner = "air-mouse" | "eyes" | "dj" | "practice";
 
 const EVENT = "jarvis:vision-lock";
 
