@@ -1,18 +1,30 @@
 "use client";
 
 // Gesture Practice — live pose-detection overlay to calibrate the gestures.
-// Shows the raw camera feed with the 21-point MediaPipe skeleton drawn on
-// top, live pinch/fist meters, the currently-classified pose, and the fps —
-// so you can see exactly what the engine sees while you try each gesture.
+// Shows the camera feed with the 21-point MediaPipe skeleton drawn on top,
+// live pinch/fist meters, the currently-classified pose, and the fps.
 //
-// Includes a "pop out" button (Document Picture-in-Picture): the monitor
-// becomes an always-on-top mini window so you can watch your hand while
-// testing air-mouse in other apps.
+// Two modes:
+//  - own:   practice itself owns the camera (via the vision lock).
+//  - share: another feature (air-mouse / DJ) holds the camera — practice
+//           becomes a read-only MONITOR tapping into the module-level
+//           handTelemetry stream (their video element + landmarks), so you
+//           can watch what DJ/air-mouse sees, including popped-out into the
+//           always-on-top PiP window, WITHOUT stealing the camera.
+//
+// The pop-out button (Document Picture-in-Picture) moves the stage into an
+// always-on-top mini window — which also keeps tracking alive while other
+// apps are focused.
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Hand, X, ExternalLink, Camera } from "lucide-react";
-import { useHandControl, HandFrame } from "@/hooks/useHandControl";
+import { Hand, X, ExternalLink, Camera, Eye } from "lucide-react";
+import {
+  useHandControl,
+  handTelemetry,
+  HandFrame,
+} from "@/hooks/useHandControl";
+import type { NormalizedLandmark } from "@mediapipe/hands";
 import { claimVision, releaseVision, visionHolder, onVisionLockChange } from "@/lib/visionLock";
 import { pipSupported, openPiPWith, pipWindow } from "@/lib/documentPiP";
 
@@ -47,12 +59,50 @@ const POSE_HINT: Record<Pose, string> = {
   none: "unrecognized — spread your fingers",
 };
 
+/** Derive a display frame from raw landmarks (share mode — no hysteresis). */
+function frameFromLandmarks(lm: NormalizedLandmark[], fps: number): HandFrame {
+  const tip = lm[8];
+  const thumb = lm[4];
+  const pinchDist = Math.hypot(tip.x - thumb.x, tip.y - thumb.y);
+  const palmX = (lm[0].x + lm[5].x + lm[17].x) / 3;
+  const palmY = (lm[0].y + lm[5].y + lm[17].y) / 3;
+  const scale = Math.hypot(lm[9].x - lm[0].x, lm[9].y - lm[0].y) || 1e-6;
+  const TIPS = [8, 12, 16, 20];
+  const PIPS = [5, 9, 13, 17];
+  let curl = 0;
+  for (let i = 0; i < 4; i++) {
+    curl +=
+      Math.hypot(lm[TIPS[i]].x - palmX, lm[TIPS[i]].y - palmY) /
+      (Math.hypot(lm[PIPS[i]].x - palmX, lm[PIPS[i]].y - palmY) || 1e-6);
+  }
+  curl /= 4;
+  const fist = Math.max(0, Math.min(1, (0.72 - curl) / 0.32));
+  const wrist = lm[0];
+  const d = (a: NormalizedLandmark, b: NormalizedLandmark) => Math.hypot(a.x - b.x, a.y - b.y);
+  const ext = (t: number, p: number) => d(lm[t], wrist) > d(lm[p], wrist) * 1.08;
+  return {
+    x: 1 - tip.x,
+    y: tip.y,
+    pinch: Math.max(0, Math.min(1, 1 - pinchDist / 0.18)),
+    fist,
+    fingers: {
+      thumb: d(lm[4], lm[9]) / scale > 0.95,
+      index: ext(8, 6),
+      middle: ext(12, 10),
+      ring: ext(16, 14),
+      pinky: ext(20, 18),
+    },
+    handFound: true,
+    fps,
+  };
+}
+
 export default function GesturePractice() {
-  const [enabled, setEnabled] = useState(false);
-  const [camGranted, setCamGranted] = useState(false);
+  const [mode, setMode] = useState<"off" | "own" | "share">("off");
   const [frame, setFrame] = useState<HandFrame | null>(null);
   const [pip, setPip] = useState(false);
   const [pipErr, setPipErr] = useState("");
+  const [holder, setHolder] = useState<string>("");
 
   const stageRef = useRef<HTMLDivElement | null>(null); // video+canvas wrapper (movable to PiP)
   const videoSlotRef = useRef<HTMLDivElement | null>(null);
@@ -60,38 +110,89 @@ export default function GesturePractice() {
 
   const handleFrame = useCallback((f: HandFrame) => setFrame(f), []);
   const { ready, error, landmarksRef, videoElRef } = useHandControl({
-    enabled: enabled && camGranted,
+    enabled: mode === "own",
     onFrame: handleFrame,
   });
 
-  // Feed the hidden <video> into the visible slot.
+  // ─── Vision lock: own the camera if free, otherwise share the stream ────
   useEffect(() => {
-    const slot = videoSlotRef.current;
-    const v = videoElRef.current;
-    if (!slot || !v) return;
-    v.style.width = "100%";
-    v.style.height = "100%";
-    v.style.objectFit = "cover";
-    v.style.transform = "scaleX(-1)"; // mirrored like a mirror
-    slot.appendChild(v);
-    return () => {
-      if (v.parentNode === slot) slot.removeChild(v);
-    };
-  }, [ready, videoElRef]);
+    if (mode === "off") return;
+    // Already sharing or owning — just keep an eye on the lock.
+    const off = onVisionLockChange((h) => {
+      setHolder(h ?? "");
+      if (!h && mode === "share") {
+        // Owner released — upgrade to owning the camera.
+        if (claimVision("practice")) setMode("own");
+      }
+    });
+    return off;
+  }, [mode]);
 
-  // Skeleton painting loop.
   useEffect(() => {
-    if (!enabled || !camGranted) return;
+    if (mode !== "off") return;
+    setFrame(null);
+    setPipErr("");
+  }, [mode]);
+
+  const enable = useCallback(() => {
+    setPipErr("");
+    if (claimVision("practice")) {
+      setHolder("practice");
+      setMode("own");
+    } else {
+      const h = visionHolder() ?? "another feature";
+      setHolder(h);
+      setMode("share"); // read-only monitor of the active feature's stream
+    }
+  }, []);
+
+  const disable = useCallback(() => {
+    releaseVision("practice");
+    setMode("off");
+  }, []);
+
+  // ─── Video element routing (own element or the owner's, via telemetry) ──
+  useEffect(() => {
+    if (mode === "off") return;
+    const slot = videoSlotRef.current;
+    if (!slot) return;
+    let attached: HTMLVideoElement | null = null;
+
+    const tryAttach = () => {
+      const v = mode === "own" ? videoElRef.current : handTelemetry.videoEl;
+      if (!v) return false;
+      if (v.parentNode !== slot) {
+        v.style.width = "100%";
+        v.style.height = "100%";
+        v.style.objectFit = "cover";
+        v.style.transform = "scaleX(-1)"; // mirrored like a mirror
+        slot.appendChild(v);
+        attached = v;
+      }
+      return true;
+    };
+    tryAttach();
+    // Share mode: the owner's stream may start after we open — keep trying.
+    const iv = setInterval(tryAttach, 500);
+    return () => {
+      clearInterval(iv);
+      if (attached && attached.parentNode === slot) slot.removeChild(attached);
+    };
+  }, [mode, ready, videoElRef]);
+
+  // ─── Skeleton painting (own landmarks or telemetry landmarks) ───────────
+  useEffect(() => {
+    if (mode === "off") return;
     let raf = 0;
     const draw = () => {
       raf = requestAnimationFrame(draw);
       const cv = canvasRef.current;
-      const lm = landmarksRef.current;
       if (!cv) return;
       const ctx = cv.getContext("2d");
       if (!ctx) return;
       const W = cv.width, H = cv.height;
       ctx.clearRect(0, 0, W, H);
+      const lm = mode === "own" ? landmarksRef.current : handTelemetry.landmarks;
       if (!lm) return;
       // Mirrored mapping to match the flipped video.
       const px = (p: { x: number; y: number }) => [(1 - p.x) * W, p.y * H] as const;
@@ -122,25 +223,20 @@ export default function GesturePractice() {
     };
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
-  }, [enabled, camGranted, landmarksRef]);
+  }, [mode, landmarksRef]);
 
-  // Webcam lock.
+  // ─── Share mode: derive meters/pose from telemetry at ~10Hz ─────────────
   useEffect(() => {
-    if (!enabled) {
-      setCamGranted(false);
-      return;
-    }
-    if (claimVision("practice")) {
-      setCamGranted(true);
-      return () => releaseVision("practice");
-    }
-    const off = onVisionLockChange((h) => {
-      if (!h && enabled && claimVision("practice")) setCamGranted(true);
-    });
-    return off;
-  }, [enabled]);
+    if (mode !== "share") return;
+    const iv = setInterval(() => {
+      const lm = handTelemetry.landmarks;
+      if (!lm) return setFrame(null);
+      setFrame(frameFromLandmarks(lm, handTelemetry.fps));
+    }, 100);
+    return () => clearInterval(iv);
+  }, [mode]);
 
-  // PiP pop-out — move the whole stage into the always-on-top window.
+  // ─── PiP pop-out — move the whole stage into the always-on-top window ───
   const popOut = useCallback(async () => {
     try {
       setPipErr("");
@@ -162,27 +258,27 @@ export default function GesturePractice() {
   }, [pip]);
 
   const pose: Pose = frame ? classify(frame) : "none";
-  const busy = !!visionHolder() && visionHolder() !== "practice";
+  const waiting = mode === "share" && !handTelemetry.videoEl;
 
   return (
     <>
       {/* Toggle — top of the bottom-right stack */}
       <motion.button
-        onClick={() => setEnabled((v) => !v)}
+        onClick={() => (mode === "off" ? enable() : disable())}
         whileHover={{ scale: 1.1 }}
         whileTap={{ scale: 0.95 }}
         title="Gesture practice — see what the camera sees (Ctrl+Shift+P)"
         className={`fixed bottom-[22.5rem] right-6 z-50 p-3 rounded-full transition-colors ${
-          enabled
+          mode !== "off"
             ? "bg-reactor-core text-deep-space"
             : "bg-panel-glass text-text-secondary hover:bg-panel-border"
         }`}
       >
-        <Hand className="w-5 h-5" />
+        {mode === "share" ? <Eye className="w-5 h-5" /> : <Hand className="w-5 h-5" />}
       </motion.button>
 
       <AnimatePresence>
-        {enabled && (
+        {mode !== "off" && (
           <motion.div
             initial={{ opacity: 0, x: 24 }}
             animate={{ opacity: 1, x: 0 }}
@@ -191,7 +287,7 @@ export default function GesturePractice() {
           >
             <div className="flex items-center justify-between mb-2">
               <span className="font-orbitron text-[10px] tracking-[0.25em] text-text-secondary/70">
-                GESTURE PRACTICE
+                {mode === "share" ? `MONITOR · ${holder}` : "GESTURE PRACTICE"}
               </span>
               <div className="flex items-center gap-1.5">
                 {pipSupported() && (
@@ -203,7 +299,7 @@ export default function GesturePractice() {
                     <ExternalLink className="w-3.5 h-3.5" />
                   </button>
                 )}
-                <button onClick={() => setEnabled(false)} className="text-text-secondary/60 hover:text-text-secondary">
+                <button onClick={disable} className="text-text-secondary/60 hover:text-text-secondary">
                   <X className="w-3.5 h-3.5" />
                 </button>
               </div>
@@ -216,16 +312,16 @@ export default function GesturePractice() {
             >
               <div ref={videoSlotRef} className="absolute inset-0" />
               <canvas ref={canvasRef} width={320} height={240} className="absolute inset-0 w-full h-full" />
-              {(!camGranted || !ready) && (
+              {(mode === "own" && (!ready || error)) || waiting ? (
                 <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 font-rajdhani text-[11px] text-text-secondary/70">
                   <Camera className="w-5 h-5 mb-1 opacity-60" />
-                  {busy
-                    ? `camera busy — ${visionHolder()}`
-                    : error
-                    ? error.slice(0, 60)
-                    : "starting camera…"}
+                  {mode === "own"
+                    ? error
+                      ? error.slice(0, 60)
+                      : "starting camera…"
+                    : `waiting for ${holder}'s camera…`}
                 </div>
-              )}
+              ) : null}
             </div>
 
             {/* Meters */}
@@ -245,6 +341,7 @@ export default function GesturePractice() {
               </div>
               <div className="font-rajdhani text-[10px] text-text-secondary/45 mt-0.5">
                 {frame ? `${frame.fps | 0} fps` : "—"} {pip ? "· popped out ↗" : ""}
+                {mode === "share" ? " · watch-only" : ""}
               </div>
               {pipErr && <div className="font-rajdhani text-[10px] text-accent-red mt-1">{pipErr}</div>}
             </div>

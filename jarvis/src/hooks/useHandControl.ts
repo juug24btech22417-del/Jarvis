@@ -38,6 +38,17 @@ const TIPS = [8, 12, 16, 20];
 // Corresponding MCP knuckle joints where fingers meet the palm.
 const PIPS = [5, 9, 13, 17];
 
+// Module-level telemetry shared by every hook instance: whichever feature
+// currently owns the camera (air-mouse, DJ, practice…) writes its latest
+// landmarks + video element + fps here, so read-only consumers like the
+// gesture-practice monitor can display the live stream without claiming
+// the camera themselves.
+export const handTelemetry: {
+  videoEl: HTMLVideoElement | null;
+  landmarks: NormalizedLandmark[] | null;
+  fps: number;
+} = { videoEl: null, landmarks: null, fps: 0 };
+
 interface Options {
   enabled: boolean;
   onFrame?: (f: HandFrame) => void;
@@ -97,6 +108,7 @@ export function useHandControl({ enabled, onFrame }: Options) {
         await video.play();
         videoRef.current = video;
         videoElRef.current = video;
+        handTelemetry.videoEl = video;
 
         // Legacy MediaPipe must load as a plain same-origin script —
         // webpack-bundling it corrupts the WASM glue.
@@ -123,6 +135,7 @@ export function useHandControl({ enabled, onFrame }: Options) {
           haveResult = true;
           const lm = results.multiHandLandmarks?.[0];
           landmarksRef.current = lm ?? null;
+          handTelemetry.landmarks = lm ?? null;
           if (lm) {
             // Index tip 8, thumb tip 4.
             const tip = lm[8];
@@ -217,6 +230,7 @@ export function useHandControl({ enabled, onFrame }: Options) {
           lastStamp = now;
           if (dt > 0) smoothFps = smoothFps ? smoothFps * 0.9 + (1000 / dt) * 0.1 : 1000 / dt;
           fpsRef.current = smoothFps;
+          handTelemetry.fps = smoothFps;
           rafRef.current = requestAnimationFrame(loop);
         };
 
