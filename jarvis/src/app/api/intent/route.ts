@@ -3,10 +3,10 @@ import { INTENT_SYSTEM_PROMPT } from "@/lib/jarvis/personality";
 
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || process.env.NEXT_PUBLIC_NVIDIA_API_KEY;
 
-// 4s timeout — the intent parse is a convenience, not a gate.
+// 2.5s timeout — the intent parse is a convenience, not a gate.
 // If NVIDIA is rate-limited or slow, fall through to "chat" so the
 // /api/chat path still serves the user.
-function fetchWithTimeout(url: string, opts: RequestInit, ms = 4000) {
+function fetchWithTimeout(url: string, opts: RequestInit, ms = 2500) {
   const c = new AbortController();
   const t = setTimeout(() => c.abort(), ms);
   return fetch(url, { ...opts, signal: c.signal }).finally(() => clearTimeout(t));
@@ -51,9 +51,16 @@ export async function POST(req: NextRequest) {
             ],
             temperature: 0.1,
             max_tokens: 256,
+            // CRITICAL: nemotron-3 is a reasoning model. Without this flag it
+            // burns the entire request in thinking mode — the dev log showed
+            // 16-20 SECOND intent parses ("POST /api/intent 200 in 19927ms").
+            // Thinking off brings the parse back under ~1s. The old 4s timeout
+            // just aborted these slow calls, wasting NVIDIA quota on every
+            // single message and rate-limiting the real chat request.
+            chat_template_kwargs: { thinking: false },
           }),
         },
-        4000
+        2500
       );
     } catch (e: any) {
       // Timeout or network error — fall through to chat. The user

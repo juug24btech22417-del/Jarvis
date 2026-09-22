@@ -318,6 +318,11 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
     stateRef.current = state;
   }, [state]);
 
+  // Abort controller for in-flight /api/intent calls. When the chat stream
+  // answers first, the intent call is dead weight — it only consumes NVIDIA
+  // quota (and pushes the shared rate limit against the next real message).
+  const intentAbortRef = useRef<AbortController | null>(null);
+
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -2686,17 +2691,36 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
 
   // Process command using LLM-based intent parsing
   const processFlexibleCommand = async (text: string): Promise<string | null> => {
+    // Fast path: obvious conversational/smalltalk messages can never match a
+    // device intent. Skip the LLM parse entirely — zero NVIDIA quota spent,
+    // zero rate-limit pressure on the chat request that fires alongside it.
+    const FAST_PATH_CHAT = /^(whats up|what'?s up|wassup|sup|yo|hey+|hi+|hello+|howdy|how are you|how are ya|how'?s it going|good (?:morning|afternoon|evening|night)|you (?:there|awake|good)|you up|thanks|thank you|good ?bye|goodnight|gn)\s*[!.?]*\s*$/i;
+    if (FAST_PATH_CHAT.test(text.trim())) return null;
+
+    // Abort any stale intent call before starting a new one.
+    intentAbortRef.current?.abort();
+    const controller = new AbortController();
+    intentAbortRef.current = controller;
+
     try {
       const intentResponse = await fetch("/api/intent", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
+        signal: controller.signal,
       });
 
       if (!intentResponse.ok) {
         console.error("[Intent] API error:", intentResponse.status);
         return null;
       }
+
+      if (!intentResponse.ok) {
+        console.error("[Intent] API error:", intentResponse.status);
+        return null;
+      }
+
+      if (controller.signal.aborted) return null;
 
       const parsed = await intentResponse.json();
       console.log("[Intent] Parsed:", parsed);
@@ -3611,7 +3635,12 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
           // For chat and unknown intents, return null to let Claude handle it
           return null;
       }
-    } catch (error) {
+    } catch (error: any) {
+      if (error?.name === "AbortError") {
+        // Chat answered first and aborted this intent call — normal,
+        // expected behavior when the reply beat the intent parse.
+        return null;
+      }
       console.error("[FlexibleCommand] Error:", error);
       return null;
     }
@@ -3684,6 +3713,14 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
         throw new Error(errorData.error || "Failed to get response");
       }
 
+      // Chat is answering — any in-flight /api/intent call is now dead
+      // weight: it can only burn NVIDIA quota (pushing the shared rate
+      // limit against the NEXT chat request). Intents that already parsed
+      // and are running their handlers are unaffected — only the pending
+      // LLM parse gets cancelled. On a chat ERROR we deliberately do NOT
+      // abort, so the intent path can still rescue the message.
+      intentAbortRef.current?.abort();
+
       // Check if this is a JSON response (offline mode or mock)
       const contentType = response.headers.get("content-type");
       if (contentType?.includes("application/json")) {
@@ -3723,6 +3760,7 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
       startStreamingSpeak();
 
       if (reader) {
+        let streamError: string | null = null;
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
@@ -3738,6 +3776,14 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
 
               try {
                 const parsed = JSON.parse(data);
+
+                // In-band provider error (e.g. NVIDIA 503 arrives AFTER the
+                // HTTP 200). Stop consuming — every remaining byte is junk.
+                if (parsed?.error) {
+                  streamError = parsed.error?.message || "upstream provider error";
+                  break;
+                }
+
                 const content = parsed.choices?.[0]?.delta?.content || 
                               (parsed.type === "content_block_delta" ? parsed.delta?.text : "") ||
                               (parsed.type === "message_delta" ? parsed.delta?.content : "");
@@ -3758,6 +3804,10 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
               } catch (e) {}
             }
           }
+          if (streamError) break;
+        }
+        if (streamError) {
+          console.warn("[CommandBar] Upstream stream error:", streamError);
         }
       }
 
@@ -3784,11 +3834,16 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
         speak(chatContent || "Done, Boss.");
         setTimeout(() => setState("idle"), 3000);
       } else {
-        // Fallback if no response
+        // Nothing came back from any provider. NEVER fake an acknowledgment
+        // ("I received your message...") — that read as a reply while the
+        // user was actually talking to a dead stream. Say what happened.
+        const deadMsg =
+          "My language providers are all unreachable right now, Boss. Give me a moment and try again.";
         addMessage({
           role: "assistant",
-          content: "I received your message, Boss. How can I assist you today?",
+          content: deadMsg,
         });
+        speak(deadMsg);
         setState("idle");
       }
     } catch (error) {
