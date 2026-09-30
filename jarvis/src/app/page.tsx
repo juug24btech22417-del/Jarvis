@@ -2,7 +2,9 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import { QrCode, Radio, Clapperboard, Scan, FileText, Brain } from "lucide-react";
 import ArcReactor from "@/components/reactor/ArcReactor";
+import AvengersAssemble from "@/components/cinematic/AvengersAssemble";
 import StatusHUD from "@/components/panels/StatusHUD";
 import DiagnosticsPanel from "@/components/panels/DiagnosticsPanel";
 import { useWeatherAmbient } from "@/hooks/useWeatherAmbient";
@@ -29,7 +31,7 @@ import { useSentinelWatcher } from "@/hooks/useSentinelWatcher";
 import VaultPanel from "@/components/panels/VaultPanel";
 import DungeonPanel from "@/components/panels/DungeonPanel";
 import HabitsPanel from "@/components/panels/HabitsPanel";
-import TimeCapsulePanel from "@/components/panels/TimeCapsulePanel";
+
 import VoiceNotesPanel from "@/components/panels/VoiceNotesPanel";
 import WeatherPanel from "@/components/panels/WeatherPanel";
 import SpotifyPanel from "@/components/panels/SpotifyPanel";
@@ -54,10 +56,19 @@ import TranscriptionPanel from "@/components/panels/TranscriptionPanel";
 import ProxyPanel from "@/components/panels/ProxyPanel";
 import AgentPanel from "@/components/panels/AgentPanel";
 import MissionControlPanel from "@/components/panels/MissionControlPanel";
+import WidgetsPanel from "@/components/panels/WidgetsPanel";
+import SecondBrainPanel from "@/components/panels/SecondBrainPanel";
+import WidgetRail from "@/components/hud/WidgetRail";
 import AnalyticsPanel from "@/components/panels/AnalyticsPanel";
 import MacroPanel from "@/components/panels/MacroPanel";
+import QRTeleportPanel from "@/components/panels/QRTeleportPanel";
+import ProximityPanel from "@/components/panels/ProximityPanel";
+import VideoDirectorPanel from "@/components/panels/VideoDirectorPanel";
+import RoomScannerPanel from "@/components/panels/RoomScannerPanel";
+import WhiteboardOCRPanel from "@/components/panels/WhiteboardOCRPanel";
 import { useJarvisStore } from "@/store/jarvis.store";
 import { playRepulsor } from "@/lib/sounds";
+import { primeScore } from "@/lib/cinematic/score";
 import { useTextToSpeech } from "@/hooks/useVoice";
 
 // Boot sequence — power gate. Pure black screen; one press starts the
@@ -85,6 +96,15 @@ function BootSequence() {
         window.speechSynthesis.speak(new SpeechSynthesisUtterance(""));
       }
     } catch {}
+    // Pre-warm the vision engines while the boot animation plays: both wasm
+    // runtimes + models compile in the background, so toggling air-mouse or
+    // eye control afterwards attaches to a hot engine instead of freezing
+    // mid-bootload ("air mouse took 15 minutes to load").
+    import("@/hooks/useHandControl").then((m) => m.warmHandEngine()).catch(() => {});
+    import("@/hooks/useEyeControl").then((m) => m.warmEyeEngine()).catch(() => {});
+    // Unlock + warm the cinematic score context in this same gesture, so the
+    // first "Avengers Assemble" can detonate instantly (autoplay policy).
+    primeScore();
     // The reactor listens for this — starts assembly + soundtrack.
     useJarvisStore.getState().startAssembly();
     window.dispatchEvent(new Event("jarvis:power-gate"));
@@ -592,7 +612,6 @@ export default function Home() {
   const [vaultOpen, setVaultOpen] = useState(false);
   const [dungeonOpen, setDungeonOpen] = useState(false);
   const [habitsOpen, setHabitsOpen] = useState(false);
-  const [timeCapsuleOpen, setTimeCapsuleOpen] = useState(false);
   const [voiceNotesOpen, setVoiceNotesOpen] = useState(false);
 
 
@@ -641,10 +660,18 @@ export default function Home() {
   const [agentOpen, setAgentOpen] = useState(false);
   // Tier 2A v3: hybrid Firecrawl × Playwright mission control
   const [missionOpen, setMissionOpen] = useState(false);
+  const [widgetsOpen, setWidgetsOpen] = useState(false);
+  const [secondBrainOpen, setSecondBrainOpen] = useState(false);
   // Ghost Analytics
   const [analyticsOpen, setAnalyticsOpen] = useState(false);
   // Record & Replay Macros
   const [macroOpen, setMacroOpen] = useState(false);
+  // Tier 4: Wild New Features
+  const [teleportOpen, setTeleportOpen] = useState(false);
+  const [proximityOpen, setProximityOpen] = useState(false);
+  const [videoDirectorOpen, setVideoDirectorOpen] = useState(false);
+  const [roomScannerOpen, setRoomScannerOpen] = useState(false);
+  const [whiteboardOpen, setWhiteboardOpen] = useState(false);
 
   // Handle timer completion - speak notification
   const handleTimerComplete = useCallback((label: string) => {
@@ -675,10 +702,17 @@ export default function Home() {
     setPlaywrightOpen(false);
     setProxyOpen(false);
     setMissionOpen(false);
+    setWidgetsOpen(false);
+    setSecondBrainOpen(false);
     setMacroOpen(false);
     setAnalyticsOpen(false);
     setAgentOpen(false);
     setTranscriptionOpen(false);
+    setTeleportOpen(false);
+    setProximityOpen(false);
+    setVideoDirectorOpen(false);
+    setRoomScannerOpen(false);
+    setWhiteboardOpen(false);
 
     // Open the requested panel
     switch (activePanel) {
@@ -754,6 +788,14 @@ export default function Home() {
         setMissionOpen(true);
         recordPanelOpen("mission");
         break;
+      case "widgets":
+        setWidgetsOpen(true);
+        recordPanelOpen("widgets");
+        break;
+      case "second-brain":
+        setSecondBrainOpen(true);
+        recordPanelOpen("second-brain");
+        break;
       case "analytics":
         setAnalyticsOpen(true);
         recordPanelOpen("analytics");
@@ -761,6 +803,26 @@ export default function Home() {
       case "macros":
         setMacroOpen(true);
         recordPanelOpen("macros");
+        break;
+      case "qr-teleporter":
+        setTeleportOpen(true);
+        recordPanelOpen("qr-teleporter");
+        break;
+      case "proximity-scanner":
+        setProximityOpen(true);
+        recordPanelOpen("proximity-scanner");
+        break;
+      case "video-director":
+        setVideoDirectorOpen(true);
+        recordPanelOpen("video-director");
+        break;
+      case "room-scanner":
+        setRoomScannerOpen(true);
+        recordPanelOpen("room-scanner");
+        break;
+      case "whiteboard-ocr":
+        setWhiteboardOpen(true);
+        recordPanelOpen("whiteboard-ocr");
         break;
       case "chat":
       case "tasks":
@@ -799,6 +861,20 @@ export default function Home() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [calculations.length, addCalculation]);
 
+  // The app dock belongs to the JARVIS desktop. Any open panel is modal, so the
+  // dock hides (the calculator is excluded — it is a transient overlay and
+  // starts open).
+  const desktopView = ![
+    whatsappOpen, telegramOpen, phoneRemoteOpen, connectedOpen, commHubOpen, securityOpen,
+    vaultOpen, dungeonOpen, habitsOpen, voiceNotesOpen, weatherOpen, spotifyOpen, newsOpen,
+    calendarOpen, skillTrainerOpen, imageGeneratorOpen, summarizerOpen, webScraperOpen,
+    nasaOpen, huggingFaceOpen, iftttOpen, browserOpen, localLLMOpen, visionOpen,
+    automationOpen, priceTrackerOpen, transcriptionOpen, playwrightOpen, proxyOpen,
+    agentOpen, missionOpen, widgetsOpen, secondBrainOpen, macroOpen, analyticsOpen,
+    teleportOpen, proximityOpen, videoDirectorOpen, roomScannerOpen, whiteboardOpen,
+    firecrawlOpen,
+  ].some(Boolean);
+
   return (
     <main className="relative min-h-screen overflow-hidden bg-deep-space">
       {/* Weather-reactive ambient particle background */}
@@ -809,6 +885,9 @@ export default function Home() {
 
       {/* 3D Arc Reactor */}
       <ArcReactor />
+
+      {/* Avengers Assemble — full cinematic sequence (idle until triggered) */}
+      <AvengersAssemble />
 
       {/* Companion: first-boot onboarding interview */}
       {bootComplete && needsOnboarding && (
@@ -849,7 +928,6 @@ export default function Home() {
             onOpenVault={() => { recordPanelOpen("vault"); setVaultOpen(true); }}
             onOpenDungeon={() => { recordPanelOpen("dungeon"); setDungeonOpen(true); }}
             onOpenHabits={() => { recordPanelOpen("habits"); setHabitsOpen(true); }}
-            onOpenTimeCapsule={() => { recordPanelOpen("time-capsule"); setTimeCapsuleOpen(true); }}
             onOpenVoiceNotes={() => { recordPanelOpen("voice-notes"); setVoiceNotesOpen(true); }}
             onOpenWeather={() => { recordPanelOpen("weather"); setWeatherOpen(true); }}
             onOpenSpotify={() => { recordPanelOpen("spotify"); setSpotifyOpen(true); }}
@@ -922,9 +1000,28 @@ export default function Home() {
             )}
           </AnimatePresence>
 
-          {/* Holographic App Dock (top-left): Sentinel · Telegram · Connected Apps */}
-          <div className="fixed top-16 left-5 z-[75] flex items-center gap-2.5">
+          {/* Holographic App Dock (top-left) — home screen only. Every panel is
+              modal, so the dock steps aside instead of floating over it. */}
+          {desktopView && (
+          <div className="fixed top-12 sm:top-16 left-2 sm:left-5 z-[75] flex items-center gap-1.5 sm:gap-2.5 overflow-x-auto max-w-[calc(100vw-1rem)] sm:max-w-none pb-1 no-scrollbar">
             <SentinelArmToggle />
+
+            {/* Second Brain launcher */}
+            <motion.button
+              whileHover={{ scale: 1.08, y: -1 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => {
+                recordPanelOpen("second-brain");
+                setSecondBrainOpen(true);
+              }}
+              title="Second Brain — your memory constellation"
+              aria-label="Open Second Brain"
+              className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-400/50 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240]"
+            >
+              <div className="absolute inset-0 rounded-full bg-gradient-to-br from-cyan-500/25 to-violet-600/10 opacity-70 group-hover:opacity-100 transition-opacity" />
+              <Brain className="w-5 h-5 text-cyan-300 group-hover:text-cyan-100 transition-colors drop-shadow-[0_0_8px_rgba(0,243,255,0.8)] relative z-10" />
+            </motion.button>
+
             {/* Telegram quick-launch button */}
             <AnimatePresence>
               {!telegramOpen && (
@@ -941,7 +1038,7 @@ export default function Home() {
                   }}
                   title="Open Telegram Bot Relay"
                   aria-label="Open Telegram Bot Relay"
-                  className="w-11 h-11 rounded-full flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-400/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240] shadow-[0_4px_20px_rgba(0,136,204,0.35),0_0_15px_rgba(0,243,255,0.2)]"
+                  className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-400/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240]"
                 >
                   <div className="absolute inset-0 rounded-full bg-gradient-to-br from-cyan-500/25 to-blue-600/10 opacity-70 group-hover:opacity-100 transition-opacity" />
                   <svg
@@ -975,7 +1072,7 @@ export default function Home() {
                   }}
                   title="Open Connected Apps"
                   aria-label="Open Connected Apps"
-                  className="w-11 h-11 rounded-full flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240] shadow-[0_4px_20px_rgba(8,145,178,0.35),0_0_15px_rgba(0,243,255,0.2)]"
+                  className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240]"
                 >
                   <div className="absolute inset-0 rounded-full bg-gradient-to-br from-cyan-500/25 to-teal-600/10 opacity-70 group-hover:opacity-100 transition-opacity" />
                   <svg
@@ -994,7 +1091,85 @@ export default function Home() {
                 </motion.button>
               )}
             </AnimatePresence>
+
+            {/* QR Teleporter launcher */}
+            <motion.button
+              whileHover={{ scale: 1.08, y: -1 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => {
+                recordPanelOpen("qr-teleporter");
+                setTeleportOpen(true);
+              }}
+              title="Quantum QR Teleporter (Beam to Phone)"
+              aria-label="Quantum QR Teleporter"
+              className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240]"
+            >
+              <QrCode className="w-5 h-5 text-cyan-400 group-hover:text-cyan-200 transition-colors drop-shadow-[0_0_8px_rgba(0,243,255,0.7)]" />
+            </motion.button>
+
+            {/* Proximity Awareness Radar launcher */}
+            <motion.button
+              whileHover={{ scale: 1.08, y: -1 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => {
+                recordPanelOpen("proximity-scanner");
+                setProximityOpen(true);
+              }}
+              title="Proximity Radar & Desk Presence"
+              aria-label="Proximity Radar"
+              className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240]"
+            >
+              <Radio className="w-5 h-5 text-green-400 group-hover:text-green-200 transition-colors drop-shadow-[0_0_8px_rgba(0,255,136,0.7)]" />
+            </motion.button>
+
+            {/* AI Video Director launcher */}
+            <motion.button
+              whileHover={{ scale: 1.08, y: -1 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => {
+                recordPanelOpen("video-director");
+                setVideoDirectorOpen(true);
+              }}
+              title="Stark Cinema AI Video Director"
+              aria-label="AI Video Director"
+              className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240]"
+            >
+              <Clapperboard className="w-5 h-5 text-amber-400 group-hover:text-amber-200 transition-colors drop-shadow-[0_0_8px_rgba(255,170,0,0.7)]" />
+            </motion.button>
+
+            {/* Spatial Room Scanner launcher */}
+            <motion.button
+              whileHover={{ scale: 1.08, y: -1 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => {
+                recordPanelOpen("room-scanner");
+                setRoomScannerOpen(true);
+              }}
+              title="Spatial Desk & Room Scanner"
+              aria-label="Spatial Room Scanner"
+              className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240]"
+            >
+              <Scan className="w-5 h-5 text-cyan-400 group-hover:text-cyan-200 transition-colors drop-shadow-[0_0_8px_rgba(0,243,255,0.7)]" />
+            </motion.button>
+
+
+
+            {/* Whiteboard OCR launcher */}
+            <motion.button
+              whileHover={{ scale: 1.08, y: -1 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => {
+                recordPanelOpen("whiteboard-ocr");
+                setWhiteboardOpen(true);
+              }}
+              title="Whiteboard OCR & Schematic Digitizer"
+              aria-label="Whiteboard OCR"
+              className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240] shrink-0"
+            >
+              <FileText className="w-5 h-5 text-purple-400 group-hover:text-purple-200 transition-colors drop-shadow-[0_0_8px_rgba(168,85,247,0.7)]" />
+            </motion.button>
           </div>
+          )}
 
           {/* Communication Hub */}
           <AnimatePresence>
@@ -1044,14 +1219,7 @@ export default function Home() {
             )}
           </AnimatePresence>
 
-          {/* Time Capsule */}
-          <AnimatePresence>
-            {timeCapsuleOpen && (
-              <TimeCapsulePanel
-                onClose={() => setTimeCapsuleOpen(false)}
-              />
-            )}
-          </AnimatePresence>
+
 
           {/* Voice Notes */}
           <VoiceNotesPanel
@@ -1410,6 +1578,15 @@ export default function Home() {
             onClose={() => setMissionOpen(false)}
           />
 
+          {/* Natural-language widgets (JSON-driven HUD mini-panels) */}
+          <WidgetsPanel isOpen={widgetsOpen} onClose={() => setWidgetsOpen(false)} />
+
+          {/* Second Brain — the memory graph as a 3D constellation */}
+          <SecondBrainPanel isOpen={secondBrainOpen} onClose={() => setSecondBrainOpen(false)} />
+
+          {/* Always-on widget rail on the HUD */}
+          <WidgetRail />
+
           {/* Ghost Analytics Panel */}
           <AnimatePresence>
             {analyticsOpen && (
@@ -1439,6 +1616,41 @@ export default function Home() {
                   <MacroPanel onClose={() => setMacroOpen(false)} />
                 </div>
               </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* QR Code Teleporter */}
+          <AnimatePresence>
+            {teleportOpen && (
+              <QRTeleportPanel onClose={() => setTeleportOpen(false)} />
+            )}
+          </AnimatePresence>
+
+          {/* Proximity Awareness Radar */}
+          <AnimatePresence>
+            {proximityOpen && (
+              <ProximityPanel onClose={() => setProximityOpen(false)} />
+            )}
+          </AnimatePresence>
+
+          {/* AI Video Director */}
+          <AnimatePresence>
+            {videoDirectorOpen && (
+              <VideoDirectorPanel onClose={() => setVideoDirectorOpen(false)} />
+            )}
+          </AnimatePresence>
+
+          {/* Spatial Room Scanner */}
+          <AnimatePresence>
+            {roomScannerOpen && (
+              <RoomScannerPanel onClose={() => setRoomScannerOpen(false)} />
+            )}
+          </AnimatePresence>
+
+          {/* Whiteboard OCR Live */}
+          <AnimatePresence>
+            {whiteboardOpen && (
+              <WhiteboardOCRPanel onClose={() => setWhiteboardOpen(false)} />
             )}
           </AnimatePresence>
 

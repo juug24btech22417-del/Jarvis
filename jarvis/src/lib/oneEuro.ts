@@ -56,3 +56,33 @@ export class OneEuroFilter {
     this.lastT = null;
   }
 }
+
+/**
+ * 3-tap running median — a SPIKE REJECTOR, not a smoother.
+ *
+ * Landmark trackers occasionally emit a single frame with a landmark metres
+ * off (a partly-occluded iris, a hiccup in the mesh). A low-pass filter can't
+ * remove that: it just spreads one bad sample over the next dozen frames, so
+ * the cursor takes a visible excursion and drifts back. A median of the last
+ * three samples throws the outlier away COMPLETELY and costs one frame of
+ * latency.
+ *
+ * Ideal pre-filter in front of a One-Euro stage (median kills the spike,
+ * One-Euro kills the continuous noise).
+ */
+export class Median3 {
+  private buf: number[] = [];
+
+  /** Feed a sample; returns the median of the last (up to) three. */
+  push(x: number): number {
+    this.buf.push(x);
+    if (this.buf.length > 3) this.buf.shift();
+    if (this.buf.length === 1) return this.buf[0];
+    const sorted = [...this.buf].sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)];
+  }
+
+  reset(): void {
+    this.buf.length = 0;
+  }
+}

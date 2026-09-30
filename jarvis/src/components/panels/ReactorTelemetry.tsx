@@ -95,9 +95,10 @@ function Typewriter({ text, speed = 8, className = "" }: { text: string; speed?:
 
 /* ─── Conversation-in-the-air (scrollable, invisible scrollbar) ───────── */
 
-function FloatingConversation() {
+function FloatingConversation({ isMobile = false }: { isMobile?: boolean }) {
   const messages = useJarvisStore((s) => s.messages);
-  const visible = useMemo(() => messages.slice(-30), [messages]);
+  const visible = useMemo(() => messages.slice(isMobile ? -8 : -30), [messages, isMobile]);
+  const [collapsed, setCollapsed] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
@@ -118,13 +119,86 @@ function FloatingConversation() {
   useEffect(() => {
     if (atBottom) scrollToBottom(false);
     else scrollToBottom(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages.length]);
+  }, [messages.length, atBottom, scrollToBottom]);
 
   // Jump to bottom once mounted with history.
   useEffect(() => {
     scrollToBottom(false);
   }, [scrollToBottom]);
+
+  if (visible.length === 0) return null;
+
+  if (isMobile) {
+    const lastMsg = visible[visible.length - 1];
+    return (
+      <div className="w-full bg-[#030914]/90 backdrop-blur-xl border border-cyan-500/25 rounded-2xl shadow-[0_8px_32px_rgba(0,0,0,0.85),0_0_15px_rgba(0,212,255,0.12)] p-2.5 pointer-events-auto">
+        {/* Mobile Header / Toggle */}
+        <div className="flex items-center justify-between pb-1.5 mb-1 border-b border-cyan-500/15">
+          <div className="flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+            <span className="font-orbitron text-[9px] font-bold text-cyan-300 tracking-wider">
+              JARVIS LOG ({messages.length})
+            </span>
+          </div>
+          <button
+            onClick={() => setCollapsed(!collapsed)}
+            className="text-[9px] font-mono px-2 py-0.5 rounded-md bg-white/5 border border-white/10 text-cyan-300/80 hover:text-white"
+          >
+            {collapsed ? "Expand" : "Collapse"}
+          </button>
+        </div>
+
+        {collapsed ? (
+          <div className="text-[11px] font-rajdhani text-cyan-100/90 truncate py-0.5">
+            <span className="text-cyan-400 font-bold mr-1">
+              {lastMsg.role === "assistant" ? "JARVIS:" : "YOU:"}
+            </span>
+            {lastMsg.content}
+          </div>
+        ) : (
+          <div
+            ref={scrollRef}
+            onScroll={measure}
+            className="no-scrollbar overflow-y-auto overscroll-contain max-h-[18vh] space-y-2 pr-1"
+          >
+            {visible.map((m) => (
+              <div key={m.id} className="text-left">
+                <div className="flex items-center gap-1.5 mb-0.5">
+                  <span
+                    className={`font-orbitron text-[8px] font-semibold tracking-wider ${
+                      m.role === "assistant" ? "text-cyan-400" : "text-emerald-400"
+                    }`}
+                  >
+                    {m.role === "assistant" ? "J.A.R.V.I.S" : "YOU"}
+                  </span>
+                  <span className="font-rajdhani text-[8px] text-cyan-200/35">
+                    {new Date(m.timestamp).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                      hour12: false,
+                    })}
+                  </span>
+                </div>
+                <div
+                  className={`font-rajdhani text-xs leading-snug ${
+                    m.role === "assistant"
+                      ? "text-cyan-50/95"
+                      : "text-emerald-50/90"
+                  }`}
+                >
+                  {m.role === "assistant" ? (
+                    <Typewriter text={m.content} />
+                  ) : (
+                    <span>{m.content}</span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="relative w-full">
@@ -296,19 +370,19 @@ export default function ReactorTelemetry() {
         bootComplete ? "opacity-100" : "opacity-0"
       }`}
     >
-      {/* ── Conversation pinned to the extreme left edge ── */}
+      {/* ── Conversation pinned to the extreme left edge on desktop ── */}
       <div className="absolute left-6 top-1/2 -translate-y-1/2 hidden lg:flex w-[15rem] flex-col">
         <motion.div
           animate={{ y: [0, -6, 0] }}
           transition={{ duration: 9, repeat: Infinity, ease: "easeInOut" }}
         >
-          <FloatingConversation />
+          <FloatingConversation isMobile={false} />
         </motion.div>
       </div>
 
-      {/* Mobile fallback: convo floats below reactor, centered */}
-      <div className="absolute left-1/2 -translate-x-1/2 bottom-[13rem] w-full px-6 flex justify-center lg:hidden">
-        <FloatingConversation />
+      {/* Mobile fallback: compact card docked neatly above CommandBar, never overlapping center ArcReactor */}
+      <div className="absolute left-1/2 -translate-x-1/2 bottom-[7.5rem] w-[calc(100vw-1.5rem)] max-w-sm flex justify-center lg:hidden z-30">
+        <FloatingConversation isMobile={true} />
       </div>
 
       {/* ── Right telemetry arced ALONG the reactor curve (reference HUD style) ── */}

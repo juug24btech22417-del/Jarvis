@@ -1,0 +1,7 @@
+**Three standout open‑source AI projects on GitHub Trending**
+
+- **LangChain** – *The most important point:* a modular framework that turns large language models into fully‑featured applications with minimal boilerplate.  
+  - **What it does**: Orchestrates prompt construction, memory handling, and tool execution into reusable “chains.”  
+  - **Key features**  
+    - Plug‑and‑play integration with dozens of LLM providers (OpenAI, Anthropic, Cohere, etc.).  
+    - Built‑in memory stores (

@@ -1,45 +1,77 @@
-// Memory Extractor - Extracts entities and relationships from conversations using LLM
-// Automatically builds the knowledge graph from user interactions
+// Memory Extractor — turns what you say into knowledge-graph nodes and edges.
+//
+// Runs after every chat turn (deferred, so it never delays a reply). It reads
+// the user's message plus a little context and extracts only DURABLE facts:
+// people you mention, where you live, what you're building, what you prefer.
+// Known entities are *upgraded* (description merged, strength refreshed,
+// un-archived) rather than skipped, so the constellation keeps growing richer
+// instead of filling up with near-duplicates.
+//
+// Uses the shared provider chain (Gemini → Groq → OpenRouter → NVIDIA), so it
+// survives any single provider being down or rate limited.
 
-import { addEntity, addRelationship, findEntityByName, EntityType } from "./graph";
+import { agentLlm, parseJsonLoose } from "@/lib/agent/llm";
+import { shouldExtract } from "./learn";
+import {
+  addEntity,
+  findEntityExactly,
+  reinforceEntity,
+  upsertRelationship,
+  type EntityType,
+} from "./graph";
 
-// Entity extraction prompt
-const EXTRACTION_PROMPT = `You are a memory extraction AI. Analyze the conversation and extract entities and relationships.
+export { shouldExtract };
 
-Return a JSON object with this exact structure:
-{
-  "entities": [
-    {
-      "name": "Person or thing name",
-      "type": "PERSON|COMPANY|PROJECT|CONCEPT|LOCATION|SKILL|PREFERENCE|EVENT",
-      "description": "Brief description (optional)",
-      "metadata": {"key": "value"} // Non-sensitive data like email, phone
-    }
-  ],
-  "relationships": [
-    {
-      "source": "Entity name",
-      "target": "Entity name",
-      "type": "works_at|client_of|knows_about|prefers|friend_of|located_in|interested_in|etc"
-    }
-  ]
+const ENTITY_TYPES: EntityType[] = [
+  "PERSON",
+  "COMPANY",
+  "PROJECT",
+  "CONCEPT",
+  "LOCATION",
+  "SKILL",
+  "PREFERENCE",
+  "EVENT",
+];
+
+/** Trim an LLM string to something a node can hold. */
+function clean(v: unknown, max = 120): string {
+  return typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, max) : "";
 }
 
-Rules:
-1. Extract people mentioned as PERSON
-2. Extract companies/organizations as COMPANY
-3. Extract projects, products, or initiatives as PROJECT
-4. Extract concepts, topics, or ideas as CONCEPT
-5. Extract places as LOCATION
-6. Extract skills or abilities as SKILL
-7. Extract user preferences as PREFERENCE (e.g., "prefers dark mode")
-8. Extract events as EVENT
-9. Create relationships between entities based on context
-10. For preferences, create a relationship from "User" to the preference with type "prefers"
+function cleanType(v: unknown): EntityType | null {
+  const t = clean(v, 24).toUpperCase();
+  return (ENTITY_TYPES as string[]).includes(t) ? (t as EntityType) : null;
+}
 
-Important: Always create a "User" entity representing the user if preferences are mentioned.
+// Entity extraction prompt
+const EXTRACTION_PROMPT = `You are the long-term memory of JARVIS, a personal AI assistant.
+Read the user's latest message (plus a little context) and extract the DURABLE facts worth remembering for months.
 
-Return ONLY the JSON, no explanation. If nothing to extract, return {"entities": [], "relationships": []}`;
+Return ONLY JSON:
+{
+  "entities": [{"name": string, "type": "PERSON|COMPANY|PROJECT|CONCEPT|LOCATION|SKILL|PREFERENCE|EVENT", "description": string}],
+  "relationships": [{"source": string, "target": string, "type": string}]
+}
+
+What to extract:
+1. People the user mentions (friends, family, classmates, colleagues) as PERSON.
+2. Personal facts about the user: their name, city, college, employer, health, relationships, goals, deadlines, habits, likes and dislikes.
+3. Companies/organisations as COMPANY, projects/products as PROJECT, topics as CONCEPT, places as LOCATION, abilities as SKILL, tastes as PREFERENCE, dated happenings as EVENT.
+4. Anything the user explicitly asks you to remember ("remember that …", "note that …").
+
+How to write:
+- description = ONE short sentence stating the durable fact in third person, e.g. "Ananya is Dhruv's sister", "Dhruv studies computer science at RV College", "Dhruv's deadline for the DBMS project is 12 October".
+- Always create a "User" entity for facts about the user and relate it (lives_in, studies_at, works_at, owns, prefers, knows, friend_of, sibling_of, …).
+- If the fact refines something already listed under Known context, reuse that exact name so it updates instead of duplicating.
+
+Never extract:
+- greetings, small talk, questions, or one-off commands ("open youtube", "set a timer"),
+- transient state (the weather, today's prices, what's on screen),
+- passwords, OTPs, card or account numbers, API keys, or anything the user marks private.
+
+If nothing durable was said, return {"entities": [], "relationships": []}.
+
+Return ONLY the JSON, no explanation.`;
 
 interface ExtractedEntity {
   name: string;
@@ -60,363 +92,243 @@ interface ExtractionResult {
 }
 
 /**
- * Extract entities and relationships from a conversation message
+ * Extract entities and relationships from a conversation message.
+ * Never throws — an unreachable model simply yields nothing to learn.
  */
 export async function extractMemoriesFromMessage(
   message: string,
-  context?: string
+  context?: string,
+  known?: string
 ): Promise<ExtractionResult> {
+  const text = (message || "").trim().slice(0, 4000);
+  if (!text) return { entities: [], relationships: [] };
+
+  const user = [
+    context ? `Conversation context:\n${context.slice(0, 1200)}` : "",
+    known ? `Known context (reuse these exact names when they match):\n${known.slice(0, 800)}` : "",
+    `User's latest message:\n${text}`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
   try {
-    const prompt = context
-      ? `${EXTRACTION_PROMPT}\n\nContext: ${context}\n\nMessage: ${message}`
-      : `${EXTRACTION_PROMPT}\n\nMessage: ${message}`;
-
-    // ── Direct LLM call — never route through localhost to avoid deadlock ──
-    // Try OpenRouter first, fall back to Groq.
-    const openrouterKey = process.env.OPENROUTER_API_KEY;
-    const groqKey = process.env.GROQ_API_KEY;
-
-    if (!openrouterKey && !groqKey) {
-      console.warn("[MemoryExtractor] No LLM API key — skipping extraction");
+    const raw = await agentLlm({
+      system: EXTRACTION_PROMPT,
+      user,
+      maxTokens: 900,
+      temperature: 0.2,
+      timeoutMs: 14_000,
+      label: "memory",
+      json: true,
+    });
+    const parsed = parseJsonLoose<{ entities?: unknown; relationships?: unknown }>(raw);
+    if (!parsed) {
+      console.warn("[MemoryExtractor] Could not parse extraction JSON");
       return { entities: [], relationships: [] };
     }
 
-    const c = new AbortController();
-    const t = setTimeout(() => c.abort(), 8000);
-    let response: Response | null = null;
+    const entities: ExtractedEntity[] = (Array.isArray(parsed.entities) ? parsed.entities : [])
+      .map((e) => {
+        const o = (e ?? {}) as Record<string, unknown>;
+        const name = clean(o.name, 80);
+        const type = cleanType(o.type);
+        if (!name || !type) return null;
+        const description = clean(o.description, 400);
+        return { name, type, ...(description ? { description } : {}) };
+      })
+      .filter((e): e is ExtractedEntity => e !== null)
+      .slice(0, 12);
 
-    try {
-      if (openrouterKey) {
-        response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${openrouterKey}`,
-            "Content-Type": "application/json",
-            "HTTP-Referer": "http://localhost:3000",
-            "X-Title": "JARVIS Memory Extractor",
-          },
-          body: JSON.stringify({
-            model: "nvidia/nemotron-3.5-lightning:free",
-            messages: [{ role: "user", content: prompt }],
-            temperature: 0.3,
-            max_tokens: 1500,
-            response_format: { type: "json_object" },
-          }),
-          signal: c.signal,
-        });
-      } else if (groqKey) {
-        response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${groqKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: "llama-3.1-8b-instant",
-            messages: [{ role: "user", content: prompt }],
-            temperature: 0.3,
-            max_tokens: 1500,
-            response_format: { type: "json_object" },
-          }),
-          signal: c.signal,
-        });
-      }
-    } catch (e: any) {
-      console.warn("[MemoryExtractor] LLM unreachable — skipping extraction:", e?.name || e?.message);
-      return { entities: [], relationships: [] };
-    } finally {
-      clearTimeout(t);
-    }
+    const relationships: ExtractedRelationship[] = (Array.isArray(parsed.relationships) ? parsed.relationships : [])
+      .map((r) => {
+        const o = (r ?? {}) as Record<string, unknown>;
+        const source = clean(o.source, 80);
+        const target = clean(o.target, 80);
+        const type = clean(o.type, 40).toLowerCase().replace(/\s+/g, "_");
+        if (!source || !target || !type || source.toLowerCase() === target.toLowerCase()) return null;
+        return { source, target, type };
+      })
+      .filter((r): r is ExtractedRelationship => r !== null)
+      .slice(0, 16);
 
-    if (!response || !response.ok) {
-      console.error("[MemoryExtractor] API error:", response?.status);
-      return { entities: [], relationships: [] };
-    }
-
-    const data = await response.json();
-    const content = data.choices?.[0]?.message?.content;
-
-    if (!content) {
-      console.warn("[MemoryExtractor] No content in response");
-      return { entities: [], relationships: [] };
-    }
-
-    // Parse the JSON response
-    try {
-      const parsed = JSON.parse(content) as ExtractionResult;
-      return {
-        entities: parsed.entities || [],
-        relationships: parsed.relationships || [],
-      };
-    } catch (parseError) {
-      console.error("[MemoryExtractor] Failed to parse JSON:", parseError);
-      return { entities: [], relationships: [] };
-    }
+    return { entities, relationships };
   } catch (error) {
-    console.error("[MemoryExtractor] Extraction failed:", error);
+    console.warn("[MemoryExtractor] Extraction skipped:", (error as Error)?.message?.slice(0, 140));
     return { entities: [], relationships: [] };
   }
 }
 
 /**
- * Process extracted entities and add them to the knowledge graph
+ * Process extracted entities and add them to the knowledge graph.
+ *
+ * Known names are upgraded in place: the description learns the new nuance,
+ * the memory gets stronger and more recently recalled, and a forgotten one is
+ * brought back. Relationships are upserted so repeating a fact deepens an edge
+ * instead of duplicating it.
  */
 export async function processExtraction(extraction: ExtractionResult): Promise<{
-  addedEntities: string[];
-  addedRelationships: string[];
+  created: string[];
+  updated: string[];
+  links: string[];
   skipped: string[];
 }> {
-  const addedEntities: string[] = [];
-  const addedRelationships: string[] = [];
+  const created: string[] = [];
+  const updated: string[] = [];
+  const links: string[] = [];
   const skipped: string[] = [];
+  const ids = new Map<string, string>(); // name(lower) -> entityId
 
-  // First, add all entities
-  const entityIdMap = new Map<string, string>(); // name -> id mapping
+  const resolve = async (name: string): Promise<string | null> => {
+    const key = clean(name, 80).toLowerCase();
+    if (!key) return null;
+    if (ids.has(key)) return ids.get(key)!;
+    const found = await findEntityExactly(name).catch(() => null);
+    if (found) {
+      ids.set(key, found.id);
+      return found.id;
+    }
+    return null;
+  };
 
   for (const entity of extraction.entities) {
     try {
-      // Check if entity already exists
-      const existing = await findEntityByName(entity.name);
-      if (existing) {
-        entityIdMap.set(entity.name, existing.id);
-        skipped.push(`Entity "${entity.name}" already exists`);
-        continue;
+      const existingId = await resolve(entity.name);
+      if (existingId) {
+        const res = await reinforceEntity(existingId, { description: entity.description, type: entity.type });
+        (res.updated ? updated : skipped).push(entity.name);
+      } else {
+        const id = await addEntity({
+          name: entity.name,
+          type: entity.type,
+          description: entity.description,
+        });
+        ids.set(entity.name.toLowerCase(), id);
+        created.push(entity.name);
       }
-
-      // Add new entity
-      const id = await addEntity({
-        name: entity.name,
-        type: entity.type,
-        description: entity.description,
-        metadata: entity.metadata,
-      });
-      entityIdMap.set(entity.name, id);
-      addedEntities.push(entity.name);
     } catch (error) {
-      console.error("[MemoryExtractor] Failed to add entity:", entity.name, error);
-      skipped.push(`Failed to add entity "${entity.name}"`);
+      console.error("[MemoryExtractor] Failed to store entity:", entity.name, error);
+      skipped.push(entity.name);
     }
   }
 
-  // Then, add relationships
   for (const rel of extraction.relationships) {
     try {
-      // Resolve entity names to IDs
-      let sourceId = entityIdMap.get(rel.source);
-      let targetId = entityIdMap.get(rel.target);
-
-      // If not in our map, try to find in database
-      if (!sourceId) {
-        const existing = await findEntityByName(rel.source);
-        if (existing) {
-          sourceId = existing.id;
-        } else {
-          skipped.push(`Relationship source "${rel.source}" not found`);
-          continue;
-        }
+      const sourceId = await resolve(rel.source);
+      const targetId = await resolve(rel.target);
+      if (!sourceId || !targetId || sourceId === targetId) {
+        skipped.push(`${rel.source} -> ${rel.target}`);
+        continue;
       }
-
-      if (!targetId) {
-        const existing = await findEntityByName(rel.target);
-        if (existing) {
-          targetId = existing.id;
-        } else {
-          skipped.push(`Relationship target "${rel.target}" not found`);
-          continue;
-        }
-      }
-
-      // Add relationship
-      const id = await addRelationship({
-        sourceId,
-        targetId,
-        type: rel.type,
-      });
-      addedRelationships.push(`${rel.source} -> ${rel.type} -> ${rel.target}`);
+      await upsertRelationship({ sourceId, targetId, type: rel.type });
+      links.push(`${rel.source} -> ${rel.type} -> ${rel.target}`);
     } catch (error) {
-      console.error("[MemoryExtractor] Failed to add relationship:", rel, error);
-      skipped.push(`Failed to add relationship "${rel.source} -> ${rel.target}"`);
+      console.error("[MemoryExtractor] Failed to store relationship:", rel, error);
+      skipped.push(`${rel.source} -> ${rel.target}`);
     }
   }
 
-  return {
-    addedEntities,
-    addedRelationships,
-    skipped,
-  };
+  return { created, updated, links, skipped };
 }
 
 /**
- * High-level function: Extract and store memories from a user message
+ * High-level function: extract and store memories from a user message.
+ * Called (deferred) after every chat turn, so the graph upgrades itself from
+ * conversation — mention a person or a personal detail and it lands here.
  */
 export async function extractAndStoreMemories(
   userMessage: string,
-  conversationContext?: string
+  conversationContext?: string,
+  knownContext?: string
 ): Promise<{
   success: boolean;
   addedEntities: string[];
   addedRelationships: string[];
+  updatedEntities: string[];
   message?: string;
 }> {
-  console.log("[MemoryExtractor] Processing message:", userMessage.substring(0, 100));
+  const empty = { success: true, addedEntities: [], addedRelationships: [], updatedEntities: [] };
 
-  // Extract entities and relationships
-  const extraction = await extractMemoriesFromMessage(userMessage, conversationContext);
+  if (!shouldExtract(userMessage)) {
+    return { ...empty, message: "Nothing durable to learn" };
+  }
 
+  const extraction = await extractMemoriesFromMessage(userMessage, conversationContext, knownContext);
   if (extraction.entities.length === 0 && extraction.relationships.length === 0) {
-    return {
-      success: true,
-      addedEntities: [],
-      addedRelationships: [],
-      message: "No new information to learn",
-    };
+    return { ...empty, message: "No new information to learn" };
+  }
+
+  const result = await processExtraction(extraction);
+
+  if (result.created.length + result.updated.length + result.links.length === 0) {
+    return { ...empty, message: "Information already known" };
   }
 
   console.log(
-    "[MemoryExtractor] Extracted:",
-    extraction.entities.length,
-    "entities,",
-    extraction.relationships.length,
-    "relationships"
+    `[MemoryExtractor] learned ${result.created.length} new, upgraded ${result.updated.length}, linked ${result.links.length}`
   );
 
-  // Process and store in graph
-  const result = await processExtraction(extraction);
-
-  const totalAdded = result.addedEntities.length + result.addedRelationships.length;
-  if (totalAdded === 0) {
-    return {
-      success: true,
-      addedEntities: [],
-      addedRelationships: [],
-      message: "Information already known",
-    };
-  }
+  const parts: string[] = [];
+  if (result.created.length) parts.push(`Learned ${result.created.length} new fact(s): ${result.created.join(", ")}`);
+  if (result.updated.length) parts.push(`Sharpened ${result.updated.length} known memory(ies)`);
+  if (result.links.length) parts.push(`${result.links.length} new connection(s)`);
 
   return {
     success: true,
-    addedEntities: result.addedEntities,
-    addedRelationships: result.addedRelationships,
-    message: `Learned ${result.addedEntities.length} new facts and ${result.addedRelationships.length} relationships`,
+    addedEntities: result.created,
+    addedRelationships: result.links,
+    updatedEntities: result.updated,
+    message: parts.join(" · ") || "Nothing to change",
   };
 }
 
 /**
- * Extract specific preference from user statement
- * Example: "I prefer dark mode" -> PREFERENCE entity
+ * Extract a specific preference from a user statement.
+ * Example: "I prefer dark mode" -> PREFERENCE entity owned by User.
  */
 export async function extractPreference(
   statement: string
 ): Promise<{ success: boolean; entityId?: string; message?: string }> {
-  const prompt = `Extract the user's preference from this statement.
-
-Return JSON: {"preference": "what they prefer", "category": "ui|behavior|content|other"}
-
-Statement: ${statement}`;
+  const text = (statement || "").trim();
+  if (!text) return { success: false, message: "Nothing to extract" };
 
   try {
-    // ── Direct LLM call — never route through localhost to avoid deadlock ──
-    const openrouterKey = process.env.OPENROUTER_API_KEY;
-    const groqKey = process.env.GROQ_API_KEY;
+    const raw = await agentLlm({
+      system:
+        'Extract the user\'s durable preference from the statement. Return ONLY JSON: {"preference": string, "category": "ui|behavior|content|other"}. If there is no clear preference, return {"preference": ""}.',
+      user: text.slice(0, 600),
+      maxTokens: 200,
+      temperature: 0.1,
+      timeoutMs: 10_000,
+      label: "memory-preference",
+      json: true,
+    });
+    const parsed = parseJsonLoose<{ preference?: unknown; category?: unknown }>(raw);
+    const preference = clean(parsed?.preference, 80);
+    if (!preference) return { success: false, message: "No preference found" };
 
-    if (!openrouterKey && !groqKey) {
-      return { success: false, message: "extraction_unavailable" };
-    }
-
-    const c = new AbortController();
-    const t = setTimeout(() => c.abort(), 8000);
-    let response: Response | null = null;
-
-    try {
-      if (openrouterKey) {
-        response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${openrouterKey}`,
-            "Content-Type": "application/json",
-            "HTTP-Referer": "http://localhost:3000",
-            "X-Title": "JARVIS Memory Extractor",
-          },
-          body: JSON.stringify({
-            model: "nvidia/nemotron-3.5-lightning:free",
-            messages: [{ role: "user", content: prompt }],
-            temperature: 0.2,
-            max_tokens: 200,
-            response_format: { type: "json_object" },
-          }),
-          signal: c.signal,
-        });
-      } else if (groqKey) {
-        response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${groqKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: "llama-3.1-8b-instant",
-            messages: [{ role: "user", content: prompt }],
-            temperature: 0.2,
-            max_tokens: 200,
-            response_format: { type: "json_object" },
-          }),
-          signal: c.signal,
-        });
-      }
-    } catch (e: any) {
-      console.warn("[MemoryExtractor] LLM unreachable — skipping preference extraction:", e?.name || e?.message);
-      return { success: false, message: "extraction_unavailable" };
-    } finally {
-      clearTimeout(t);
-    }
-
-    if (!response || !response.ok) {
-      return { success: false, message: "Failed to extract preference" };
-    }
-
-    const data = await response.json();
-    const content = data.choices?.[0]?.message?.content;
-    const parsed = JSON.parse(content);
-
-    if (!parsed.preference) {
-      return { success: false, message: "No preference found" };
-    }
-
-    // Create User entity if it doesn't exist
-    let userId = await findEntityByName("User");
+    let userId = await findEntityExactly("User");
     if (!userId) {
       userId = {
-        id: await addEntity({
-          name: "User",
-          type: "PERSON",
-          description: "The user of JARVIS",
-        }),
+        id: await addEntity({ name: "User", type: "PERSON", description: "The user of JARVIS" }),
         name: "User",
         type: "PERSON" as EntityType,
       };
     }
 
-    // Create preference entity
-    const preferenceId = await addEntity({
-      name: parsed.preference,
-      type: "PREFERENCE",
-      category: parsed.category || "other",
-    });
+    const existing = await findEntityExactly(preference);
+    const preferenceId = existing
+      ? existing.id
+      : await addEntity({
+          name: preference,
+          type: "PREFERENCE",
+          description: `The user prefers ${preference}`,
+          metadata: { category: clean(parsed?.category, 24) || "other" },
+        });
 
-    // Create relationship
-    await addRelationship({
-      sourceId: userId.id,
-      targetId: preferenceId,
-      type: "prefers",
-    });
-
-    return {
-      success: true,
-      entityId: preferenceId,
-      message: `Remembered: User prefers ${parsed.preference}`,
-    };
+    await upsertRelationship({ sourceId: userId.id, targetId: preferenceId, type: "prefers" });
+    return { success: true, entityId: preferenceId, message: `Remembered: user prefers ${preference}` };
   } catch (error) {
-    console.error("[MemoryExtractor] Preference extraction failed:", error);
+    console.warn("[MemoryExtractor] Preference extraction failed:", (error as Error)?.message?.slice(0, 120));
     return { success: false, message: "Failed to extract preference" };
   }
 }

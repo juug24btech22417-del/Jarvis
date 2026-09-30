@@ -145,6 +145,110 @@ export async function findEntityByName(name: string): Promise<{ id: string; name
 }
 
 /**
+ * Find an entity whose name is exactly `name` (case-insensitive).
+ *
+ * `findEntityByName` uses a substring match, which is fine for search but
+ * wrong for merging: looking up "Sam" would happily return "Samsung", and the
+ * graph would grow duplicate-ish nodes instead of updating one.
+ */
+export async function findEntityExactly(
+  name: string
+): Promise<{ id: string; name: string; type: EntityType } | null> {
+  const clean = (name || "").replace(/\s+/g, " ").trim();
+  if (!clean) return null;
+  const rows = await prisma.entity.findMany({
+    where: { name: { contains: clean } },
+    take: 25,
+  });
+  const wanted = clean.toLowerCase();
+  const hit =
+    rows.find((r) => r.name.trim().toLowerCase() === wanted) ??
+    // "Dhruv S" should still find "Dhruv" (and vice versa) without matching
+    // every name that merely contains the letters.
+    rows.find((r) => {
+      const other = r.name.trim().toLowerCase();
+      return other.startsWith(`${wanted} `) || wanted.startsWith(`${other} `);
+    });
+  return hit ? { id: hit.id, name: hit.name, type: hit.type as EntityType } : null;
+}
+
+/**
+ * Names of the strongest live memories. Handed to the extractor so a repeated
+ * fact reuses the existing name and upgrades that node instead of spawning a
+ * near-duplicate.
+ */
+export async function listEntityNames(limit: number = 60): Promise<string[]> {
+  const rows = await prisma.entity.findMany({
+    where: { archived: false },
+    orderBy: [{ pinned: "desc" }, { strength: "desc" }],
+    select: { name: true },
+    take: limit,
+  });
+  return rows.map((r) => r.name);
+}
+
+/**
+ * Merge new information into a memory that already exists — the "upgrade"
+ * half of learning. Appends a description nuance instead of overwriting,
+ * refreshes the strength, bumps the recall count and un-archives the memory
+ * (mentioning something you forgot should bring it back).
+ */
+export async function reinforceEntity(
+  id: string,
+  patch: { description?: string; type?: string } = {}
+): Promise<{ updated: boolean; description: string | null }> {
+  const existing = await prisma.entity.findUnique({ where: { id } });
+  if (!existing) return { updated: false, description: null };
+
+  const data: Record<string, unknown> = {};
+  const incoming = (patch.description ?? "").replace(/\s+/g, " ").trim();
+  const current = (existing.description ?? "").trim();
+
+  if (incoming) {
+    const alreadyKnown = current.toLowerCase().includes(incoming.toLowerCase().slice(0, 40));
+    if (!current) data.description = incoming.slice(0, 600);
+    else if (!alreadyKnown) data.description = `${current.replace(/\.?$/, ".")} ${incoming}`.slice(0, 600);
+  }
+  if (patch.type && patch.type !== existing.type) data.type = patch.type;
+
+  const nextBase = applyReinforcement(existing.baseStrength, 0.1);
+  data.baseStrength = nextBase;
+  data.strength = nextBase;
+  data.lastAccessed = new Date();
+  data.accessCount = { increment: 1 };
+  if (existing.archived) data.archived = false;
+
+  const updatedRow = await prisma.entity.update({ where: { id }, data });
+  return { updated: true, description: updatedRow.description };
+}
+
+/**
+ * Create a relationship, or strengthen the one that already exists. Repeatedly
+ * saying "Ananya is my sister" should deepen that edge, not add edge #7.
+ */
+export async function upsertRelationship(data: RelationshipData): Promise<string> {
+  const existing = await prisma.relationship.findFirst({
+    where: {
+      type: data.type,
+      OR: [
+        { sourceId: data.sourceId, targetId: data.targetId },
+        { sourceId: data.targetId, targetId: data.sourceId },
+      ],
+    },
+  });
+
+  if (existing) {
+    await prisma.relationship.update({
+      where: { id: existing.id },
+      data: { strength: Math.min(3, existing.strength + 0.25) },
+    });
+    return existing.id;
+  }
+
+  return addRelationship(data);
+}
+
+/**
  * Get all relationships for an entity (both incoming and outgoing)
  */
 export async function getEntityRelationships(

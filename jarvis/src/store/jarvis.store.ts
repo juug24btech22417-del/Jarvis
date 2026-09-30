@@ -146,11 +146,14 @@ interface JarvisStore {
   pulseReactor: () => void;
 
   // UI
-  activePanel: "chat" | "tasks" | "memory" | "notes" | "code" | "skill-trainer" | "image-generator" | "summarizer" | "web-scraper" | "firecrawl" | "playwright" | "whatsapp" | "phone-remote" | "telegram" | "security" | "vault" | "dungeon" | "habits" | "time-capsule" | "voice-notes" | "nasa" | "huggingface" | "ifttt" | "browser" | "local-llm" | "vision" | "automation" | "price-tracker" | "transcription" | "proxy" | "agent" | "mission" | "analytics" | "macros" | null;
+  activePanel: "chat" | "tasks" | "memory" | "notes" | "code" | "skill-trainer" | "image-generator" | "summarizer" | "web-scraper" | "firecrawl" | "playwright" | "whatsapp" | "phone-remote" | "telegram" | "security" | "vault" | "dungeon" | "habits" | "time-capsule" | "voice-notes" | "nasa" | "huggingface" | "ifttt" | "browser" | "local-llm" | "vision" | "automation" | "price-tracker" | "transcription" | "proxy" | "agent" | "mission" | "analytics" | "macros" | "qr-teleporter" | "proximity-scanner" | "video-director" | "room-scanner" | "whiteboard-ocr" | "widgets" | "second-brain" | null;
   setActivePanel: (panel: JarvisStore["activePanel"]) => void;
   /** Goal typed/voiced elsewhere that Mission Control should run on open. */
   pendingMissionGoal: string | null;
   setPendingMissionGoal: (goal: string | null) => void;
+  /** Natural-language widget request typed elsewhere; the Widgets panel builds it on open. */
+  pendingWidgetPrompt: string | null;
+  setPendingWidgetPrompt: (prompt: string | null) => void;
   showBriefing: boolean;
   setShowBriefing: (show: boolean) => void;
 
@@ -322,6 +325,8 @@ export const useJarvisStore = create<JarvisStore>((set) => ({
   setActivePanel: (activePanel) => set({ activePanel }),
   pendingMissionGoal: null,
   setPendingMissionGoal: (pendingMissionGoal) => set({ pendingMissionGoal }),
+  pendingWidgetPrompt: null,
+  setPendingWidgetPrompt: (pendingWidgetPrompt) => set({ pendingWidgetPrompt }),
   showBriefing: false,
   setShowBriefing: (showBriefing) => set({ showBriefing }),
 

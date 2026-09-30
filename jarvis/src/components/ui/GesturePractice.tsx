@@ -4,6 +4,15 @@
 // Shows the camera feed with the 21-point MediaPipe skeleton drawn on top,
 // live pinch/fist meters, the currently-classified pose, and the fps.
 //
+// Two source tabs:
+//  - ✋ HAND:      hand skeleton + pinch/fist meters + pose readout
+//  - 👁 EYE TRACK: live iris-gaze crosshair, auto-scaled (NO calibration
+//                  needed) — proves the eye tracker sees your eyes before
+//                  you ever run the calibration ritual in Eye Control.
+//                  It reads the SHARED eye engine (see useEyeControl): one
+//                  inference loop for the whole app, so running this panel
+//                  and eye control together can't corrupt each other.
+//
 // Two modes:
 //  - own:   practice itself owns the camera (via the vision lock).
 //  - share: another feature (air-mouse / DJ) holds the camera — practice
@@ -18,13 +27,17 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Hand, X, ExternalLink, Camera, Eye } from "lucide-react";
+import { Hand, X, ExternalLink, Camera, Eye, EyeOff } from "lucide-react";
 import {
   useHandControl,
   handTelemetry,
   HandFrame,
+  type HandLandmark,
 } from "@/hooks/useHandControl";
-import type { NormalizedLandmark } from "@mediapipe/hands";
+import { useEyeControl, GazeFrame } from "@/hooks/useEyeControl";
+import { AutoGain } from "@/lib/eyeCalibration";
+import { OneEuroFilter } from "@/lib/oneEuro";
+import { classifyPose, type Pose } from "@/lib/handPose";
 import {
   claimVision,
   releaseVision,
@@ -44,18 +57,6 @@ const CONNECTIONS: Array<[number, number]> = [
   [0, 17], // palm base
 ];
 
-type Pose = "none" | "point" | "two" | "thumb" | "fist" | "palm";
-
-function classify(f: HandFrame): Pose {
-  const { fingers } = f;
-  if (fingers.index && fingers.middle && fingers.ring && fingers.pinky) return "palm";
-  if (!fingers.index && !fingers.middle && !fingers.ring && f.fist > 0.65) return "fist";
-  if (fingers.index && fingers.middle && !fingers.ring) return "two";
-  if (fingers.thumb && !fingers.index && !fingers.middle && !fingers.ring) return "thumb";
-  if (fingers.index && !fingers.middle && !fingers.ring) return "point";
-  return "none";
-}
-
 const POSE_HINT: Record<Pose, string> = {
   point: "POINT → cursor moves",
   two: "TWO FINGERS → scroll mode",
@@ -65,46 +66,13 @@ const POSE_HINT: Record<Pose, string> = {
   none: "unrecognized — spread your fingers",
 };
 
-/** Derive a display frame from raw landmarks (share mode — no hysteresis). */
-function frameFromLandmarks(lm: NormalizedLandmark[], fps: number): HandFrame {
-  const tip = lm[8];
-  const thumb = lm[4];
-  const pinchDist = Math.hypot(tip.x - thumb.x, tip.y - thumb.y);
-  const palmX = (lm[0].x + lm[5].x + lm[17].x) / 3;
-  const palmY = (lm[0].y + lm[5].y + lm[17].y) / 3;
-  const scale = Math.hypot(lm[9].x - lm[0].x, lm[9].y - lm[0].y) || 1e-6;
-  const TIPS = [8, 12, 16, 20];
-  const PIPS = [5, 9, 13, 17];
-  let curl = 0;
-  for (let i = 0; i < 4; i++) {
-    curl +=
-      Math.hypot(lm[TIPS[i]].x - palmX, lm[TIPS[i]].y - palmY) /
-      (Math.hypot(lm[PIPS[i]].x - palmX, lm[PIPS[i]].y - palmY) || 1e-6);
-  }
-  curl /= 4;
-  const fist = Math.max(0, Math.min(1, (0.72 - curl) / 0.32));
-  const wrist = lm[0];
-  const d = (a: NormalizedLandmark, b: NormalizedLandmark) => Math.hypot(a.x - b.x, a.y - b.y);
-  const ext = (t: number, p: number) => d(lm[t], wrist) > d(lm[p], wrist) * 1.08;
-  return {
-    x: 1 - tip.x,
-    y: tip.y,
-    pinch: Math.max(0, Math.min(1, 1 - pinchDist / 0.18)),
-    fist,
-    fingers: {
-      thumb: d(lm[4], lm[9]) / scale > 0.95,
-      index: ext(8, 6),
-      middle: ext(12, 10),
-      ring: ext(16, 14),
-      pinky: ext(20, 18),
-    },
-    handFound: true,
-    fps,
-  };
-}
-
 export default function GesturePractice() {
   const [mode, setMode] = useState<"off" | "own" | "share">("off");
+  const [source, setSource] = useState<"hand" | "eye">("hand"); // EYE TRACK tab
+  // The lock handlers live in an effect keyed on `mode` only, so they read
+  // the current tab through a ref instead of capturing a stale one.
+  const sourceRef = useRef<"hand" | "eye">("hand");
+  sourceRef.current = source;
   const [frame, setFrame] = useState<HandFrame | null>(null);
   const [pip, setPip] = useState(false);
   const [pipErr, setPipErr] = useState("");
@@ -116,17 +84,97 @@ export default function GesturePractice() {
 
   const handleFrame = useCallback((f: HandFrame) => setFrame(f), []);
   const { ready, error, landmarksRef, videoElRef } = useHandControl({
-    enabled: mode === "own",
+    enabled: mode === "own" && source === "hand",
     onFrame: handleFrame,
   });
 
+  // ─── EYE TRACK: live gaze verification, no calibration needed ────────
+  // The crosshair proves the tracker sees your eyes move. Two fixes over the
+  // old readout, both required for it to look like it tracks at all:
+  //  • AutoGain learns the user's own gaze span and stretches it across the
+  //    panel. The old path multiplied the raw signal by a fixed 1.8 — a
+  //    constant from the blendshape era — so the (much smaller) iris signal
+  //    nudged the dot a few percent of the panel and read as "not tracking".
+  //  • A One-Euro stage on top, so the dot glides instead of shivering.
+  const [eyeGaze, setEyeGaze] = useState<GazeFrame | null>(null);
+  const [eyePoint, setEyePoint] = useState({ x: 0.5, y: 0.5 });
+  const eyeMapX = useRef(new AutoGain());
+  const eyeMapY = useRef(new AutoGain());
+  const eyeFx = useRef(new OneEuroFilter(1.6, 0.8));
+  const eyeFy = useRef(new OneEuroFilter(1.6, 0.8));
+  const eyeUiAt = useRef(0);
+  const eyeStageRef = useRef<HTMLDivElement | null>(null);
+  const crosshairRef = useRef<HTMLDivElement | null>(null);
+
+  const handleEyeFrame = useCallback((g: GazeFrame) => {
+    const now = performance.now();
+    const el = crosshairRef.current;
+    if (!g.faceFound) {
+      if (el) el.style.opacity = "0";
+      // Drop the smoothing state: across a tracking gap the next sample is
+      // meaningless as a "delta", and resuming the filter would sweep the
+      // crosshair back across the panel.
+      eyeFx.current.reset();
+      eyeFy.current.reset();
+      if (now - eyeUiAt.current > 100) {
+        eyeUiAt.current = now;
+        setEyeGaze(g);
+      }
+      return;
+    }
+    const sx = eyeFx.current.filter(eyeMapX.current.push(g.rawH), now);
+    const sy = eyeFy.current.filter(1 - eyeMapY.current.push(g.rawV), now);
+    // Crosshair is positioned straight from the frame callback — no React
+    // render at camera framerate, which used to compete with inference.
+    if (el) {
+      el.style.opacity = "1";
+      el.style.left = `${Math.max(0, Math.min(1, sx)) * 100}%`;
+      el.style.top = `${Math.max(0, Math.min(1, sy)) * 100}%`;
+    }
+    if (now - eyeUiAt.current > 100) {
+      eyeUiAt.current = now;
+      setEyeGaze(g);
+      setEyePoint({ x: sx, y: sy });
+    }
+  }, []);
+
+  const {
+    videoRef: eyeVideoRef,
+    ready: eyeReady,
+    error: eyeError,
+  } = useEyeControl({
+    enabled: mode !== "off" && source === "eye",
+    onFrame: handleEyeFrame,
+  });
+
+  // Mount the engine's unattached <video> into the eye stage.
+  useEffect(() => {
+    if (source !== "eye" || mode === "off") return;
+    const slot = eyeStageRef.current;
+    const v = eyeVideoRef.current;
+    if (!slot || !v) return;
+    if (v.parentNode !== slot) {
+      v.style.width = "100%";
+      v.style.height = "100%";
+      v.style.objectFit = "cover";
+      v.style.transform = "scaleX(-1)";
+      slot.appendChild(v);
+      v.play?.().catch(() => {});
+    }
+  }, [source, mode, eyeReady, eyeVideoRef]);
+
   // ─── Vision lock: own the camera if free, otherwise share the stream ────
+  // ONLY the hand tab needs the lock. The eye tab runs on the shared eye
+  // engine, which manages its own camera lifecycle — so it must NOT sit on
+  // the lock, or every other vision feature (eye control in Jarvis, 
+  // air-mouse, DJ) is told "camera busy — practice is using it" and silently
+  // does nothing. That was a real "eye control doesn't work" cause.
   useEffect(() => {
     if (mode === "off") return;
     // Already sharing or owning — just keep an eye on the lock.
     const off = onVisionLockChange((h) => {
       setHolder(h ?? "");
-      if (!h && mode === "share") {
+      if (!h && mode === "share" && sourceRef.current === "hand") {
         // Owner released — upgrade to owning the camera.
         if (claimVision("practice")) setMode("own");
       }
@@ -135,7 +183,7 @@ export default function GesturePractice() {
     // while practice owns it, step aside to share mode so it never blocks
     // the actual features.
     const offReq = onVisionRequest((requester) => {
-      if (mode === "own" && requester !== "practice") {
+      if (sourceRef.current === "hand" && mode === "own" && requester !== "practice") {
         releaseVision("practice");
         setHolder(requester);
         setMode("share");
@@ -155,6 +203,13 @@ export default function GesturePractice() {
 
   const enable = useCallback(() => {
     setPipErr("");
+    // The eye tab needs no camera lock — never take one for it (see the
+    // vision-lock effect: holding it blocks eye control in Jarvis).
+    if (sourceRef.current === "eye") {
+      setHolder("");
+      setMode("own");
+      return;
+    }
     if (claimVision("practice")) {
       setHolder("practice");
       setMode("own");
@@ -169,6 +224,34 @@ export default function GesturePractice() {
     releaseVision("practice");
     setMode("off");
   }, []);
+
+  // Switching source hand↔eye: the eye tab needs NO vision lock (the eye
+  // engine owns its own camera lifecycle), so leaving the hand tab must
+  // RELEASE it — otherwise the panel parks on the lock and blocks every
+  // other vision feature. Returning to hand re-acquires it (or falls back to
+  // monitor mode if someone else took it meanwhile).
+  const switchSource = useCallback(
+    (s: "hand" | "eye") => {
+      if (s === source) return;
+      setSource(s);
+      sourceRef.current = s;
+      if (mode === "off") return;
+      if (s === "hand") {
+        if (claimVision("practice")) {
+          setHolder("practice");
+          setMode("own");
+        } else {
+          setHolder(visionHolder() ?? "another feature");
+          setMode("share");
+        }
+      } else {
+        releaseVision("practice");
+        setHolder("");
+        setMode("own"); // "own" here just means "this panel is self-sufficient"
+      }
+    },
+    [source, mode]
+  );
 
   // ─── Video element routing (own element or the owner's, via telemetry) ──
   useEffect(() => {
@@ -250,9 +333,10 @@ export default function GesturePractice() {
   useEffect(() => {
     if (mode !== "share") return;
     const iv = setInterval(() => {
-      const lm = handTelemetry.landmarks;
-      if (!lm) return setFrame(null);
-      setFrame(frameFromLandmarks(lm, handTelemetry.fps));
+      // Use the ENGINE's own frame: exactly the metrics the controller is
+      // acting on. Re-deriving them here (the old frameFromLandmarks) meant a
+      // second set of thresholds that could disagree with the real one.
+      setFrame(handTelemetry.frame);
     }, 100);
     return () => clearInterval(iv);
   }, [mode]);
@@ -291,7 +375,7 @@ export default function GesturePractice() {
     return () => window.removeEventListener("jarvis:open-practice-monitor", open);
   }, [enable, popOut]);
 
-  const pose: Pose = frame ? classify(frame) : "none";
+  const pose: Pose = frame ? classifyPose(frame) : "none";
   const waiting = mode === "share" && !handTelemetry.videoEl;
 
   return (
@@ -301,7 +385,7 @@ export default function GesturePractice() {
         onClick={() => (mode === "off" ? enable() : disable())}
         whileHover={{ scale: 1.1 }}
         whileTap={{ scale: 0.95 }}
-        title="Gesture practice — see what the camera sees (Ctrl+Shift+P)"
+        title="Gesture practice / eye track — see what the camera sees (Ctrl+Shift+P)"
         className={`fixed bottom-[20.5rem] right-6 z-50 p-3 rounded-full transition-colors ${
           mode !== "off"
             ? "bg-reactor-core text-deep-space"
@@ -321,7 +405,11 @@ export default function GesturePractice() {
           >
             <div className="flex items-center justify-between mb-2">
               <span className="font-orbitron text-[10px] tracking-[0.25em] text-text-secondary/70">
-                {mode === "share" ? `MONITOR · ${holder}` : "GESTURE PRACTICE"}
+                {source === "eye"
+                  ? "EYE TRACK · LIVE GAZE"
+                  : mode === "share"
+                    ? `MONITOR · ${holder}`
+                    : "GESTURE PRACTICE"}
               </span>
               <div className="flex items-center gap-1.5">
                 {pipSupported() && (
@@ -339,46 +427,132 @@ export default function GesturePractice() {
               </div>
             </div>
 
-            {/* Camera + skeleton stage (this whole node moves to PiP) */}
-            <div
-              ref={stageRef}
-              className="relative rounded-xl overflow-hidden border border-panel-border/50 bg-black aspect-[4/3]"
-            >
-              <div ref={videoSlotRef} className="absolute inset-0" />
-              <canvas ref={canvasRef} width={320} height={240} className="absolute inset-0 w-full h-full" />
-              {(mode === "own" && (!ready || error)) || waiting ? (
-                <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 font-rajdhani text-[11px] text-text-secondary/70">
-                  <Camera className="w-5 h-5 mb-1 opacity-60" />
-                  {mode === "own"
-                    ? error
-                      ? error.slice(0, 60)
-                      : "starting camera…"
-                    : `waiting for ${holder}'s camera…`}
-                </div>
-              ) : null}
-            </div>
-
-            {/* Meters */}
-            <div className="mt-2.5 space-y-1.5">
-              <Meter label="pinch" value={frame?.pinch ?? 0} color="#00d4ff" />
-              <Meter label="fist" value={frame?.fist ?? 0} color="#ff6b81" />
-            </div>
-
-            {/* Pose readout */}
-            <div className="mt-2.5 pt-2 border-t border-panel-border/40">
-              <div
-                className={`font-rajdhani text-[11px] font-semibold ${
-                  frame?.handFound ? "text-reactor-core" : "text-text-secondary/50"
+            {/* Source tabs: hand gestures vs raw eye tracking */}
+            <div className="flex gap-1 mb-2">
+              <button
+                onClick={() => switchSource("hand")}
+                className={`flex-1 font-rajdhani text-[10px] py-1 rounded-md border transition-colors ${
+                  source === "hand"
+                    ? "bg-reactor-core/15 text-reactor-core border-reactor-core/40"
+                    : "text-text-secondary/55 border-transparent hover:text-text-secondary"
                 }`}
               >
-                {frame?.handFound ? POSE_HINT[pose] : "show your hand ✋"}
-              </div>
-              <div className="font-rajdhani text-[10px] text-text-secondary/45 mt-0.5">
-                {frame ? `${frame.fps | 0} fps` : "—"} {pip ? "· popped out ↗" : ""}
-                {mode === "share" ? " · watch-only" : ""}
-              </div>
-              {pipErr && <div className="font-rajdhani text-[10px] text-accent-red mt-1">{pipErr}</div>}
+                ✋ HAND
+              </button>
+              <button
+                onClick={() => switchSource("eye")}
+                className={`flex-1 font-rajdhani text-[10px] py-1 rounded-md border transition-colors ${
+                  source === "eye"
+                    ? "bg-reactor-core/15 text-reactor-core border-reactor-core/40"
+                    : "text-text-secondary/55 border-transparent hover:text-text-secondary"
+                }`}
+              >
+                👁 EYE TRACK
+              </button>
             </div>
+
+            {source === "eye" ? (
+              <>
+                {/* Eye stage: camera feed + live crosshair driven by the
+                    auto-scaled iris gaze — works with zero calibration. If
+                    the crosshair moves when you glance around, tracking works. */}
+                <div className="relative rounded-xl overflow-hidden border border-panel-border/50 bg-black aspect-[4/3]">
+                  <div ref={eyeStageRef} className="absolute inset-0 opacity-60" />
+                  {/* center grid for spatial reference */}
+                  <div className="absolute inset-0 pointer-events-none">
+                    <div className="absolute left-1/2 top-0 bottom-0 w-px bg-panel-border/30" />
+                    <div className="absolute top-1/2 left-0 right-0 h-px bg-panel-border/30" />
+                  </div>
+                  <div
+                    ref={crosshairRef}
+                    className="absolute -translate-x-1/2 -translate-y-1/2 pointer-events-none"
+                    style={{ left: "50%", top: "50%", opacity: 0, transition: "opacity 120ms linear" }}
+                  >
+                    <div
+                      className="w-5 h-5 rounded-full border-2 border-reactor-core"
+                      style={{ boxShadow: "0 0 12px rgba(0,212,255,0.8)" }}
+                    />
+                  </div>
+                  {!eyeReady || eyeError ? (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 font-rajdhani text-[11px] text-text-secondary/70">
+                      <Eye className="w-5 h-5 mb-1 opacity-60" />
+                      {eyeError ? eyeError.slice(0, 60) : "starting eye tracker…"}
+                    </div>
+                  ) : !eyeGaze?.faceFound ? (
+                    <div className="absolute inset-x-0 bottom-2 text-center font-rajdhani text-[11px] text-text-secondary/80">
+                      look at the camera 👀
+                    </div>
+                  ) : null}
+                </div>
+
+                {/* Eye meters — on-screen position (the same auto-scaled
+                    point the crosshair uses), so they actually sweep. */}
+                <div className="mt-2.5 space-y-1.5">
+                  <Meter label="eyes" value={eyeGaze?.openness ?? 0} color="#7cf7c4" />
+                  <Meter label="look ↔" value={eyePoint.x} color="#00d4ff" />
+                  <Meter label="look ↕" value={eyePoint.y} color="#c08bff" />
+                </div>
+
+                {/* Eye status */}
+                <div className="mt-2.5 pt-2 border-t border-panel-border/40">
+                  <div
+                    className={`font-rajdhani text-[11px] font-semibold ${
+                      eyeGaze?.faceFound ? "text-reactor-core" : "text-text-secondary/50"
+                    }`}
+                  >
+                    {eyeGaze?.faceFound
+                      ? "tracking — glance left/right/up/down, watch the dot"
+                      : "no face yet"}
+                  </div>
+                  <div className="font-rajdhani text-[10px] text-text-secondary/45 mt-0.5">
+                    auto-scaled iris gaze · no calibration needed
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                {/* Camera + skeleton stage (this whole node moves to PiP) */}
+                <div
+                  ref={stageRef}
+                  className="relative rounded-xl overflow-hidden border border-panel-border/50 bg-black aspect-[4/3]"
+                >
+                  <div ref={videoSlotRef} className="absolute inset-0" />
+                  <canvas ref={canvasRef} width={320} height={240} className="absolute inset-0 w-full h-full" />
+                  {(mode === "own" && (!ready || error)) || waiting ? (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 font-rajdhani text-[11px] text-text-secondary/70">
+                      <Camera className="w-5 h-5 mb-1 opacity-60" />
+                      {mode === "own"
+                        ? error
+                          ? error.slice(0, 60)
+                          : "starting camera…"
+                        : `waiting for ${holder}'s camera…`}
+                    </div>
+                  ) : null}
+                </div>
+
+                {/* Meters */}
+                <div className="mt-2.5 space-y-1.5">
+                  <Meter label="pinch" value={frame?.pinch ?? 0} color="#00d4ff" />
+                  <Meter label="fist" value={frame?.fist ?? 0} color="#ff6b81" />
+                </div>
+
+                {/* Pose readout */}
+                <div className="mt-2.5 pt-2 border-t border-panel-border/40">
+                  <div
+                    className={`font-rajdhani text-[11px] font-semibold ${
+                      frame?.handFound ? "text-reactor-core" : "text-text-secondary/50"
+                    }`}
+                  >
+                    {frame?.handFound ? POSE_HINT[pose] : "show your hand ✋"}
+                  </div>
+                  <div className="font-rajdhani text-[10px] text-text-secondary/45 mt-0.5">
+                    {frame ? `${frame.fps | 0} fps` : "—"} {pip ? "· popped out ↗" : ""}
+                    {mode === "share" ? " · watch-only" : ""}
+                  </div>
+                  {pipErr && <div className="font-rajdhani text-[10px] text-accent-red mt-1">{pipErr}</div>}
+                </div>
+              </>
+            )}
           </motion.div>
         )}
       </AnimatePresence>

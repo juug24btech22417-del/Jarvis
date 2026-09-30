@@ -14,7 +14,9 @@ type InputModule = {
 let mod: InputModule | null = null;
 function loadInput(): InputModule {
   if (!mod) {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // Runtime require on purpose: native FFI .cjs, must not be bundled.
+    // (See os/lock/route.ts — the @typescript-eslint disable comment that
+    // used to sit here referenced an uninstalled plugin and broke the build.)
     mod = require("@/lib/os/input.cjs") as InputModule;
   }
   return mod;

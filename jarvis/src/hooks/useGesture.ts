@@ -1,9 +1,23 @@
 "use client";
 
-import { useEffect, useRef, useCallback, useState } from "react";
-import type { Hands, Results } from "@mediapipe/hands";
-import type { Camera } from "@mediapipe/camera_utils";
-import { loadHandsClass, loadCameraClass } from "@/lib/mediapipeLoader";
+// Gesture recognizer — a thin CONSUMER of the shared hand engine.
+//
+// It used to build its own legacy @mediapipe/hands instance plus its own
+// Camera from camera_utils, which meant a SECOND MediaPipe solution runtime
+// on the page. That was the source of two real failures:
+//
+//  • the legacy package wires its emscripten runtime through a GLOBAL
+//    `Module`, so two solutions tripping over it produces the hard
+//    `RuntimeError: Aborted(Module.noExitRuntime has been replaced with
+//    plain noExitRuntime)` crash; and
+//  • it bypassed the shared camera cache and the vision lock, opening a
+//    second getUserMedia stream that competed with air-mouse for the device.
+//
+// Now it subscribes to the one engine in useHandControl: same camera, same
+// inference, same frames. Adding gesture recognition costs nothing extra.
+
+import { useEffect, useRef, useState, useCallback } from "react";
+import { useHandControl, handTelemetry, type HandFrame } from "@/hooks/useHandControl";
 import { useJarvisStore } from "@/store/jarvis.store";
 
 // Gesture types
@@ -82,135 +96,97 @@ function detectGesture(landmarks: Landmark[]): GestureType {
   return "none";
 }
 
-export function useGesture(
-  videoRef: React.RefObject<HTMLVideoElement>,
-  enabled: boolean = true
-) {
+export function useGesture(enabled: boolean = true) {
   const [gestureState, setGestureState] = useState<GestureState>({
     currentGesture: "none",
     confidence: 0,
     handVisible: false,
   });
 
-  const handsRef = useRef<Hands | null>(null);
-  const cameraRef = useRef<Camera | null>(null);
   const lastGestureTime = useRef<number>(0);
   const gestureHistory = useRef<GestureType[]>([]);
   const { setState, setGestureDetected } = useJarvisStore();
 
-  // Process hand tracking results
-  const onResults = useCallback((results: Results) => {
-    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-      const landmarks = results.multiHandLandmarks[0];
-      const gesture = detectGesture(landmarks);
+  // Process hand frames from the shared engine.
+  const onFrame = useCallback(
+    (f: HandFrame) => {
+      // The engine publishes landmarks into telemetry before it hands the
+      // frame out, so this is always the same frame the metrics came from.
+      const landmarks = handTelemetry.landmarks;
+      if (f.handFound && landmarks && landmarks.length >= 21) {
+        const gesture = detectGesture(landmarks);
 
-      // Add to history for smoothing
-      gestureHistory.current.push(gesture);
-      if (gestureHistory.current.length > 5) {
-        gestureHistory.current.shift();
-      }
-
-      // Get most common gesture in history
-      const counts: Record<string, number> = {};
-      let maxCount = 0;
-      let mostCommon: GestureType = "none";
-
-      gestureHistory.current.forEach((g) => {
-        counts[g] = (counts[g] || 0) + 1;
-        if (counts[g] > maxCount) {
-          maxCount = counts[g];
-          mostCommon = g;
+        // Add to history for smoothing
+        gestureHistory.current.push(gesture);
+        if (gestureHistory.current.length > 5) {
+          gestureHistory.current.shift();
         }
-      });
 
-      const confidence = maxCount / gestureHistory.current.length;
+        // Get most common gesture in history
+        const counts: Record<string, number> = {};
+        let maxCount = 0;
+        let mostCommon: GestureType = "none";
 
-      // Only update if confidence is high enough
-      if (confidence > 0.6) {
-        setGestureState({
-          currentGesture: mostCommon,
-          confidence,
-          handVisible: true,
+        gestureHistory.current.forEach((g) => {
+          counts[g] = (counts[g] || 0) + 1;
+          if (counts[g] > maxCount) {
+            maxCount = counts[g];
+            mostCommon = g;
+          }
         });
 
-        // Trigger actions based on gesture
-        const now = Date.now();
-        if (now - lastGestureTime.current > 1500) {
-          // Debounce 1.5 seconds
-          lastGestureTime.current = now;
-          setGestureDetected(mostCommon);
+        const confidence = maxCount / gestureHistory.current.length;
 
-          // Handle gesture actions
-          const gesture = mostCommon as GestureType;
-          if (gesture === "open_palm") {
-            setState("listening");
-          } else if (gesture === "closed_fist") {
-            setState("sleep");
-          } else if (gesture === "two_finger_point") {
-            setState("listening");
-          } else if (gesture === "thumbs_up") {
-            // Confirm last action
+        // Only update if confidence is high enough
+        if (confidence > 0.6) {
+          setGestureState({
+            currentGesture: mostCommon,
+            confidence,
+            handVisible: true,
+          });
+
+          // Trigger actions based on gesture
+          const now = Date.now();
+          if (now - lastGestureTime.current > 1500) {
+            // Debounce 1.5 seconds
+            lastGestureTime.current = now;
+            setGestureDetected(mostCommon);
+
+            // Handle gesture actions. (The cast matters: `mostCommon` is
+            // assigned inside a callback, so TypeScript still narrows it to
+            // its initializer and would reject these comparisons.)
+            const gesture = mostCommon as GestureType;
+            if (gesture === "open_palm") {
+              setState("listening");
+            } else if (gesture === "closed_fist") {
+              setState("sleep");
+            } else if (gesture === "two_finger_point") {
+              setState("listening");
+            } else if (gesture === "thumbs_up") {
+              // Confirm last action
+            }
           }
         }
+      } else {
+        setGestureState((prev) => ({ ...prev, handVisible: false }));
+        gestureHistory.current = [];
       }
-    } else {
-      setGestureState((prev) => ({ ...prev, handVisible: false }));
-      gestureHistory.current = [];
-    }
-  }, [setState, setGestureDetected]);
+    },
+    [setState, setGestureDetected]
+  );
 
-  // Initialize MediaPipe Hands — legacy packages load as plain CDN scripts
-  // (webpack-bundling them corrupts the WASM glue).
+  useHandControl({ enabled, onFrame });
+
+  // Nothing to tear down here: the shared engine is refcounted by the hook,
+  // and the previous version's camera teardown (which closed the legacy
+  // runtime and bricked it for every other consumer) is exactly what we are
+  // no longer doing.
   useEffect(() => {
-    if (!enabled || !videoRef.current) return;
-    let cancelled = false;
-
-    (async () => {
-      try {
-        const HandsCtor = (await loadHandsClass()) as unknown as new (config: {
-          locateFile: (file: string) => string;
-        }) => Hands;
-        const hands = new HandsCtor({
-          locateFile: (file) => `/mediapipe/hands/${file}`,
-        });
-
-        hands.setOptions({
-          maxNumHands: 1,
-          modelComplexity: 1,
-          minDetectionConfidence: 0.5,
-          minTrackingConfidence: 0.5,
-        });
-
-        hands.onResults(onResults);
-        handsRef.current = hands;
-
-        const CameraCtor = (await loadCameraClass()) as unknown as new (
-          videoEl: HTMLVideoElement,
-          config: { onFrame: () => Promise<void>; width?: number; height?: number }
-        ) => Camera;
-        const camera = new CameraCtor(videoRef.current!, {
-          onFrame: async () => {
-            if (videoRef.current) await hands.send({ image: videoRef.current });
-          },
-          width: 320,
-          height: 240,
-        });
-
-        cameraRef.current = camera;
-        if (!cancelled) await camera.start();
-      } catch (err) {
-        console.error("[Gesture] init failed:", err);
-      }
-    })();
-
+    if (!enabled) return;
     return () => {
-      cancelled = true;
-      cameraRef.current?.stop();
-      cameraRef.current = null;
-      handsRef.current?.close();
-      handsRef.current = null;
+      gestureHistory.current = [];
     };
-  }, [enabled, videoRef, onResults]);
+  }, [enabled]);
 
   return gestureState;
 }

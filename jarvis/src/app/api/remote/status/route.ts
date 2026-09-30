@@ -28,7 +28,9 @@ export async function GET() {
   let broker = g.__jarvisRemoteBroker;
   if (broker === undefined) {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      // Runtime require on purpose: native .cjs, must not be bundled. (The
+      // @typescript-eslint disable comment that used to sit here referenced
+      // an uninstalled plugin and broke `next build`.)
       const mod = require("@/lib/os/remoteBroker.cjs") as BrokerModule;
       // Fire and forget — the broker is meant to stay up for the session.
       mod.startBroker();

@@ -1,10 +1,5 @@
 import { useJarvisStore } from "@/store/jarvis.store";
 
-const SpeechRecognitionAPI =
-  typeof window !== "undefined"
-    ? (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
-    : null;
-
 // Wake word logic separated for purity
 export function checkWakeWord(text: string): boolean {
   const lowerText = text.toLowerCase().trim();
@@ -65,13 +60,18 @@ export class VoiceEngine {
     onWakeWord: () => {},
     onError: () => {},
   };
-  
+
   // States
   public isRunning: boolean = false;
   private isIntentionallyStopped: boolean = false;
   private isTTSPlaying: boolean = false;
   private restartTimeout: any = null;
   private listeningStartTime: number = 0;
+  // Tracks whether the underlying recognition session has actually started
+  private didStart: boolean = false;
+  // Exponential back-off for repeated failures
+  private failCount: number = 0;
+  private MAX_RESTART_DELAY_MS = 8000;
 
   private constructor() {
     this.init();
@@ -88,13 +88,19 @@ export class VoiceEngine {
     this.callbacks = callbacks;
   }
 
+  private getSpeechAPI() {
+    if (typeof window === "undefined") return null;
+    return (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition || null;
+  }
+
   private init() {
-    if (!SpeechRecognitionAPI) {
-      this.callbacks.onError("Speech Recognition not supported in this browser.");
+    const API = this.getSpeechAPI();
+    if (!API) {
+      console.warn("[VoiceEngine] SpeechRecognition not available yet, will retry on start()");
       return;
     }
 
-    this.recognition = new SpeechRecognitionAPI();
+    this.recognition = new API();
     this.recognition.lang = "en-US";
     this.recognition.continuous = true;
     this.recognition.interimResults = true;
@@ -110,30 +116,80 @@ export class VoiceEngine {
     });
 
     this.recognition.onstart = () => {
-      console.log("[VoiceEngine] Hardware Mic Started");
+      console.log("[VoiceEngine] ✅ Hardware Mic Started");
       this.isRunning = true;
+      this.didStart = true;
+      this.failCount = 0; // reset back-off on successful start
       useJarvisStore.getState().setIsListening(true);
     };
 
     this.recognition.onend = () => {
-      console.log("[VoiceEngine] Hardware Mic Stopped");
+      console.log("[VoiceEngine] Hardware Mic Stopped (didStart=" + this.didStart + ")");
       this.isRunning = false;
+      this.didStart = false;
       useJarvisStore.getState().setIsListening(false);
 
-      // Auto-restart logic
+      // Auto-restart logic — skip if intentionally stopped or muted
       if (!this.isIntentionallyStopped && !useJarvisStore.getState().isMuted) {
-        console.log("[VoiceEngine] Auto-restarting...");
+        // Exponential back-off: 300ms → 600 → 1200 → ... → MAX
+        const delay = Math.min(300 * Math.pow(2, this.failCount), this.MAX_RESTART_DELAY_MS);
+        console.log(`[VoiceEngine] Auto-restarting in ${delay}ms (attempt ${this.failCount + 1})`);
+        if (this.restartTimeout) clearTimeout(this.restartTimeout);
         this.restartTimeout = setTimeout(() => {
           this.start();
-        }, 300);
+        }, delay);
       }
     };
 
     this.recognition.onerror = (event: any) => {
-      console.error("[VoiceEngine] Error:", event.error);
-      if (event.error === "not-allowed") {
-        this.callbacks.onError("Microphone permission denied.");
-        this.isIntentionallyStopped = true;
+      const err: string = event.error;
+      console.error("[VoiceEngine] Error:", err);
+
+      switch (err) {
+        case "not-allowed":
+        case "service-not-allowed":
+          // Mic permission denied — show error but DON'T permanently latch.
+          // User may grant permission later via browser settings; they can
+          // call reset() or just toggle alwaysListening to recover.
+          this.callbacks.onError(
+            "Microphone permission denied. Please allow microphone access in your browser settings, then refresh."
+          );
+          this.isIntentionallyStopped = true;
+          // Schedule a soft-reset after 5s so the engine will try again
+          // when the user re-enables the toggle or grants permission.
+          setTimeout(() => {
+            if (this.isIntentionallyStopped) {
+              console.log("[VoiceEngine] Soft-reset after permission error — will retry next start()");
+              this.isIntentionallyStopped = false;
+              this.failCount = 0;
+            }
+          }, 5000);
+          break;
+
+        case "aborted":
+          // Benign — browser aborted the session (tab switch, new session, etc.)
+          // onend will fire and handle the restart. Don't increment failCount.
+          console.log("[VoiceEngine] Session aborted (benign), will auto-restart via onend");
+          break;
+
+        case "audio-capture":
+          // Mic hardware failure / no default input device
+          this.callbacks.onError("No microphone detected. Please connect a microphone and try again.");
+          this.failCount++;
+          break;
+
+        case "network":
+          // Chrome's remote speech endpoint is unavailable — back off
+          this.failCount++;
+          break;
+
+        case "no-speech":
+          // Normal — silence detected, session ended. onend handles restart.
+          break;
+
+        default:
+          this.failCount++;
+          break;
       }
     };
 
@@ -182,21 +238,52 @@ export class VoiceEngine {
 
   public start() {
     this.isIntentionallyStopped = false;
-    if (this.isRunning || !this.recognition) return;
+
+    // Lazy-init if init() was called too early (SSR / before window existed)
+    if (!this.recognition) {
+      this.init();
+      if (!this.recognition) {
+        console.warn("[VoiceEngine] SpeechRecognition still not available, cannot start");
+        return;
+      }
+    }
+
+    if (this.isRunning) return;
+
     try {
       this.recognition.start();
-    } catch (e) {
-      console.warn("[VoiceEngine] Start failed:", e);
+      console.log("[VoiceEngine] recognition.start() called");
+    } catch (e: any) {
+      // "InvalidStateError: recognition already started" — ignore
+      if (e?.name !== "InvalidStateError") {
+        console.warn("[VoiceEngine] Start failed:", e);
+        this.failCount++;
+      }
     }
   }
 
   public stop() {
     this.isIntentionallyStopped = true;
-    if (this.restartTimeout) clearTimeout(this.restartTimeout);
+    if (this.restartTimeout) {
+      clearTimeout(this.restartTimeout);
+      this.restartTimeout = null;
+    }
     if (!this.isRunning || !this.recognition) return;
     try {
       this.recognition.stop();
     } catch (e) {}
+  }
+
+  /** Hard-reset: re-create the recognition object entirely (useful after permission grant) */
+  public reset() {
+    this.stop();
+    this.isIntentionallyStopped = false;
+    this.isRunning = false;
+    this.didStart = false;
+    this.failCount = 0;
+    this.recognition = null;
+    this.init();
+    console.log("[VoiceEngine] Hard reset complete");
   }
 
   public pauseForTTS() {

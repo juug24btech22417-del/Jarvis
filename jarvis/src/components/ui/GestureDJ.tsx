@@ -19,16 +19,19 @@ import {
   onVisionLockChange,
 } from "@/lib/visionLock";
 
-// Tuned for real-world tracking: MediaPipe lite runs ~15-25fps with jitter,
-// so thresholds are lenient (a slow medium-speed swipe should register) and
-// cooldowns prevent double-fires.
-const SWIPE_VEL = 0.35; // normalized x units/sec (was 0.55 — too strict)
-const SWIPE_MIN_TRAVEL = 0.1; // and at least this far in x
+// Tuned for real-world tracking. THE CORE RULE: a STILL fist pauses, a
+// MOVING fist swipes — motion blur during a swipe momentarily spikes the
+// fist metric, and the old code let the pause timer accumulate through it
+// ("every swipe paused the music"). The pause now only accrues while the
+// hand is genuinely stationary (fist speed below SWIPE_VEL), and any
+// qualifying swipe cancels a pending pause.
+const SWIPE_VEL = 0.5; // normalized x units/sec — deliberate swipe speed
+const SWIPE_MIN_TRAVEL = 0.11; // and at least this far in x
 const SWIPE_COOLDOWN_MS = 500;
-const SWIPE_TRAIL_MS = 320; // velocity window — must span several frames
-const FIST_ON = 0.65;
-const FIST_OFF = 0.5; // hysteresis
-const FIST_HOLD_MS = 280; // hold this long to toggle
+const SWIPE_TRAIL_MS = 300; // velocity window — must span several frames
+const FIST_ON = 0.55; // loose fist counts (min-based metric)
+const FIST_OFF = 0.38; // hysteresis
+const FIST_HOLD_MS = 500; // hold STILL this long to toggle (350ms armed during swipe wind-up → pause+next double-fire = "track changes but stays paused")
 const FIST_COOLDOWN_MS = 700;
 const DEADMAN_MS = 800; // hand lost → abort any pending gesture
 
@@ -46,15 +49,23 @@ export default function GestureDJ() {
 
   // Fist state
   const fistDown = useRef(false);
-  const fistSince = useRef<number | null>(null);
+  const fistSince = useRef<number | null>(null); // set only while STILL
   const lastFistFire = useRef(0);
+  const lastPauseAt = useRef(0); // swipes are suppressed briefly after a pause
+  const fistSeenOpen = useRef(true); // after a swipe, a closed fist must release once before it can pause
 
-  const fire = useCallback((action: "next" | "prev" | "play-pause") => {
-    fetch("/api/os/media", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action }),
-    }).catch(() => {});
+  const fire = useCallback(async (action: "next" | "prev" | "play-pause") => {
+    try {
+      const res = await fetch("/api/os/media", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (!j.success) setStatus(`media: ${j.error ?? "transport failed"}`);
+    } catch {
+      setStatus("media transport unreachable");
+    }
     setFlash({ icon: action === "next" ? "next" : action === "prev" ? "prev" : "toggle", ts: Date.now() });
   }, []);
 
@@ -76,11 +87,28 @@ export default function GestureDJ() {
       }
       lastSeen.current = now;
 
-      // ── Fist → play/pause (with hold time + hysteresis) ──
-      if (!fistDown.current && f.fist > FIST_ON && now - lastFistFire.current > FIST_COOLDOWN_MS) {
+      // ── Swipe → next/prev (velocity over a short trail) ──
+      trail.current.push({ x: f.x, t: now });
+      while (trail.current.length > 2 && now - trail.current[0].t > SWIPE_TRAIL_MS) {
+        trail.current.shift();
+      }
+      let fistSpeed = 0;
+      if (trail.current.length >= 2) {
+        const first = trail.current[0];
+        const last = trail.current[trail.current.length - 1];
+        const dt = (last.t - first.t) / 1000;
+        if (dt > 0.02) fistSpeed = Math.abs(last.x - first.x) / dt;
+      }
+
+      // ── Fist → play/pause — ONLY while the fist is still ──
+      if (f.fist < FIST_OFF) fistSeenOpen.current = true;
+      if (!fistDown.current && f.fist > FIST_ON && fistSeenOpen.current && fistSpeed < SWIPE_VEL && now - lastFistFire.current > FIST_COOLDOWN_MS) {
         fistDown.current = true;
         fistSince.current = now;
-      } else if (fistDown.current && f.fist < FIST_OFF) {
+        fistSeenOpen.current = false;
+      } else if (fistDown.current && (f.fist < FIST_OFF || fistSpeed >= SWIPE_VEL)) {
+        // Opened the hand, or the fist started moving (that's a swipe —
+        // cancel the pause instead of firing it).
         fistDown.current = false;
         fistSince.current = null;
       }
@@ -88,19 +116,21 @@ export default function GestureDJ() {
         fistDown.current = false;
         fistSince.current = null;
         lastFistFire.current = now;
+        lastPauseAt.current = now; // a pause just fired — swallow the trailing swipe
+        trail.current = []; // a fresh pause shouldn't leave stale trail velocity
         fire("play-pause");
         setStatus("fist → play/pause");
         return;
       }
 
-      // ── Swipe → next/prev (velocity over a short trail) ──
-      trail.current.push({ x: f.x, t: now });
-      while (trail.current.length > 2 && now - trail.current[0].t > SWIPE_TRAIL_MS) {
-        trail.current.shift();
-      }
-      // Swipe fires with a mostly-open hand; only a confirmed held fist
-      // (play/pause) suppresses it.
-      if (trail.current.length >= 2 && now - lastSwipe.current > SWIPE_COOLDOWN_MS && f.fist < 0.9) {
+      // ── Swipe fires even with a closed hand — the speed gate above is
+      // what separates the two intents now. A qualifying swipe also cancels
+      // any pause that was still counting.
+      if (
+        trail.current.length >= 2 &&
+        now - lastSwipe.current > SWIPE_COOLDOWN_MS &&
+        now - lastPauseAt.current > 800
+      ) {
         const first = trail.current[0];
         const last = trail.current[trail.current.length - 1];
         const dt = (last.t - first.t) / 1000;
@@ -110,6 +140,9 @@ export default function GestureDJ() {
           if (Math.abs(vel) > SWIPE_VEL && travel > SWIPE_MIN_TRAVEL) {
             lastSwipe.current = now;
             trail.current = [];
+            fistDown.current = false;
+            fistSince.current = null;
+            fistSeenOpen.current = false; // swiped with a closed hand → must open before pausing
             if (vel > 0) {
               fire("next");
               setStatus("swipe → next track");

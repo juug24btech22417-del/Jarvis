@@ -1,0 +1,2 @@
+[29/9/2026, 9:04:53 pm]
+Open the recipe page (step openRecipe) and copy the ingredient list here.

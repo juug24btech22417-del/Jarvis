@@ -213,9 +213,14 @@ h1, h2, h3, h4, h5, h6, p, span, div {
   outline: none;
 }
 
+/* A box-shadow ring follows the element's own border-radius, so pills and
+   round buttons stay round when focused — an outline draws a square. */
 *:focus-visible {
-  outline: 1px solid var(--reactor-core);
+  outline: 2px solid transparent;
   outline-offset: 2px;
+  box-shadow:
+    0 0 0 2px var(--reactor-core)66,
+    0 0 16px var(--reactor-core)44;
 }
 
 /* === TYPEWRITER === */
@@ -723,4 +728,53 @@ html[data-theme="quantum"] .reactor-glow {
 }
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: rgba(0, 212, 255, 0.4);
+}
+
+/* ═══ Avengers Assemble — cinematic grade ═══ */
+
+/* Animated film grain: the SVG turbulence background is tiled and jittered
+   in discrete steps so it reads as real emulsion grain, not a drifting
+   texture. Kept cheap (transform only, GPU-composited). */
+@keyframes cineGrain {
+  0%   { transform: translate3d(0, 0, 0); }
+  20%  { transform: translate3d(-3%, 2%, 0); }
+  40%  { transform: translate3d(2%, -3%, 0); }
+  60%  { transform: translate3d(-2%, -2%, 0); }
+  80%  { transform: translate3d(3%, 1%, 0); }
+  100% { transform: translate3d(0, 0, 0); }
+}
+.cine-grain {
+  animation: cineGrain 0.55s steps(5) infinite;
+  mix-blend-mode: overlay;
+  will-change: transform;
+}
+
+/* Speed lines rushing inward during the portal — rotate + punch-scale the
+   radial conic gradient so the streaks feel like they are converging. */
+@keyframes cineSpeedlines {
+  0%   { transform: scale(1.6) rotate(0deg); opacity: 0.0; }
+  25%  { opacity: 0.9; }
+  100% { transform: scale(0.7) rotate(24deg); opacity: 0; }
+}
+.cine-speedlines {
+  animation: cineSpeedlines 1.1s linear infinite;
+  transform-origin: 50% 50%;
+  will-change: transform, opacity;
+}
+
+/* Underline pulse under the kinetic title. */
+@keyframes cineUnderline {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+.cine-sublinetext {
+  animation: cineUnderline 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cine-grain,
+  .cine-speedlines,
+  .cine-sublinetext {
+    animation: none;
+  }
 }

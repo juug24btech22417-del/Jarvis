@@ -63,6 +63,11 @@ export function useAudioReactivity() {
     consumers++;
     if (!poller) {
       poller = setInterval(async () => {
+        // Tab hidden (and no PiP window keeping it audible): skip the poll.
+        // The server keeps metering, so the envelope history is intact when
+        // the tab returns — this just stops burning 25 fetches/sec for
+        // animations nobody can see.
+        if (document.hidden) return;
         // Never overlap requests: concurrent responses can land out of order
         // and one would rewind the timeline the other just advanced.
         if (inFlight) return;

@@ -243,10 +243,10 @@ export default function StatusHUD() {
         <div />
 
         {/* Right side - System indicators (clickable) */}
-        <div className="flex items-center gap-4 pointer-events-auto">
-          {/* Quick Stats Preview */}
+        <div className="flex items-center gap-2 sm:gap-4 pointer-events-auto">
+          {/* Quick Stats Preview: hide on mobile screens */}
           <div
-            className="flex items-center gap-3"
+            className="hidden sm:flex items-center gap-3"
             title="System diagnostics (see right panel)"
           >
             {/* CPU — word instead of icon */}
@@ -289,8 +289,8 @@ export default function StatusHUD() {
             )}
           </div>
           
-          {/* Autonomous Status Indicators */}
-          <div className="flex items-center gap-3">
+          {/* Autonomous Status Indicators: hide on small mobile */}
+          <div className="hidden sm:flex items-center gap-3">
             <button
               onClick={() => setSentinelActive(!sentinelActive)}
               title={sentinelActive ? "Sentinel Eyes: ACTIVE — click to toggle" : "Sentinel Eyes: OFFLINE — click to toggle"}
@@ -355,8 +355,8 @@ export default function StatusHUD() {
             </AnimatePresence>
           </div>
 
-          {/* Network — live strength from the Network Information API */}
-          <div className="flex items-center gap-1.5" title="Network strength">
+          {/* Network — live strength from the Network Information API: hide on mobile */}
+          <div className="hidden md:flex items-center gap-1.5" title="Network strength">
             <Wifi className="w-4 h-4 text-text-secondary" />
             {netStrength !== null && (
               <span className="font-rajdhani text-xs font-semibold text-text-secondary">
@@ -366,9 +366,9 @@ export default function StatusHUD() {
             )}
           </div>
 
-          {/* System uptime */}
+          {/* System uptime: hide on mobile/tablet */}
           {pcStats?.uptime != null && (
-            <div className="flex items-center gap-1.5" title="System uptime">
+            <div className="hidden lg:flex items-center gap-1.5" title="System uptime">
               <Clock className="w-4 h-4 text-text-secondary" />
               <span className="font-rajdhani text-xs font-semibold text-white/95 tabular-nums">
                 {formatUptime(pcStats.uptime)}

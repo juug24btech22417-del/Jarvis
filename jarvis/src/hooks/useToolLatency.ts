@@ -29,7 +29,7 @@ const INTERVAL_MS = 45_000;
 const PROBE_TIMEOUT_MS = 8_000;
 
 const TOOLS: Array<{ id: string; label: string; color: string; probe: string }> = [
-  { id: "vision",    label: "VISION",     color: "#8FDDB8", probe: "/api/os" },
+  { id: "vision",    label: "VISION",     color: "#8FDDB8", probe: "/api/os/input" },
   { id: "playwright",label: "PLAYWRIGHT", color: "#9BB8E8", probe: "/api/playwright" },
   { id: "firecrawl", label: "FIRECRAWL",  color: "#E8B98A", probe: "/api/firecrawl" },
   { id: "composio",  label: "COMPOSIO",   color: "#F0A8C0", probe: "/api/composio" },

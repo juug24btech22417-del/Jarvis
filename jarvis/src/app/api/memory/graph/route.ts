@@ -1,223 +1,128 @@
-// Knowledge Graph API - CRUD operations for entities and relationships
-import { NextResponse } from "next/server";
+// Second Brain — memory graph API.
+//
+// GET  ?includeArchived=1&limit=1200 → { nodes, links, stats }
+// POST { action: "pin"|"unpin"|"forget"|"restore"|"reinforce"|"cue", id, cue? }
+//
+// "forget" is a soft archive (the memory leaves the constellation and stops
+// decaying into your prompts) — nothing is deleted, so it stays restorable.
+
+import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/queries";
-import {
-  addEntity,
-  addRelationship,
-  findEntityByName,
-  getEntityRelationships,
-  findConnectedEntities,
-  traverseGraph,
-  searchEntities,
-  queryEntitiesByType,
-  deleteEntity,
-  deleteRelationship,
-  getGraphStats,
-  bumpUsage,
-  pinEntity,
-  setCue,
-  archiveStale,
-  recomputeAllStrengths,
-  getDecayStats,
-  EntityType,
-} from "@/lib/memory/graph";
+import { bumpUsage, pinEntity, setCue } from "@/lib/memory/graph";
 
-export async function GET(request: Request) {
+export async function GET(req: NextRequest) {
+  const includeArchived = req.nextUrl.searchParams.get("includeArchived") === "1";
+  const limit = Math.min(Math.max(Number(req.nextUrl.searchParams.get("limit")) || 1200, 50), 3000);
+
   try {
-    const { searchParams } = new URL(request.url);
-    const action = searchParams.get("action");
+    const entities = await prisma.entity.findMany({
+      where: includeArchived ? {} : { archived: false },
+      select: {
+        id: true,
+        name: true,
+        type: true,
+        description: true,
+        strength: true,
+        pinned: true,
+        archived: true,
+        accessCount: true,
+        createdAt: true,
+      },
+      orderBy: [{ pinned: "desc" }, { strength: "desc" }],
+      take: limit,
+    });
 
-    // Get graph statistics
-    if (action === "stats") {
-      const stats = await getGraphStats();
-      return NextResponse.json(stats);
-    }
+    const ids = new Set(entities.map((e) => e.id));
+    const relationships = await prisma.relationship.findMany({
+      where: { strength: { gte: 0.1 } },
+      select: { sourceId: true, targetId: true, type: true, strength: true },
+      take: 6000,
+    });
 
-    // Search entities
-    if (action === "search") {
-      const query = searchParams.get("q") || "";
-      const limit = parseInt(searchParams.get("limit") || "10");
-      const results = await searchEntities(query, limit);
-      return NextResponse.json({ results });
-    }
+    const links = relationships
+      .filter((r) => ids.has(r.sourceId) && ids.has(r.targetId))
+      .map((r) => ({ source: r.sourceId, target: r.targetId, type: r.type, strength: r.strength }));
 
-    // Get entities by type
-    if (action === "by-type") {
-      const type = searchParams.get("type") as EntityType;
-      const limit = parseInt(searchParams.get("limit") || "50");
-      if (!type) {
-        return NextResponse.json({ error: "type parameter required" }, { status: 400 });
-      }
-      const entities = await queryEntitiesByType(type, { limit });
-      return NextResponse.json({ entities });
-    }
+    const byType: Record<string, number> = {};
+    for (const e of entities) byType[e.type] = (byType[e.type] ?? 0) + 1;
+    // Forgotten memories are filtered out of the node list, so count them
+    // straight from the table for an honest stat.
+    const archivedCount = await prisma.entity.count({ where: { archived: true } });
 
-    // Get entity by name
-    if (action === "entity") {
-      const name = searchParams.get("name") || "";
-      if (!name) {
-        return NextResponse.json({ error: "name parameter required" }, { status: 400 });
-      }
-      const entity = await findEntityByName(name);
-      if (!entity) {
-        return NextResponse.json({ error: "Entity not found" }, { status: 404 });
-      }
-      return NextResponse.json({ entity });
-    }
-
-    // Get relationships for an entity
-    if (action === "relationships") {
-      const entityId = searchParams.get("id") || "";
-      const limit = parseInt(searchParams.get("limit") || "20");
-      if (!entityId) {
-        return NextResponse.json({ error: "id parameter required" }, { status: 400 });
-      }
-      const relationships = await getEntityRelationships(entityId, { limit });
-      return NextResponse.json({ relationships });
-    }
-
-    // Find connected entities
-    if (action === "connected") {
-      const entityId = searchParams.get("id") || "";
-      const relationshipType = searchParams.get("type") || undefined;
-      if (!entityId) {
-        return NextResponse.json({ error: "id parameter required" }, { status: 400 });
-      }
-      const connected = await findConnectedEntities(entityId, relationshipType, { limit: 20 });
-      return NextResponse.json({ connected });
-    }
-
-    // Traverse graph from an entity
-    if (action === "traverse") {
-      const entityId = searchParams.get("id") || "";
-      const maxHops = parseInt(searchParams.get("hops") || "2");
-      if (!entityId) {
-        return NextResponse.json({ error: "id parameter required" }, { status: 400 });
-      }
-      const results = await traverseGraph(entityId, maxHops);
-      return NextResponse.json({ results });
-    }
-
-    // Tier 1A: decay stats (vivid / fresh / fading / dim / archived)
-    if (action === "decay-stats") {
-      const stats = await getDecayStats();
-      return NextResponse.json(stats);
-    }
-
-    return NextResponse.json({ error: "Unknown action" }, { status: 400 });
-  } catch (error) {
-    console.error("[Graph API] GET error:", error);
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 }
-    );
+    return NextResponse.json({
+      nodes: entities.map((e) => ({
+        id: e.id,
+        name: e.name,
+        type: e.type,
+        description: e.description,
+        strength: e.strength,
+        pinned: e.pinned,
+        archived: e.archived,
+        accessCount: e.accessCount,
+        createdAt: e.createdAt.getTime(),
+      })),
+      links,
+      stats: {
+        total: entities.length,
+        links: links.length,
+        pinned: entities.filter((e) => e.pinned).length,
+        archived: archivedCount,
+        byType,
+      },
+    });
+  } catch (e) {
+    return NextResponse.json({ error: (e as Error).message }, { status: 500 });
   }
 }
 
-export async function POST(request: Request) {
+export async function POST(req: NextRequest) {
+  let body: Record<string, unknown> = {};
   try {
-    const body = await request.json();
-    const { action, entity, relationship, entityId, relationshipId } = body;
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+  }
 
-    // Add new entity
-    if (action === "add-entity") {
-      const { name, type, description, metadata, encryptedMetadata } = entity;
-      if (!name || !type) {
-        return NextResponse.json({ error: "name and type required" }, { status: 400 });
+  const action = typeof body.action === "string" ? body.action : "";
+  const id = typeof body.id === "string" ? body.id : "";
+  if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
+
+  try {
+    switch (action) {
+      case "pin":
+        await pinEntity(id, true);
+        break;
+      case "unpin":
+        await pinEntity(id, false);
+        break;
+      case "reinforce":
+        await bumpUsage([id], 0.25);
+        break;
+      case "cue": {
+        const cue = typeof body.cue === "string" ? body.cue.slice(0, 200) : null;
+        await setCue(id, cue);
+        break;
       }
-      const id = await addEntity({ name, type, description, metadata, encryptedMetadata });
-      return NextResponse.json({ success: true, id, message: `Entity "${name}" created` });
-    }
-
-    // Add relationship
-    if (action === "add-relationship") {
-      const { sourceId, targetId, type, strength, metadata, encryptedMetadata } = relationship;
-      if (!sourceId || !targetId || !type) {
-        return NextResponse.json({ error: "sourceId, targetId, and type required" }, { status: 400 });
+      case "forget": {
+        // Soft archive: gone from the constellation, restorable, and it stops
+        // being surfaced in retrieval.
+        await prisma.entity.update({
+          where: { id },
+          data: { archived: true, strength: 0.05, pinned: false },
+        });
+        break;
       }
-      const id = await addRelationship({ sourceId, targetId, type, strength, metadata, encryptedMetadata });
-      return NextResponse.json({ success: true, id, message: `Relationship created` });
+      case "restore":
+        await prisma.entity.update({
+          where: { id },
+          data: { archived: false, strength: 0.6, lastAccessed: new Date() },
+        });
+        break;
+      default:
+        return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });
     }
-
-    // Delete entity
-    if (action === "delete-entity") {
-      if (!entityId) {
-        return NextResponse.json({ error: "entityId required" }, { status: 400 });
-      }
-      await deleteEntity(entityId);
-      return NextResponse.json({ success: true, message: "Entity deleted" });
-    }
-
-    // Delete relationship
-    if (action === "delete-relationship") {
-      if (!relationshipId) {
-        return NextResponse.json({ error: "relationshipId required" }, { status: 400 });
-      }
-      await deleteRelationship(relationshipId);
-      return NextResponse.json({ success: true, message: "Relationship deleted" });
-    }
-
-    // Tier 1A: bulk reinforcement (used by chat after a successful retrieval)
-    if (action === "bump-usage") {
-      const { ids, delta } = body;
-      if (!Array.isArray(ids) || ids.length === 0) {
-        return NextResponse.json({ error: "ids array required" }, { status: 400 });
-      }
-      const result = await bumpUsage(ids, typeof delta === "number" ? delta : 0.15);
-      return NextResponse.json({ success: true, ...result });
-    }
-
-    // Tier 1A: pin / unpin
-    if (action === "pin") {
-      const { id, pinned } = body;
-      if (!id || typeof pinned !== "boolean") {
-        return NextResponse.json({ error: "id and pinned required" }, { status: 400 });
-      }
-      await pinEntity(id, pinned);
-      return NextResponse.json({ success: true });
-    }
-
-    // Tier 1A: set retrieval cue
-    if (action === "set-cue") {
-      const { id, cue } = body;
-      if (!id) {
-        return NextResponse.json({ error: "id required" }, { status: 400 });
-      }
-      await setCue(id, typeof cue === "string" ? cue : null);
-      return NextResponse.json({ success: true });
-    }
-
-    // Tier 1A: archive a single entity
-    if (action === "archive") {
-      const { id } = body;
-      if (!id) {
-        return NextResponse.json({ error: "id required" }, { status: 400 });
-      }
-      await prisma.entity.update({
-        where: { id },
-        data: { archived: true },
-      });
-      return NextResponse.json({ success: true });
-    }
-
-    // Tier 1A: sweep all stale entities (intended for cron)
-    if (action === "archive-stale") {
-      const result = await archiveStale();
-      return NextResponse.json({ success: true, ...result });
-    }
-
-    // Tier 1A: recompute every entity's cached strength (after imports/restores)
-    if (action === "recompute-strengths") {
-      const result = await recomputeAllStrengths();
-      return NextResponse.json({ success: true, ...result });
-    }
-
-    return NextResponse.json({ error: "Unknown action" }, { status: 400 });
-  } catch (error) {
-    console.error("[Graph API] POST error:", error);
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: true, action, id });
+  } catch (e) {
+    return NextResponse.json({ error: (e as Error).message }, { status: 500 });
   }
 }

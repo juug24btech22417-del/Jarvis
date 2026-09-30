@@ -15,6 +15,24 @@
 export async function register() {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
 
+  // ── Audio meter warmup (fire-and-forget) ──
+  // The music-reactive reactor polls /api/system/audio; the first poll used
+  // to spawn a cold PowerShell/WASAPI meter process mid-session, so the
+  // equalizer lagged several seconds behind the music after every server
+  // restart. Touching the endpoint at boot (same pattern as the watcher
+  // heartbeat — an HTTP self-call keeps node-only imports out of this file,
+  // which webpack compiles for the edge runtime too) makes the first poll
+  // instant.
+  setTimeout(
+    () =>
+      void fetch("http://localhost:3000/api/system/audio")
+        .then(() => console.log("[AudioMeterWarmup] meter warmed via API"))
+        .catch(() => {
+          /* non-fatal — the meter self-starts on the first real poll */
+        }),
+    4000
+  );
+
   const tick = async () => {
     try {
       const res = await fetch("http://localhost:3000/api/browser/watch", {

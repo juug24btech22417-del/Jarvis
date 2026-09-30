@@ -3,6 +3,7 @@ import { useJarvisStore } from "@/store/jarvis.store";
 import { VoiceEngine } from "@/lib/VoiceEngine";
 import { VOICE_PROFILES, pickVoice, type PersonaId } from "@/lib/persona/voiceProfiles";
 
+
 // Simplified Voice Hook
 export function useVoice() {
   const [interimTranscript, setInterimTranscript] = useState("");
@@ -40,6 +41,8 @@ export function useVoice() {
     // Start engine if alwaysListening
     if (alwaysListening && !isMuted) {
       engine.start();
+    } else if (!alwaysListening || isMuted) {
+      engine.stop();
     }
 
     return () => {
@@ -71,7 +74,18 @@ export function useVoice() {
           animationFrameRef.current = requestAnimationFrame(tick);
         };
         tick();
-      } catch (e) { console.error("[Voice] Audio analysis failed:", e); }
+      } catch (e: any) {
+        const name = e?.name || "";
+        if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+          console.error("[Voice] Microphone permission denied for audio analysis:", e);
+          setInitError("Microphone permission denied. Please allow microphone access and refresh.");
+        } else if (name === "NotReadableError" || name === "TrackStartError") {
+          console.error("[Voice] Microphone hardware error:", e);
+          setInitError("Microphone is in use by another app or not readable. Please close other apps using the mic.");
+        } else {
+          console.error("[Voice] Audio analysis failed:", e);
+        }
+      }
     };
     run();
     return () => { cancelled = true; if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current); };
@@ -93,6 +107,22 @@ export function useVoice() {
     VoiceEngine.getInstance().start();
   }, []);
 
+  /** Hard-resets the voice engine — call after user grants mic permission */
+  const resetMic = useCallback(() => {
+    setInitError(null);
+    setIsSupported(true);
+    // Also clear the cached stream so audio analysis re-acquires it
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    if (audioContextRef.current) {
+      audioContextRef.current.close().catch(() => {});
+      audioContextRef.current = null;
+    }
+    VoiceEngine.getInstance().reset();
+  }, []);
+
   return {
     interimTranscript,
     finalTranscript,
@@ -101,6 +131,7 @@ export function useVoice() {
     stopListening,
     startListening,
     setFinalTranscript,
+    resetMic,
   };
 }
 
@@ -197,9 +228,11 @@ export function useJarvisVoice() {
     interimTranscript,
     finalTranscript,
     isSupported,
+    initError: micError,
     stopListening,
     startListening,
     setFinalTranscript,
+    resetMic,
   } = useVoice();
 
   // Speak "Yes, Boss?" only once when entering listening mode
@@ -245,6 +278,7 @@ export function useJarvisVoice() {
     interimTranscript,
     isSpeaking,
     isSupported,
+    micError,
     lastCommand,
     speak,
     startStreamingSpeak,
@@ -255,5 +289,6 @@ export function useJarvisVoice() {
     stopListening,
     startListening,
     hasSpokenRef,
+    resetMic,
   };
 }

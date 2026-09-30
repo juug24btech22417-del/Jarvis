@@ -24,6 +24,14 @@ export function pipWindow(): Window | null {
   return (window as unknown as { __jarvisPip?: Window | null }).__jarvisPip ?? null;
 }
 
+/** Is a Document-PiP window currently keeping the page "visible"? Tracking
+ * loops check this instead of document.hidden alone — with PiP open the
+ * page keeps rendering even when another app has focus, and without this
+ * check the loop would idle while PiP exists (defeating its whole purpose). */
+export function pipActive(): boolean {
+  return pipWindow() !== null;
+}
+
 /**
  * Open the always-on-top PiP window and move the given elements into it.
  * Elements are restored to their original spot when the PiP window closes.

@@ -1,43 +1,21 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Camera, CameraOff } from "lucide-react";
 import { useGesture, getGestureDisplayName, getGestureStyle } from "@/hooks/useGesture";
 import { useJarvisStore } from "@/store/jarvis.store";
 
 export default function GestureDetector() {
-  const videoRef = useRef<HTMLVideoElement>(null);
   const [enabled, setEnabled] = useState(false);
   const [showPreview, setShowPreview] = useState(true);
   const { gestureDetected, setGestureDetected } = useJarvisStore();
 
-  const gestureState = useGesture(videoRef, enabled);
-
-  const toggleCamera = async () => {
-    if (!enabled) {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: 320, height: 240 },
-        });
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-        }
-        setEnabled(true);
-      } catch (err) {
-        console.error("Camera access denied:", err);
-        alert("Camera access is required for gesture control");
-      }
-    } else {
-      // Stop camera
-      if (videoRef.current?.srcObject) {
-        const stream = videoRef.current.srcObject as MediaStream;
-        stream.getTracks().forEach((track) => track.stop());
-        videoRef.current.srcObject = null;
-      }
-      setEnabled(false);
-    }
-  };
+  // Gestures ride the SHARED hand engine (see useGesture) — this button just
+  // switches the recognizer on, it no longer opens a camera of its own. The
+  // old private getUserMedia was a second stream competing with air-mouse.
+  const gestureState = useGesture(enabled);
+  const toggleCamera = () => setEnabled((v) => !v);
 
   const { color, icon } = getGestureStyle(gestureState.currentGesture);
 
@@ -57,14 +35,6 @@ export default function GestureDetector() {
       >
         {enabled ? <Camera className="w-5 h-5" /> : <CameraOff className="w-5 h-5" />}
       </motion.button>
-
-      {/* Hidden video element for MediaPipe */}
-      <video
-        ref={videoRef}
-        className="hidden"
-        playsInline
-        muted
-      />
 
       {/* Gesture preview panel */}
       <AnimatePresence>

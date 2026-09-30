@@ -10,7 +10,7 @@
  */
 
 import { useState, useEffect } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import { Shield, ShieldCheck, ShieldAlert, Loader2 } from "lucide-react";
 import { useJarvisStore } from "@/store/jarvis.store";
 
@@ -18,31 +18,35 @@ type Phase = "idle" | "scanning" | "verified" | "intruder" | "pending";
 
 const PHASE_STYLE: Record<
   Exclude<Phase, "pending">,
-  { ring: string; text: string; glow: string; label: string }
+  { ring: string; text: string; glow: string; label: string; dot: string }
 > = {
   idle: {
     ring: "border-white/15",
     text: "text-white/50",
     glow: "0 0 0 rgba(0,0,0,0)",
     label: "SENTINEL · OFF",
+    dot: "bg-white/25",
   },
   scanning: {
     ring: "border-cyan-400/60",
     text: "text-cyan-300",
     glow: "0 0 18px rgba(6,182,212,0.45)",
-    label: "SENTINEL · SCAN",
+    label: "SENTINEL · SCANNING",
+    dot: "bg-cyan-400 shadow-[0_0_8px_#00f3ff]",
   },
   verified: {
     ring: "border-emerald-400/70",
     text: "text-emerald-300",
     glow: "0 0 22px rgba(34,197,94,0.55)",
     label: "SENTINEL · YOU",
+    dot: "bg-emerald-400 shadow-[0_0_8px_#34d399]",
   },
   intruder: {
     ring: "border-red-500/80",
     text: "text-red-400",
     glow: "0 0 26px rgba(239,68,68,0.65)",
     label: "⚠ INTRUDER",
+    dot: "bg-red-500 shadow-[0_0_8px_#ef4444]",
   },
 };
 
@@ -88,21 +92,21 @@ export default function SentinelArmToggle() {
   const style = phase === "pending" ? null : PHASE_STYLE[phase];
   const fall =
     phase === "pending"
-      ? { ring: "border-white/20", text: "text-white/40", glow: "none", label: "…" }
+      ? { ring: "border-white/20", text: "text-white/40", glow: "none", label: "SENTINEL · …", dot: "bg-white/30" }
       : style!;
 
+  // Dock button: a perfect circle, same footprint as its neighbours. The state
+  // that used to be spelled out beside the icon now lives in the tooltip, the
+  // ring colour and the status dot.
   return (
     <motion.button
       onClick={toggle}
-      whileHover={{ scale: 1.04 }}
-      whileTap={{ scale: 0.96 }}
-      className={`relative flex items-center gap-2.5 px-3.5 py-2 rounded-xl bg-black/50 backdrop-blur-md border ${fall.ring} transition-all duration-300 overflow-hidden group`}
-      style={{ boxShadow: fall.glow }}
-      title={
-        armed
-          ? "Sentinel Eyes ARMED — click to disarm"
-          : "Sentinel Eyes OFF — click to arm face security"
-      }
+      whileHover={{ scale: 1.08, y: -1 }}
+      whileTap={{ scale: 0.95 }}
+      aria-label={fall.label}
+      title={`${fall.label} — ${armed ? "click to disarm" : "click to arm face security"}`}
+      className={`relative w-11 h-11 aspect-square shrink-0 !rounded-full flex items-center justify-center overflow-hidden backdrop-blur-md border bg-[#061426]/90 group transition-all duration-300 outline-none focus:outline-none focus-visible:outline-none ${fall.ring}`}
+      style={{ boxShadow: fall.glow, borderRadius: "9999px" }}
     >
       {/* scanning sweep line */}
       {armed && phase !== "idle" && (
@@ -153,24 +157,8 @@ export default function SentinelArmToggle() {
         )}
       </div>
 
-      {/* label */}
-      <div className="flex flex-col items-start leading-none">
-        <AnimatePresence mode="wait">
-          <motion.span
-            key={fall.label}
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4 }}
-            transition={{ duration: 0.18 }}
-            className={`font-orbitron text-[10px] font-bold tracking-[0.18em] ${fall.text}`}
-          >
-            {fall.label}
-          </motion.span>
-        </AnimatePresence>
-        <span className="font-rajdhani text-[9px] text-white/35 tracking-wider mt-0.5">
-          {armed ? "TAP TO DISARM" : "TAP TO ARM"}
-        </span>
-      </div>
+      {/* status dot */}
+      <span className={`absolute top-1 right-1 w-2 h-2 rounded-full ring-2 ring-[#061426] ${fall.dot}`} />
     </motion.button>
   );
 }

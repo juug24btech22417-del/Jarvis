@@ -28,7 +28,30 @@ export type AgentStepKind =
   | "shell_command"
   | "vision_inspect"
   | "file_list"
-  | "file_open";
+  | "file_open"
+  // v5 — real browser agency (autonomous, LLM-driven)
+  | "browser_act"
+  | "browser_screenshot"
+  | "browser_login"
+  | "browser_replay"
+  // v5 — supervisor / specialist delegation
+  | "delegate"
+  // v5 — mission -> animated video brief
+  | "video_brief";
+
+/** Specialist a supervisor can delegate a sub-mission to. */
+export type SpecialistRole = "researcher" | "browser" | "writer" | "analyst";
+
+/** Planner-provided cost/risk preview shown before approval. */
+export interface PlanEstimate {
+  /** Weighted Firecrawl-equivalent credit cost. */
+  credits: number;
+  /** Rough wall-clock estimate in seconds. */
+  seconds: number;
+  risk: "low" | "medium" | "high";
+  /** Human-readable reasons the plan is risky (shown on the approve gate). */
+  riskReasons?: string[];
+}
 
 export interface AgentStep {
   id: string;
@@ -45,6 +68,45 @@ export interface AgentPlan {
   /** Short human label, e.g. "Research + summarize RAG evaluation papers". */
   summary: string;
   steps: AgentStep[];
+  /** Optional planner preview; recomputed/validated at plan time. */
+  estimate?: PlanEstimate;
+  /** True when the root planner decomposed into specialist sub-missions. */
+  supervisor?: boolean;
+}
+
+/** A concrete artifact produced by a mission (file, note, URL, image, report). */
+export interface MissionArtifact {
+  id: string;
+  kind: "file" | "note" | "url" | "image" | "report" | "video";
+  label: string;
+  /** Path, URL, or inline content depending on kind. */
+  value: string;
+  stepId?: string;
+  at: number;
+}
+
+/** One turn of the post-mission conversation. */
+export interface FollowupTurn {
+  role: "user" | "assistant";
+  content: string;
+  at: number;
+}
+
+/** A recorded browser action sequence that can be replayed later. */
+export interface BrowserRecording {
+  id: string;
+  name: string;
+  session: string;
+  startUrl: string;
+  steps: Array<{
+    kind: "navigate" | "click" | "fill" | "press" | "select" | "scroll" | "wait";
+    selector?: string;
+    value?: string;
+    url?: string;
+    label?: string;
+  }>;
+  createdAt: number;
+  runs: number;
 }
 
 export type JobStatus =
@@ -82,6 +144,25 @@ export interface AgentJob {
   creditsUsed?: number;
   /** Fast lane: mission ran without the manual approval gate (still abortable). */
   auto?: boolean;
+  /** True when the mission finished but at least one step errored/was skipped. */
+  partial?: boolean;
+  /** Concrete things the mission produced (for the artifacts panel + follow-ups). */
+  artifacts?: MissionArtifact[];
+  /** Post-mission conversation scoped to this job's artifacts. */
+  followups?: FollowupTurn[];
+  /** Supervisor sub-mission tree (role -> nested step results), for the UI. */
+  delegations?: Array<{
+    role: SpecialistRole;
+    goal: string;
+    status: "ok" | "error";
+    summary?: string;
+    steps: Array<{ id: string; title: string; kind: AgentStepKind; status: StepResult["status"] }>;
+    finishedAt: number;
+  }>;
+  /** Set when the panel requests cancellation so handlers can abort promptly. */
+  cancelRequested?: boolean;
+  /** Show the real Chromium window while autonomous browser steps run. */
+  watch?: boolean;
 
   // ── Runtime-only checkpoint state (functions/Maps never serialize) ──
   checkpointStepId?: string;
@@ -116,7 +197,54 @@ export const STEP_KIND_LABELS: Record<AgentStepKind, string> = {
   vision_inspect: "Vision check",
   file_list: "List files",
   file_open: "Open file",
+  browser_act: "Autonomous browser",
+  browser_screenshot: "Browser screenshot",
+  browser_login: "Browser sign-in",
+  browser_replay: "Replay recording",
+  delegate: "Delegate agent",
+  video_brief: "Video brief",
 };
+
+/** Specialist role labels + the step kinds each specialist may use. */
+export const SPECIALIST_KINDS: Record<SpecialistRole, AgentStepKind[]> = {
+  researcher: [
+    "firecrawl_search", "web_search", "web_scrape", "firecrawl_extract",
+    "deep_research", "llm_decide", "llm_summarize", "browser_act", "memory_store",
+  ],
+  browser: [
+    "browser_act", "browser_screenshot", "browser_login", "browser_replay",
+    "playwright_action", "browser_open", "vision_inspect",
+  ],
+  writer: [
+    "llm_summarize", "notes_create", "file_save", "telegram_send",
+    "video_brief", "notify", "task_create",
+  ],
+  analyst: ["llm_decide", "llm_summarize", "file_save", "notes_create", "notify"],
+};
+
+/** Relative Firecrawl-equivalent cost of each credit-spending step kind. */
+export const STEP_CREDIT_WEIGHT: Partial<Record<AgentStepKind, number>> = {
+  firecrawl_search: 1,
+  web_search: 1,
+  web_scrape: 1,
+  firecrawl_extract: 2,
+  change_tracking: 2,
+  deep_research: 5,
+  browser_act: 1,
+  browser_replay: 1,
+  browser_screenshot: 0,
+  browser_login: 0,
+  delegate: 0,
+  video_brief: 0,
+};
+
+/**
+ * Step kinds that make a plan require explicit approval (never fast-lane).
+ * Deliberately minimal: only things that run code/commands on the user's
+ * machine. Sign-ins and recorded replays are user-visible, local actions and
+ * run immediately — waiting for a nod on those was pure friction.
+ */
+export const APPROVAL_REQUIRED_KINDS: AgentStepKind[] = ["shell_command"];
 
 /** Broad per-mission Firecrawl budget (scrapes/searches/extracts). */
 export const MISSION_CREDIT_CAP = 12;
@@ -154,6 +282,12 @@ export const PLANNER_SYSTEM_PROMPT = [
   "- llm_decide: {question: string, input?: \"from:<stepId>\"} — picks the best item/winner from previous results. Returns {choice, reason, url?}.",
   "- llm_summarize: {prompt: string, inputs: string[] | \"from:<stepId>\"} — bullet-point summary or comparison table.",
   "- browser_open: {url?: string, description?: string} — opens product pages or search results in the user's browser. Set url to \"from:<stepId>.url\" or \"from:<stepId>\". NEVER put meta-instructions like 'Opening the product page...' as description without a specific item name.",
+  "- browser_act: {task: string, url?: string, session?: string, maxSteps?: number} — THE AUTONOMOUS BROWSER. Drives a real Chromium browser with an AI perceive→click→type→read loop to accomplish an INTERACTIVE web task. Use this automatically (the user never has to say 'playwright') whenever the goal needs the page to be USED, not just read: signing in, filling a form, adding to cart, checking out, booking/reserving, checking an account/order/dashboard, reading data that appears only after clicking/filtering, downloading a file, applying for something, posting/commenting, or any multi-click flow. `task` is a natural-language description of what to accomplish on the site (e.g. 'search for Sony WH-1000XM5 and report the lowest price shown'). `url` is the starting page (may be 'from:<stepId>.url', omit to let it search first). `session` is an optional named login profile (use the SAME session name as a browser_login step for authenticated sites). IMPORTANT: one good browser_act step beats a long chain of search/scrape steps for interactive goals — but do NOT use it for simple 'find X and open it' goals (those use firecrawl_search → llm_decide → browser_open).",
+  "- browser_login: {site: string, url: string, session: string, waitMs?: number} — opens a VISIBLE browser window on the user's PC so they can sign in once; the sign-in is detected by JARVIS and saved to the named `session` profile, then reused silently by browser_act/browser_replay. Use whenever a goal needs an authenticated site and no saved session is known — pair it with a browser_act step that uses the SAME session name. Runs immediately (no approval).",
+  "- browser_replay: {recording: string, params?: object} — replays a previously recorded browser workflow (a saved 'play') by name. Use when the user references a saved automation or a recurring chore. Runs immediately (no approval).",
+  "- browser_screenshot: {url?: string, session?: string, label?: string} — captures a JPEG screenshot of a page (or the current session page) into the mission artifacts as visual evidence. Cheap; use to verify/attach proof.",
+  "- delegate: {role: 'researcher'|'browser'|'writer'|'analyst', goal: string} — SUPERVISOR DELEGATION. When a goal has clearly separable workstreams, delegate each to a specialist sub-agent that plans and runs its own focused sub-mission (with its own tools + budget): 'researcher' (search/scrape/extract/synthesize), 'browser' (interact with sites), 'writer' (summarize/save/send/produce reports), 'analyst' (compare/decide/rank). Delegated results merge into the mission and feed later steps via 'from:<delegateStepId>'. Use 2–4 delegates for multi-part goals; do NOT delegate trivial single-step goals.",
+  "- video_brief: {topic?: string} — renders a cinematic, auto-playing VIDEO BRIEF from the mission findings: hook → reveal → highlights → artifacts → punchline, 15–30s, with a music bed and interface SFX (no narration — briefs are read, not spoken). Use when the user asks for a video, a recap, a highlight, a reel or 'show me what you found'.",
   "- spotify_action: {action: 'play', query?: string} — plays music on Spotify & audio streams. For weather-matching music, query can be \"from:<weatherStepId>\" or 'chill rain lo-fi beats'.",
   "- weather_lookup: {city?: string} — fetches current weather and vocalizes temperature. Defaults to Bengaluru.",
   "- maps_open: {query: string} — opens Google Maps for places, stores, directions (e.g. 'grocery stores near Bengaluru', 'pizza places near me').",
@@ -174,6 +308,8 @@ export const PLANNER_SYSTEM_PROMPT = [
   "NOTE: You cannot control the user's phone (DND, phone apps, SMS). For such requests do the PC-side parts and reach the user via telegram_send instead.",
   "MUSIC RULE: at most ONE audio step per plan — NEVER combine spotify_action AND youtube_open for music in the same plan (double playback). For study/work/prep sessions pick exactly ONE focus-music step (prefer spotify_action with a focus/lofi query).",
   "AUDIENCE RULE: The user is a college student. For 'learn something interesting', educational or study content choose substantive adult-level material (science explainers, documentaries, tech talks, university lectures) — NEVER kids' content (shapes, colors, nursery rhymes, cartoons).",
+  "BROWSER INTELLIGENCE RULE: Decide the engine yourself — never wait to be told. If the goal is RESEARCH/READ-ONLY (find, compare, summarize, explain, look up) use firecrawl_search + web_scrape/deep_research. If the goal requires DOING something on a website (sign in, fill/submit, buy, book, check an account/order, filter, download, post) use browser_act (and browser_login first if the site needs a session). Simple 'open X' goals stay on firecrawl_search → llm_decide → browser_open.",
+  "SUPERVISOR RULE: For genuinely multi-part or cross-domain goals (e.g. 'research X, check my account on Y, then write it up and send it'), you MAY use 2–4 `delegate` steps (one per workstream) instead of a flat step list. Delegates run in parallel, plan their own sub-mission, and their outputs can be referenced with 'from:<delegateId>'. Keep flat plans for everything else — do not over-delegate.",
   "PARALLELISM RULE: Steps that do not depend on each other MUST NOT have dependsOn — they will execute CONCURRENTLY in parallel!",
   "Example: 'Find weather, play spotify matching weather, open youtube tech news': Step 1 (weather) and Step 3 (youtube) run IN PARALLEL. Step 2 (spotify) depends on Step 1.",
   "Example: 'Find a good dinner recipe, extract the ingredients, create a shopping list, open Google Maps with stores': Step 1 (firecrawl_search 'best easy dinner recipe with ingredients list') -> Step 2 (llm_decide one specific dish with a full recipe on its page, input 'from:step1') -> Step 3 (firecrawl_extract url 'from:step2.url', prompt 'list all ingredients with quantities for this dish') -> Step 4 (notes_create title 'Dinner Shopping List', content 'from:step3') -> Step 5 (maps_open 'grocery stores near me', runs in parallel). CRITICAL: decide ONE specific dish whose page contains the actual recipe — do NOT pick a roundup/listicle of many recipes.",

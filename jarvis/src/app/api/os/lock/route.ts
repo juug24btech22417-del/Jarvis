@@ -14,7 +14,12 @@ type InputModule = {
 let mod: InputModule | null = null;
 function loadInput(): InputModule {
   if (!mod) {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // Runtime require on purpose: the module is a native FFI .cjs that
+    // webpack must not bundle. (The old
+    // `eslint-disable-next-line @typescript-eslint/no-var-requires` comment
+    // referenced a plugin this project does not install, which made ESLint
+    // fail with "Definition for rule ... was not found" and broke
+    // `next build` outright.)
     mod = require("@/lib/os/input.cjs") as InputModule;
   }
   return mod;

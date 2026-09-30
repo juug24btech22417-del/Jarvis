@@ -33,16 +33,54 @@ let mod: InputModule | null = null;
 function loadInput(): InputModule {
   if (!mod) {
     // Lazy require — .cjs native FFI module, Windows-only.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     mod = require("@/lib/os/input.cjs") as InputModule;
   }
   return mod;
 }
 
+// ─── Screen metrics cache ─────────────────────────────────────────────
+// getMouseState() makes THREE native FFI calls (GetCursorPos + two
+// GetSystemMetrics) and was called on EVERY cursor move — but only the
+// cursor position varies, and moves don't even use it. Screen size can't
+// change mid-session. Caching turns a 4-call move into a 1-call move —
+// the visible lag in live mode (practice mode skips this path entirely,
+// which is exactly why it felt smooth while live felt sluggish).
+let screenMetrics: { screenWidth: number; screenHeight: number } | null = null;
+function getScreenMetrics(): { screenWidth: number; screenHeight: number } {
+  if (!screenMetrics) {
+    const s = loadInput().getMouseState();
+    screenMetrics = { screenWidth: s.screenWidth, screenHeight: s.screenHeight };
+  }
+  return screenMetrics;
+}
+
+// ─── Staleness guard (anti-replay) ───────────────────────────────────
+// Vision clients tag every request with a per-session monotonic seq. If a
+// newer move has already been applied, any OLDER move that trickles in
+// afterwards (queued during a network/tab hiccup) must be dropped —
+// otherwise the cursor replays the user's stale trajectory minutes later.
+// Discrete actions (click/down/up/key) are never dropped: they are events,
+// not state, and always carry intent.
+const lastSeqBySid = new Map<string, number>();
+function isStaleMove(sid: unknown, seqNum: unknown): boolean {
+  if (typeof sid !== "string" || sid.length === 0) return false;
+  if (typeof seqNum !== "number" || !Number.isFinite(seqNum)) return false;
+  const last = lastSeqBySid.get(sid) ?? -1;
+  if (seqNum <= last) return true;
+  lastSeqBySid.set(sid, seqNum);
+  // Simple hygiene: never let the map grow unbounded.
+  if (lastSeqBySid.size > 500) {
+    for (const k of Array.from(lastSeqBySid.keys()).slice(0, 250)) lastSeqBySid.delete(k);
+  }
+  return false;
+}
+
 export async function GET() {
   try {
     const input = loadInput();
-    return NextResponse.json({ success: true, ...input.getMouseState() });
+    const state = input.getMouseState();
+    screenMetrics = { screenWidth: state.screenWidth, screenHeight: state.screenHeight };
+    return NextResponse.json({ success: true, ...state });
   } catch (err) {
     return NextResponse.json(
       { success: false, error: "OS input unavailable", details: String(err) },
@@ -60,19 +98,26 @@ export async function POST(req: NextRequest) {
       typeof v === "number" && Number.isFinite(v) ? v : null;
 
     if (body.action === "move") {
-      const state = input.getMouseState();
+      // Anti-replay: drop moves older than the newest applied one.
+      if (isStaleMove(body.sid, body.seq)) {
+        return NextResponse.json({ success: true, stale: true });
+      }
       const nx = num(body.nx); // normalized 0..1
       const ny = num(body.ny);
       if (nx === null || ny === null) {
         return NextResponse.json({ error: "nx and ny (0..1) required" }, { status: 400 });
       }
-      const x = Math.max(0, Math.min(1, nx)) * (state.screenWidth - 1);
-      const y = Math.max(0, Math.min(1, ny)) * (state.screenHeight - 1);
+      const m = getScreenMetrics();
+      const x = Math.max(0, Math.min(1, nx)) * (m.screenWidth - 1);
+      const y = Math.max(0, Math.min(1, ny)) * (m.screenHeight - 1);
       const r = input.moveMouse(x, y);
       return NextResponse.json({ success: true, ...r });
     }
 
     if (body.action === "move-rel") {
+      if (isStaleMove(body.sid, body.seq)) {
+        return NextResponse.json({ success: true, stale: true });
+      }
       const dx = num(body.dx);
       const dy = num(body.dy);
       if (dx === null || dy === null) {

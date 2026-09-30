@@ -37,6 +37,34 @@ import { searchWebWithFallback, sanitizeHits, type SearchHit as FallbackSearchHi
 import { exec, spawn } from "child_process";
 import fs from "fs";
 import path from "path";
+import {
+  autoInferDependencies,
+  estimatePlan,
+  heuristicPlan,
+  maybeAppendBrowserStep,
+  pickSimilarPastGoals,
+  planNeedsApproval,
+  validateAndRepairPlan,
+  kindsAllowedForRole,
+  stepCreditWeight,
+} from "@/lib/agent/plan";
+import {
+  getJob as storeGetJob,
+  listJobs as storeListJobs,
+  listJobSummaries,
+  putJob,
+  flushMissions,
+} from "@/lib/agent/store";
+import { browserAct, browserLogin, browserScreenshot, getRecording, replayRecording } from "@/services/BrowserAgentService";
+import { setLiveViewEnabled } from "@/lib/agent/liveView";
+import { parseJsonLoose } from "@/lib/agent/llm";
+import { renderVideoBrief, briefSummary } from "@/services/MissionVideoService";
+import {
+  SPECIALIST_KINDS,
+  APPROVAL_REQUIRED_KINDS,
+  type MissionArtifact,
+  type SpecialistRole,
+} from "@/lib/agent/types";
 
 /**
  * Launch URL directly at the OS level on Windows so browser popup blockers cannot intercept it.
@@ -100,45 +128,6 @@ async function getTopYouTubeVideo(query: string): Promise<{ videoId: string; wat
   };
 }
 
-/**
- * Automatic Dependency Inference:
- * Automatically adds any referenced "from:<stepId>" to dependsOn so steps never execute out of order.
- */
-function autoInferDependencies(plan: AgentPlan) {
-  const stepIds = new Set(plan.steps.map((s) => s.id));
-  for (const s of plan.steps) {
-    const rawDeps = Array.isArray(s.dependsOn) ? s.dependsOn : [];
-    const validDeps = new Set<string>();
-
-    // 1. Sanitize any existing dependsOn (strip .url or invalid step IDs)
-    for (const d of rawDeps) {
-      const cleaned = String(d).split(".")[0].trim();
-      if (stepIds.has(cleaned) && cleaned !== s.id) {
-        validDeps.add(cleaned);
-      }
-    }
-
-    // 2. Auto-infer from "from:<stepId>" references in params
-    const findRefs = (val: unknown) => {
-      if (typeof val === "string") {
-        const matches = Array.from(val.matchAll(/from:([a-zA-Z0-9_-]+)/g));
-        for (const m of matches) {
-          const targetId = m[1].split(".")[0];
-          if (stepIds.has(targetId) && targetId !== s.id) {
-            validDeps.add(targetId);
-          }
-        }
-      } else if (Array.isArray(val)) {
-        for (const item of val) findRefs(item);
-      } else if (typeof val === "object" && val !== null) {
-        for (const v of Object.values(val)) findRefs(v);
-      }
-    };
-    findRefs(s.params);
-    s.dependsOn = Array.from(validDeps);
-  }
-}
-
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 // NVIDIA NIM — the same OpenAI-compatible endpoint the chat route uses as
 // its primary LLM. Included in the race so missions keep working when the
@@ -158,20 +147,19 @@ function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = 12000):
   return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
 }
 
-// In-memory job store (v1). Reset on process restart. Kept on globalThis
-// so Next dev module re-evals (HMR) don't wipe running missions.
-const __jobG = globalThis as unknown as { __jarvisAgentJobs?: Map<string, AgentJob> };
-if (!__jobG.__jarvisAgentJobs) __jobG.__jarvisAgentJobs = new Map<string, AgentJob>();
-const jobs = __jobG.__jarvisAgentJobs;
+// Durable job store (v2) — missions survive restarts and HMR. Backed by
+// .jarvis-data/missions.json via @/lib/agent/store.
 
 /* ----------------------------- PUBLIC API ----------------------------- */
 
 export function listJobs(): AgentJob[] {
-  return Array.from(jobs.values()).sort((a, b) => b.createdAt - a.createdAt);
+  return storeListJobs();
 }
 
+export { listJobSummaries };
+
 export function getJob(jobId: string): AgentJob | undefined {
-  return jobs.get(jobId);
+  return storeGetJob(jobId);
 }
 
 /**
@@ -179,11 +167,13 @@ export function getJob(jobId: string): AgentJob | undefined {
  * "awaiting_approval" state with a plan attached. Validates JSON; retries
  * up to 2 times on parse / validation failure.
  */
-export async function planGoal(goal: string, opts?: { autoApprove?: boolean }): Promise<AgentJob> {
+export async function planGoal(goal: string, opts?: { autoApprove?: boolean; watch?: boolean }): Promise<AgentJob> {
   const autoApprove = opts?.autoApprove === true;
-  // Safety: goals that ask JARVIS to act on this PC always go through the
-  // approval gate, even in fast mode (the job's `auto` flag is gated here).
-  const RUNS_ON_PC_RE = /\b(vs ?code|terminal|shell|command|run the|start the server|restart the server|fix my (dev|development)|screenshot my|my project|downloads folder|my downloads|my files|my documents|my desktop|open my \w+ folder)\b/i;
+  // CRITICAL goals only: things that run code/commands on this machine. Every
+  // other mission — including sign-ins and recorded replays — rides the fast
+  // lane, because waiting for a nod on a read-only or user-visible action just
+  // wastes the user's time.
+  const RUNS_ON_PC_RE = /\b(shell|terminal|run the (command|script)|execute the (command|script)|restart the (server|dev)|install|uninstall|npm install|registry|sudo|admin|format the|delete (the )?(folder|directory|file))\b/i;
   const job: AgentJob = {
     id: randomUUID(),
     goal,
@@ -191,21 +181,38 @@ export async function planGoal(goal: string, opts?: { autoApprove?: boolean }): 
     createdAt: Date.now(),
     results: [],
     creditsUsed: 0,
-    // Store the PC-gated flag: shell/vscode goals always ride the approval
-    // lane, so approveJob never re-gates them after a legitimate approval.
+    // Store the PC-gated flag: shell goals always ride the approval lane, so
+    // approveJob never re-gates them after a legitimate approval.
     auto: autoApprove && !RUNS_ON_PC_RE.test(goal),
+    // Show the real browser window during autonomous browser steps when asked.
+    watch: opts?.watch === true,
   };
-  jobs.set(job.id, job);
+  putJob(job);
   emitMissionEvent(job.id, "status", "Planning mission…", { status: "planning" });
 
   let lastError: string | null = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  // ⚡ Instant lane: the common goal shapes (weather, timer, play, find+open,
+  // sign-in, orders/cart, price) get their plan built locally — no LLM
+  // round-trip at all. Everything else goes to the planner.
+  const instant = heuristicPlan(goal);
+  for (let attempt = 0; attempt < (instant ? 1 : 2); attempt++) {
     if (attempt > 0) {
-      await new Promise((r) => setTimeout(r, 2000 * attempt));
+      await new Promise((r) => setTimeout(r, 700));
     }
     try {
-      const plan = await callPlanner(goal, speedDirective(goal));
-      validatePlan(plan);
+      const plan = instant ?? (await callPlanner(goal, speedDirective(goal) + memoryDirective(goal)));
+      if (instant) {
+        emitMissionEvent(job.id, "log", "⚡ Instant plan — no planner round-trip needed", { instant: true });
+        console.log(`[Agent] instant plan for "${goal.slice(0, 60)}" (${plan.steps.length} steps)`);
+      }
+      validateAndRepairPlan(plan);
+      // Auto-detect interactive goals the planner treated as read-only and
+      // append a real browser step — the user never has to say "playwright".
+      maybeAppendBrowserStep(plan, goal);
+      plan.estimate = estimatePlan(plan);
+      if (plan.steps.some((s) => s.kind === "delegate")) plan.supervisor = true;
+      // Interactive / command-running plans always need an explicit nod.
+      if (planNeedsApproval(plan)) job.auto = false;
       job.plan = plan;
       job.status = "awaiting_approval";
       emitMissionEvent(job.id, "status", `Plan ready — ${plan.steps.length} step(s)`, {
@@ -236,60 +243,79 @@ export async function planGoal(goal: string, opts?: { autoApprove?: boolean }): 
 
 /** Approve a plan and run it to completion. */
 export async function approveJob(jobId: string): Promise<AgentJob> {
-  const job = jobs.get(jobId);
+  const job = storeGetJob(jobId);
   if (!job) throw new Error(`Job ${jobId} not found`);
   if (job.status !== "awaiting_approval" && job.status !== "paused_checkpoint") {
     throw new Error(`Job is in status ${job.status}, not awaiting_approval`);
   }
   if (!job.plan) throw new Error("Job has no plan");
 
-  // Hard safety gate: shell commands never execute on a fast-lane
-  // auto-approval — they always get an explicit approval round-trip.
-  if (job.plan.steps.some((s) => s.kind === "shell_command") && job.auto) {
+  // Hard safety gate: commands, sign-ins and recorded replays never execute on
+  // a fast-lane auto-approval — they always get an explicit approval round-trip.
+  if (planNeedsApproval(job.plan) && job.auto) {
     job.auto = false;
     job.status = "awaiting_approval";
-    emitMissionEvent(job.id, "status", "This mission runs commands on your PC — review and approve to execute", { status: "awaiting_approval" });
+    emitMissionEvent(job.id, "status", "This mission acts on your PC/sites — review and approve to execute", { status: "awaiting_approval" });
+    putJob(job);
     return job;
   }
 
   job.status = "running";
+  job.cancelRequested = false;
   job.startedAt = Date.now();
   emitMissionEvent(job.id, "status", "Mission started", { status: "running" });
   try {
     await executePlan(job);
-    job.status = "done";
-    emitMissionEvent(job.id, "done", `Mission complete in ${elapsed(job)}`, {
-      status: "done",
-      report: buildReport(job),
-    });
+    // Abort wins: a cancelled run must not be re-labelled "done" when the
+    // executor unwinds (that made the Abort button look broken).
+    const aborted =
+      (job.cancelRequested as boolean | undefined) === true || (job.status as JobStatus) === "cancelled";
+    if (aborted) {
+      job.status = "cancelled";
+      emitMissionEvent(job.id, "status", "Mission aborted by user", { status: "cancelled" });
+    } else {
+      // A mission is "partial" when it finished but some steps failed/skipped.
+      if (job.results.some((r) => r.status === "error" || r.status === "skipped")) job.partial = true;
+      job.status = "done";
+      emitMissionEvent(job.id, "done", `Mission complete in ${elapsed(job)}`, {
+        status: "done",
+        report: buildReport(job),
+        partial: job.partial === true,
+      });
+    }
   } catch (e) {
     job.status = "failed";
     job.error = (e as Error)?.message || String(e);
     emitMissionEvent(job.id, "error", `Mission failed: ${job.error}`, { status: "failed" });
   } finally {
     job.finishedAt = Date.now();
+    // Stop streaming new frames; the last one stays readable for the panel.
+    setLiveViewEnabled(job.id, false);
+    flushMissions();
   }
   return job;
 }
 
 export async function cancelJob(jobId: string): Promise<AgentJob | undefined> {
-  const job = jobs.get(jobId);
+  const job = storeGetJob(jobId);
   if (!job) return undefined;
   if (job.status === "running" || job.status === "awaiting_approval" || job.status === "planning" || job.status === "paused_checkpoint") {
     job.status = "cancelled";
+    job.cancelRequested = true;
     job.finishedAt = Date.now();
     // Unwind a parked checkpoint so the executor's await settles and the
     // runStep throws "cancelled at checkpoint" instead of hanging forever.
     job.checkpointResolve?.();
     emitMissionEvent(job.id, "status", "Mission cancelled", { status: "cancelled" });
     clearMissionEvents(jobId);
+    flushMissions();
   }
   return job;
 }
 
 /** Resume a job paused at a checkpoint. The user's pick feeds llm_decide-style templating. */
 export async function resumeCheckpoint(jobId: string, pick: string): Promise<AgentJob> {
-  const job = jobs.get(jobId);
+  const job = storeGetJob(jobId);
   if (!job) throw new Error(`Job ${jobId} not found`);
   if (job.status !== "paused_checkpoint") {
     throw new Error(`Job is in status ${job.status}, not paused_checkpoint`);
@@ -314,6 +340,7 @@ export async function resumeCheckpoint(jobId: string, pick: string): Promise<Age
 
   // Continue execution from where the pool left off (it awaits this promise).
   job.checkpointResolve?.();
+  putJob(job);
   return job;
 }
 
@@ -339,7 +366,9 @@ async function llmRace(opts: {
   label: string;
 }): Promise<string> {
   const label = opts.label;
-  const timeoutMs = opts.timeoutMs ?? 25_000;
+  // Free models answer a plan in 1–3s; a 12s ceiling keeps a slow provider
+  // from holding the mission hostage.
+  const timeoutMs = opts.timeoutMs ?? 12_000;
   const payload = {
     messages: [
       { role: "system", content: opts.system },
@@ -416,11 +445,11 @@ async function llmRace(opts: {
     chain.push(() => attempt("nvidia", NIM_URL, nimKey, NIM_MODEL));
   }
 
-  // Parallel staggered race: preferred providers start first (500ms apart);
-  // everyone runs CONCURRENTLY, first usable result wins. Sequential
-  // fallback here was the #1 planning bottleneck — a dead first provider
-  // burned its full timeout before the next even started.
-  const STAGGER_MS = 500;
+  // Parallel staggered race: the top two providers start at t=0 and the rest
+  // 180ms apart; everyone runs CONCURRENTLY and the first usable result wins.
+  // (A dead first provider used to burn its whole timeout before the next
+  // even started — that was the #1 planning bottleneck.)
+  const STAGGER_MS = 180;
   return await new Promise<string>((resolve, reject) => {
     const errors: string[] = [];
     const total = chain.length;
@@ -452,7 +481,8 @@ async function llmRace(opts: {
     };
 
     pump();
-    for (let i = 1; i < total; i++) {
+    pump();
+    for (let i = 2; i <= total; i++) {
       setTimeout(() => {
         if (!settled) pump();
       }, i * STAGGER_MS);
@@ -464,11 +494,44 @@ async function llmRace(opts: {
  * Goals that genuinely need heavy steps (scrape / extract / deep research).
  * Everything else runs the fast lane: search → decide → open.
  */
-const RESEARCHY_RE = /\b(research|deep|compare|comparison|versus|\bvs\b|paper|documentation|docs|specs?|specifications?|analysis|analy[sz]e|study|in[- ]depth|report|detailed|thorough|full details)\b/i;
+const RESEARCHY_RE = /\b(research|compare|comparison|versus|\bvs\b|specs?|specifications?|analysis|analy[sz]e|report|detailed|thorough|full details)\b/i;
+/** Goals that explicitly ask for depth — the only ones allowed to go long. */
+const DEEP_RE = /\b(deep research|in[- ]depth|exhaustive|comprehensive|everything about|all the details|white ?paper|dissertation|thesis|literature review)\b/i;
 
+/**
+ * Always-present pacing directive. Missions used to run long because a
+ * "research" goal got no directive at all and the planner free-styled a
+ * 6-8 step scrape chain. Now every plan is told to stay lean and parallel,
+ * and "deep" work has to be explicitly requested.
+ */
 function speedDirective(goal: string): string {
-  if (RESEARCHY_RE.test(goal)) return "";
-  return "\n\n[SPEED DIRECTIVE] This is a simple open-and-go mission — optimize for speed. For weather use weather_lookup; for music use spotify_action or youtube_open with a query; for opening videos use youtube_open; for timers use timer_set. For finding/browsing things use ONLY: firecrawl_search (limit 5) -> llm_decide (input 'from:<searchStepId>') -> browser_open (url 'from:<decideStepId>.url'). Do NOT add web_scrape, firecrawl_extract, or deep_research steps.";
+  const common =
+    "\n\n[SPEED DIRECTIVE] Latency beats exhaustiveness. Rules: (1) never emit more steps than the goal needs; (2) steps that do not depend on each other MUST run in parallel (no dependsOn) — the executor runs up to 6 at once; (3) prefer ONE strong search over many weak ones; (4) never add a scrape/extract step 'just in case'.";
+
+  if (DEEP_RE.test(goal)) {
+    return `${common} The user explicitly asked for depth, so research steps are allowed — still keep the chain as short as it can be while covering the ask.`;
+  }
+
+  if (RESEARCHY_RE.test(goal)) {
+    return `${common} This is a normal research/comparison goal: cap the plan at 5 steps. Use firecrawl_search (limit 5) -> firecrawl_extract or llm_summarize -> llm_decide, and only add web_scrape/deep_research if the first search genuinely came back thin.`;
+  }
+
+  return `${common} This is a simple open-and-go mission — optimize for speed. For weather use weather_lookup; for music use spotify_action or youtube_open with a query; for opening videos use youtube_open; for timers use timer_set. For finding/browsing things use ONLY: firecrawl_search (limit 5) -> llm_decide (input 'from:<searchStepId>') -> browser_open (url 'from:<decideStepId>.url'). Do NOT add web_scrape, firecrawl_extract, or deep_research steps.`;
+}
+
+/**
+ * Retrieval-augmented planning: surface the few most similar past missions so
+ * the planner can mirror what worked (and avoid what failed).
+ */
+function memoryDirective(goal: string): string {
+  try {
+    const past = pickSimilarPastGoals(goal, storeListJobs().map((j) => ({ goal: j.goal, status: j.status, createdAt: j.createdAt })), 3);
+    if (past.length === 0) return "";
+    const lines = past.map((p) => `- (${p.status}) ${p.goal.slice(0, 140)}`);
+    return `\n\n[PAST MISSIONS] Similar missions you have run before. Reuse a successful approach when it fits; avoid the failed ones:\n${lines.join("\n")}`;
+  } catch {
+    return "";
+  }
 }
 
 async function callPlanner(goal: string, directive = ""): Promise<AgentPlan> {
@@ -532,74 +595,7 @@ async function callPlanner(goal: string, directive = ""): Promise<AgentPlan> {
   }
 }
 
-const KNOWN_KINDS = new Set([
-  "web_search", "web_scrape", "firecrawl_search", "firecrawl_extract",
-  "change_tracking", "llm_decide", "llm_summarize", "deep_research",
-  "memory_store", "notify", "playwright_action", "browser_open", "checkpoint",
-  "spotify_action", "weather_lookup", "maps_open", "youtube_open", "notes_create", "task_create", "file_save",
-  "timer_set", "telegram_send", "shell_command", "vision_inspect", "file_list", "file_open",
-]);
 
-function validatePlan(plan: AgentPlan) {
-  if (!plan || typeof plan !== "object") throw new Error("plan is not an object");
-  if (typeof plan.summary !== "string") throw new Error("plan.summary missing");
-  if (!Array.isArray(plan.steps) || plan.steps.length === 0) throw new Error("plan.steps empty");
-  if (plan.steps.length > 10) throw new Error("plan.steps too long (max 10)");
-  // Small models sometimes emit numeric references ("from:2", "from:2.url")
-  // instead of real step ids — rewrite them to the Nth step's id so deps
-  // infer and values resolve ("AI extraction: from:2" happened because the
-  // ref silently never matched).
-  const idOf = new Map<string, string>();
-  plan.steps.forEach((s, i) => {
-    idOf.set(String(i + 1), s.id);
-    idOf.set(s.id, s.id);
-  });
-  const rewriteRefs = (val: unknown): unknown => {
-    if (typeof val === "string") {
-      return val.replace(/from:([a-zA-Z0-9_-]+)(\.[a-zA-Z]+)?/g, (full, ref: string, field?: string) =>
-        idOf.has(ref) ? `from:${idOf.get(ref)}${field ?? ""}` : full
-      );
-    }
-    if (Array.isArray(val)) return val.map(rewriteRefs);
-    if (val && typeof val === "object") {
-      return Object.fromEntries(Object.entries(val).map(([k, v]) => [k, rewriteRefs(v)]));
-    }
-    return val;
-  };
-  for (const s of plan.steps) s.params = rewriteRefs(s.params) as Record<string, unknown>;
-  for (const s of plan.steps) {
-    if (Array.isArray(s.dependsOn)) {
-      s.dependsOn = s.dependsOn.map((d) => {
-        const key = String(d).split(".")[0].trim();
-        return idOf.get(key) ?? d;
-      });
-    }
-    // Titles derived from raw refs ("AI extraction: from:2") are useless —
-    // regenerate from the kind label instead.
-    if (/\bfrom:[a-zA-Z0-9_-]/.test(s.title)) {
-      s.title = STEP_KIND_LABELS[s.kind as AgentStepKind] ?? s.kind;
-    }
-  }
-  autoInferDependencies(plan);
-  const ids = new Set<string>();
-  for (const s of plan.steps) {
-    if (!s.id || typeof s.id !== "string") throw new Error("step.id missing");
-    if (ids.has(s.id)) throw new Error(`duplicate step id: ${s.id}`);
-    ids.add(s.id);
-    if (!s.kind || typeof s.kind !== "string") throw new Error(`step ${s.id}.kind missing`);
-    if (!KNOWN_KINDS.has(s.kind)) throw new Error(`step ${s.id}: unknown kind "${s.kind}"`);
-    // Small models sometimes omit cosmetic fields — repair instead of failing
-    // the whole mission.
-    if (typeof s.title !== "string" || !s.title.trim()) {
-      const p = (s.params ?? {}) as Record<string, unknown>;
-      const detail = String(p.query ?? p.city ?? p.label ?? p.command ?? p.question ?? p.filename ?? p.url ?? "").slice(0, 50);
-      s.title = detail ? `${STEP_KIND_LABELS[s.kind as AgentStepKind]}: ${detail}` : STEP_KIND_LABELS[s.kind as AgentStepKind] ?? s.kind;
-    }
-    if (typeof s.params !== "object" || s.params === null) {
-      s.params = {};
-    }
-  }
-}
 
 /* ----------------------------- TEMPLATING ----------------------------- */
 
@@ -705,71 +701,117 @@ function pickUrl(out: unknown): string | null {
 
 /* ----------------------------- EXECUTOR (DAG-parallel) ----------------------------- */
 
-const PARALLELISM = 4;
+const PARALLELISM = 6;
+
+/** Per-step wall-clock ceilings — exist so one hung rail can't stall a mission. */
+const STEP_TIMEOUT_MS: Partial<Record<AgentStepKind, number>> = {
+  deep_research: 180_000,
+  browser_act: 240_000,
+  browser_login: 300_000,
+  browser_replay: 180_000,
+  firecrawl_extract: 120_000,
+  web_scrape: 90_000,
+  shell_command: 200_000,
+  video_brief: 60_000,
+  delegate: 240_000,
+};
+const DEFAULT_STEP_TIMEOUT_MS = 120_000;
+
+/** Transient failures worth one automatic retry. */
+const RETRYABLE_RE =
+  /(ETIMEDOUT|ECONNRESET|ECONNREFUSED|ESOCKETTIMEDOUT|fetch failed|network|timed out|timeout|\b429\b|rate limit|socket hang up|EAI_AGAIN|\b50[234]\b)/i;
+
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      }
+    );
+  });
+}
+
+/** Harvest concrete artifacts a step produced so the panel + follow-ups see them. */
+function collectArtifacts(job: AgentJob, step: AgentStep, result: unknown): void {
+  if (!result || typeof result !== "object") return;
+  const out = result as Record<string, unknown>;
+  const add = (kind: MissionArtifact["kind"], label: string, value: string) => {
+    if (!value || !value.trim()) return;
+    if (!job.artifacts) job.artifacts = [];
+    if (job.artifacts.some((a) => a.value === value)) return;
+    job.artifacts.push({ id: randomUUID(), kind, label, value, stepId: step.id, at: Date.now() });
+  };
+  if (typeof out.path === "string") add("file", String(out.filename ?? path.basename(out.path)), out.path);
+  if (Array.isArray(out.screenshots)) {
+    for (const s of out.screenshots) if (typeof s === "string") add("image", `${step.title.slice(0, 40)} screenshot`, s);
+  }
+  if (step.kind === "video_brief" && typeof out.path === "string") add("video", "Mission video brief", out.path);
+  if (typeof out.url === "string" && out.url.startsWith("http")) add("url", step.title.slice(0, 60), out.url);
+  if (Array.isArray(out.urls)) {
+    for (const u of out.urls) if (typeof u === "string" && u.startsWith("http")) add("url", step.title.slice(0, 60), u);
+  }
+}
 
 async function executePlan(job: AgentJob) {
   const plan = job.plan!;
   const resultsById = new Map<string, StepResult>();
   job.checkpointResults = job.checkpointResults ?? new Map();
+  // Opt this mission into live frame streaming so the panel can watch browser
+  // steps as they happen (frames are cleared once the mission settles).
+  setLiveViewEnabled(job.id, true);
 
-  const runnable = new Set(plan.steps.map((s) => s.id));
   const failedOrSkipped = new Set<string>();
   const finished = new Map<string, StepResult>();
+  // Kept as a helper so TS does not narrow job.status across the function.
+  const isCancelled = (): boolean => job.status === "cancelled" || job.cancelRequested === true;
+  // Handed to long-running step handlers (browser loops) so Abort stops the
+  // work in flight instead of only preventing the NEXT step from starting.
+  const shouldStop = (): boolean => isCancelled();
 
   const runOne = async (step: AgentStep): Promise<void> => {
-    if (job.status === "cancelled") return;
+    if (isCancelled()) return;
+
+    const skip = (error: string, message: string) => {
+      const r: StepResult = { stepId: step.id, status: "skipped", error, finishedAt: Date.now() };
+      resultsById.set(step.id, r);
+      finished.set(step.id, r);
+      job.results.push(r);
+      failedOrSkipped.add(step.id);
+      job.partial = true;
+      emitMissionEvent(job.id, "step_finished", message, { stepId: step.id, status: "skipped", error });
+    };
 
     // Dependencies must have succeeded.
     for (const dep of step.dependsOn ?? []) {
       const depResult = finished.get(dep);
       if (!depResult || depResult.status !== "ok") {
-        const r: StepResult = {
-          stepId: step.id,
-          status: "skipped",
-          error: `dependency ${dep} not satisfied`,
-          finishedAt: Date.now(),
-        };
-        resultsById.set(step.id, r);
-        finished.set(step.id, r);
-        job.results.push(r);
-        failedOrSkipped.add(step.id);
-        emitMissionEvent(job.id, "step_finished", `Skipped: ${step.title}`, { stepId: step.id, status: "skipped", error: r.error });
+        skip(`dependency ${dep} not satisfied`, `Skipped: ${step.title}`);
         return;
       }
     }
 
-    // Credit budget for Firecrawl-backed kinds.
-    const CREDIT_KINDS = new Set(["firecrawl_search", "web_scrape", "firecrawl_extract", "deep_research", "change_tracking"]);
-    if (CREDIT_KINDS.has(step.kind)) {
-      if ((job.creditsUsed ?? 0) >= MISSION_CREDIT_CAP) {
-        const r: StepResult = {
-          stepId: step.id,
-          status: "skipped",
-          error: `Mission credit cap (${MISSION_CREDIT_CAP}) reached — step skipped to protect your Firecrawl quota`,
-          finishedAt: Date.now(),
-        };
-        resultsById.set(step.id, r);
-        finished.set(step.id, r);
-        job.results.push(r);
-        failedOrSkipped.add(step.id);
-        emitMissionEvent(job.id, "step_finished", `Budget cap hit — skipped: ${step.title}`, { stepId: step.id, status: "skipped" });
-        return;
-      }
+    // Weighted credit budget — deep_research costs more than a search.
+    const weight = stepCreditWeight(step.kind);
+    if (weight > 0 && (job.creditsUsed ?? 0) + weight > MISSION_CREDIT_CAP) {
+      skip(
+        `Mission credit cap (${MISSION_CREDIT_CAP}) reached — step skipped to protect your Firecrawl quota`,
+        `Budget cap hit — skipped: ${step.title}`
+      );
+      return;
     }
 
-    // Fast lane never runs shell commands — they always wait at the gate.
-    if (step.kind === "shell_command" && job.auto) {
-      const r: StepResult = {
-        stepId: step.id,
-        status: "skipped",
-        error: "Shell commands always wait for approval — rerun without fast mode to execute",
-        finishedAt: Date.now(),
-      };
-      resultsById.set(step.id, r);
-      finished.set(step.id, r);
-      job.results.push(r);
-      failedOrSkipped.add(step.id);
-      emitMissionEvent(job.id, "step_finished", `Skipped (needs approval): ${step.title}`, { stepId: step.id, status: "skipped" });
+    // Steps that need an explicit nod never run on the fast lane.
+    if (job.auto && APPROVAL_REQUIRED_KINDS.includes(step.kind)) {
+      skip(
+        `${STEP_KIND_LABELS[step.kind]} always waits for approval — rerun without fast mode to execute`,
+        `Skipped (needs approval): ${step.title}`
+      );
       return;
     }
 
@@ -786,28 +828,48 @@ async function executePlan(job: AgentJob) {
     }
     emitMissionEvent(job.id, "step_started", step.title, { stepId: step.id, kind: step.kind });
     const t0 = Date.now();
-    try {
-      const result = await runStep(resolved, finished, job);
-      const r: StepResult = { stepId: step.id, status: "ok", result, finishedAt: Date.now() };
-      resultsById.set(step.id, r);
-      finished.set(step.id, r);
-      job.results.push(r);
-      if (CREDIT_KINDS.has(step.kind)) job.creditsUsed = (job.creditsUsed ?? 0) + 1;
-      emitMissionEvent(job.id, "step_finished", `${step.title} — done in ${Math.round((Date.now() - t0) / 1000)}s`, {
-        stepId: step.id, status: "ok", result,
-      });
-    } catch (e) {
-      const msg = (e as Error)?.message || String(e);
-      const r: StepResult = { stepId: step.id, status: "error", error: msg, finishedAt: Date.now() };
-      resultsById.set(step.id, r);
-      finished.set(step.id, r);
-      job.results.push(r);
-      failedOrSkipped.add(step.id);
-      emitMissionEvent(job.id, "step_finished", `${step.title} — failed: ${msg.slice(0, 80)}`, {
-        stepId: step.id, status: "error", error: msg,
-      });
-      // Non-fatal: the rest of the plan degrades gracefully (unchanged behavior).
+    const timeoutMs = STEP_TIMEOUT_MS[step.kind] ?? DEFAULT_STEP_TIMEOUT_MS;
+
+    // One automatic retry for transient failures (network / rate limit).
+    let lastErr = "";
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (isCancelled()) return;
+      if (attempt > 0) {
+        emitMissionEvent(job.id, "log", `Retrying “${step.title}” after a transient failure…`, { stepId: step.id });
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+      try {
+        const result = await withTimeout(runStep(resolved, finished, job, shouldStop), timeoutMs, step.title);
+        // If the user aborted while this step was in flight, don't record it as
+        // a completed result — the mission is over.
+        if (isCancelled()) return;
+        collectArtifacts(job, step, result);
+        const r: StepResult = { stepId: step.id, status: "ok", result, finishedAt: Date.now() };
+        resultsById.set(step.id, r);
+        finished.set(step.id, r);
+        job.results.push(r);
+        if (weight > 0) job.creditsUsed = (job.creditsUsed ?? 0) + weight;
+        emitMissionEvent(job.id, "step_finished", `${step.title} — done in ${Math.round((Date.now() - t0) / 1000)}s`, {
+          stepId: step.id, status: "ok", result,
+        });
+        return;
+      } catch (e) {
+        lastErr = (e as Error)?.message || String(e);
+        if (attempt === 0 && RETRYABLE_RE.test(lastErr)) continue;
+        break;
+      }
     }
+
+    const r: StepResult = { stepId: step.id, status: "error", error: lastErr, finishedAt: Date.now() };
+    resultsById.set(step.id, r);
+    finished.set(step.id, r);
+    job.results.push(r);
+    failedOrSkipped.add(step.id);
+    job.partial = true;
+    emitMissionEvent(job.id, "step_finished", `${step.title} — failed: ${lastErr.slice(0, 80)}`, {
+      stepId: step.id, status: "error", error: lastErr,
+    });
+    // Non-fatal: the rest of the plan degrades gracefully.
   };
 
   // Pool: launch steps as their deps complete, up to PARALLELISM at a time.
@@ -847,9 +909,126 @@ async function executePlan(job: AgentJob) {
   if (running.size > 0) await Promise.all(running);
 }
 
+/* ----------------------------- SUPERVISOR / SPECIALISTS ----------------------------- */
+
+type SubLogger = (message: string, data?: Record<string, unknown>) => void;
+
+/** Ask the LLM for a focused plan restricted to a specialist's toolset. */
+async function planSubMission(role: SpecialistRole, goal: string, allowed: Set<string>): Promise<AgentPlan> {
+  const kindList = Array.from(allowed).join(", ");
+  const system = [
+    `You are the ${role.toUpperCase()} specialist sub-agent inside JARVIS, a supervisor/specialist system.`,
+    'Given ONE focused sub-goal, return ONLY JSON: {"summary": string, "steps": [{id, kind, title, params, dependsOn?}]}.',
+    `You may ONLY use these step kinds: ${kindList}.`,
+    "At most 5 steps. Steps without dependsOn run in parallel. Chain values with 'from:<stepId>'.",
+    role === "browser" ? "Prefer browser_act for interactive sites, browser_screenshot for visual evidence." : "",
+    role === "writer" ? "End with notes_create or file_save so the work is stored, plus llm_summarize for the report." : "",
+    role === "researcher" ? "Prefer firecrawl_search -> firecrawl_extract/deep_research -> llm_summarize." : "",
+    role === "analyst" ? "Prefer llm_decide / llm_summarize to rank and compare options." : "",
+    "Output ONLY JSON, no prose.",
+  ].filter(Boolean).join(" ");
+
+  const content = await llmRace({ system, user: goal, maxTokens: 1300, label: `sub-planner:${role}` });
+  const parsed = parseJsonLoose<AgentPlan>(content);
+  if (!parsed || !Array.isArray(parsed.steps)) throw new Error("sub-planner returned no plan");
+  return parsed;
+}
+
+interface DelegationOutcome {
+  status: "ok" | "error";
+  summary: string;
+  results: StepResult[];
+  steps: Array<{ id: string; title: string; kind: AgentStepKind; status: StepResult["status"] }>;
+}
+
+/** Plan + run a specialist sub-mission inside the parent job. */
+async function executeSubPlan(
+  parentJob: AgentJob,
+  role: SpecialistRole,
+  goal: string,
+  log: SubLogger,
+  shouldStop?: () => boolean
+): Promise<DelegationOutcome> {
+  const allowed = kindsAllowedForRole(role);
+  let plan: AgentPlan;
+  try {
+    plan = await planSubMission(role, goal, allowed);
+    validateAndRepairPlan(plan, allowed, { maxSteps: 6, allowDelegate: false });
+  } catch (e) {
+    return { status: "error", summary: `Delegation to ${role} failed: ${(e as Error).message}`, results: [], steps: [] };
+  }
+
+  log(`${role} specialist planned ${plan.steps.length} step(s)`);
+  const finished = new Map<string, StepResult>();
+  const results: StepResult[] = [];
+  const pending = [...plan.steps];
+  let guard = 0;
+
+  while (pending.length > 0 && guard++ < 40) {
+    if (parentJob.status === "cancelled" || parentJob.cancelRequested) break;
+    const idx = pending.findIndex((s) => (s.dependsOn ?? []).every((d) => finished.has(d)));
+    const step = idx >= 0 ? pending.splice(idx, 1)[0] : pending.shift()!;
+
+    // Approval-required kinds never run inside a delegate — the root approval
+    // did not explicitly cover them.
+    if (APPROVAL_REQUIRED_KINDS.includes(step.kind)) {
+      const r: StepResult = { stepId: step.id, status: "skipped", error: "not available inside a delegated sub-mission", finishedAt: Date.now() };
+      finished.set(step.id, r);
+      results.push(r);
+      continue;
+    }
+
+    const resolved: AgentStep = {
+      ...step,
+      params: Object.fromEntries(Object.entries(step.params).map(([k, v]) => [k, resolveParam(v, parentJob, finished)])),
+    };
+    log(`[${role}] ${step.title}`);
+    try {
+      const result = await withTimeout(
+        runStep(resolved, finished, parentJob, shouldStop),
+        STEP_TIMEOUT_MS[step.kind] ?? DEFAULT_STEP_TIMEOUT_MS,
+        `${role}: ${step.title}`
+      );
+      const r: StepResult = { stepId: step.id, status: "ok", result, finishedAt: Date.now() };
+      finished.set(step.id, r);
+      results.push(r);
+      collectArtifacts(parentJob, { ...step, id: `${role}:${step.id}` }, result);
+    } catch (e) {
+      const r: StepResult = { stepId: step.id, status: "error", error: (e as Error).message, finishedAt: Date.now() };
+      finished.set(step.id, r);
+      results.push(r);
+    }
+  }
+
+  const ok = results.filter((r) => r.status === "ok");
+  const summaries = ok
+    .map((r) => {
+      const o = r.result as Record<string, unknown> | undefined;
+      return typeof o?.summary === "string" ? o.summary : typeof o?.answer === "string" ? String(o.answer) : "";
+    })
+    .filter(Boolean);
+  const steps = plan.steps.map((s) => ({
+    id: s.id,
+    title: s.title,
+    kind: s.kind,
+    status: (finished.get(s.id)?.status ?? "skipped") as StepResult["status"],
+  }));
+  return {
+    status: ok.length > 0 ? "ok" : "error",
+    summary: summaries.join("\n\n") || `(${role} specialist produced no summary)`,
+    results,
+    steps,
+  };
+}
+
 /* ----------------------------- STEP HANDLERS ----------------------------- */
 
-async function runStep(step: AgentStep, deps: Map<string, StepResult>, job: AgentJob): Promise<unknown> {
+async function runStep(
+  step: AgentStep,
+  deps: Map<string, StepResult>,
+  job: AgentJob,
+  shouldStop?: () => boolean
+): Promise<unknown> {
   const log = (message: string, data?: Record<string, unknown>) =>
     emitMissionEvent(job.id, "log", message, { stepId: step.id, ...data });
 
@@ -2107,6 +2286,100 @@ async function runStep(step: AgentStep, deps: Map<string, StepResult>, job: Agen
         body: JSON.stringify({ title }),
       }, 8000).catch(() => null);
       return { success: true, title, summary: `### 📌 Task Created\n\n- [ ] ${title}` };
+    }
+
+    /* ── v5: autonomous browser agency ─────────────────────────────── */
+
+    case "browser_act": {
+      const task = String(step.params.task ?? step.title ?? "").trim();
+      if (!task) throw new Error("browser_act: task required");
+      const url = typeof step.params.url === "string" && step.params.url.startsWith("http") ? step.params.url : undefined;
+      const session = typeof step.params.session === "string" ? step.params.session : undefined;
+      const maxSteps = Number(step.params.maxSteps ?? 8) || 8;
+      // headed: the user asked to watch this run (panel "Show browser").
+      const headed = job.watch === true;
+      log(`🌐 Autonomous browser${headed ? " (visible window)" : ""}: ${task.slice(0, 70)}`);
+      const res = await browserAct({ task, url, session, maxSteps, log, jobId: job.id, stepId: step.id, headed, shouldStop });
+      const summary = `### 🌐 Autonomous browser — ${res.title || res.finalUrl}\n\n${res.answer || res.summary}${
+        res.actions.length ? `\n\n_${res.actions.length} action(s) taken_` : ""
+      }${res.finalUrl ? `\n\n[Open page](${res.finalUrl})` : ""}`;
+      return { ...res, summary };
+    }
+
+    case "browser_screenshot": {
+      const url = typeof step.params.url === "string" && step.params.url.startsWith("http") ? step.params.url : undefined;
+      const session = typeof step.params.session === "string" ? step.params.session : undefined;
+      const label = String(step.params.label ?? step.title ?? "screenshot");
+      log(`📸 Capturing screenshot: ${label.slice(0, 50)}`);
+      const res = await browserScreenshot({ url, session, label, jobId: job.id });
+      return {
+        ...res,
+        screenshots: res.path ? [res.path] : [],
+        summary: `### 📸 Screenshot captured${res.title ? ` — ${res.title}` : ""}`,
+      };
+    }
+
+    case "browser_login": {
+      const site = String(step.params.site ?? "the site").trim();
+      const url = String(step.params.url ?? "").trim();
+      if (!url.startsWith("http")) throw new Error("browser_login: a valid url is required");
+      const session = String(step.params.session ?? site).trim();
+      const waitMs = Number(step.params.waitMs ?? 180_000) || 180_000;
+      const res = await browserLogin({ site, url, session, waitMs, log, jobId: job.id, stepId: step.id, shouldStop });
+      // A sign-in is interactive by nature: a missing detection is a normal
+      // outcome, not a crash. Downstream steps decide what to do with it.
+      return {
+        ...res,
+        summary:
+          `### 🔐 ${res.message}` +
+          (res.success ? "" : "\n\n_Run the mission again (or say “sign in to " + site + "”) to reopen the window._"),
+      };
+    }
+
+    case "browser_replay": {
+      const name = String(step.params.recording ?? "").trim();
+      if (!name) throw new Error("browser_replay: recording name required");
+      const rec = getRecording(name);
+      if (!rec) throw new Error(`browser_replay: no saved recording named "${name}"`);
+      const res = await replayRecording({ recording: rec, log, jobId: job.id, shouldStop });
+      return { ...res, summary: `### ▶️ ${res.summary}` };
+    }
+
+    /* ── v5: supervisor / specialist delegation ────────────────────── */
+
+    case "delegate": {
+      const role = String(step.params.role ?? "researcher") as SpecialistRole;
+      const goal = String(step.params.goal ?? "").trim();
+      if (!goal) throw new Error("delegate: goal required");
+      if (!SPECIALIST_KINDS[role]) throw new Error(`delegate: unknown role "${role}"`);
+      log(`🤖 Delegating to the ${role} specialist: ${goal.slice(0, 70)}`);
+      const sub = await executeSubPlan(job, role, goal, log, shouldStop);
+      job.delegations = job.delegations ?? [];
+      job.delegations.push({
+        role,
+        goal,
+        status: sub.status,
+        summary: sub.summary.slice(0, 1000),
+        steps: sub.steps,
+        finishedAt: Date.now(),
+      });
+      if (sub.status === "error") job.partial = true;
+      return {
+        role,
+        goal,
+        status: sub.status,
+        summary: `### 🤖 ${role} specialist\n\n${sub.summary}`,
+        results: sub.results.map((r) => ({ stepId: r.stepId, status: r.status, error: r.error })),
+      };
+    }
+
+    /* ── v5: mission video brief ───────────────────────────────────── */
+
+    case "video_brief": {
+      const topic = typeof step.params.topic === "string" ? step.params.topic : undefined;
+      const { path: file, slides } = renderVideoBrief(job, topic, { baseUrl: INTERNAL_BASE });
+      log(`🎬 Video brief rendered (${slides.length} scenes)`);
+      return { path: file, slides: slides.length, summary: briefSummary(slides) };
     }
 
     default: {

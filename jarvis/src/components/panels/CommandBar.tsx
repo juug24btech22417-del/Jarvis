@@ -13,6 +13,7 @@ import { useVolumeControl, useClipboard, useBatteryStatus, useNetworkStatus } fr
 import { addHoverScale, createRipple, animateTyping } from "@/lib/animations/gsap";
 import PersonaSwitcher from "@/components/ui/PersonaSwitcher";
 import type { Macro } from "@/lib/ghost/macroTypes";
+import { startAssemble } from "@/lib/cinematic/assembleStore";
 
 /**
  * Code Forge: route code that JARVIS wrote into the panel instead of the chat.
@@ -114,7 +115,78 @@ function matchMissionCommand(text: string): string | null {
     /\b(?:open|summar\w+)\b[\s\S]{0,80}\b(?:both|all of them|the best one|each)\b/i.test(t)
   ) return t;
 
+  // 5. Interactive / browser-agency missions (v5): the page must be USED.
+  //    "check my amazon orders", "sign in to linkedin and …", "add this to my cart".
+  if (
+    /\b(?:check|look at|see|show me|view)\s+(?:my|the)\s+(?:orders?|account|cart|dashboard|inbox|subscriptions?|wallet|usage|bill)\b/i.test(t) ||
+    /\b(?:sign|log)\s?(?:in|into)\b/i.test(t) ||
+    /\b(?:add to (?:cart|bag)|checkout|purchase|renew my|track my (?:order|package|shipment))\b/i.test(t)
+  )
+    return t;
+
+  // 6. Multi-source price hunts / comparisons.
+  if (
+    /\bcompare\b[\s\S]{0,90}\b(?:and|with|vs\.?|versus|against)\b/i.test(t) ||
+    /\b(?:cheapest|best price|price of|prices? for)\b/i.test(t)
+  )
+    return t;
+
+  // 7. Compound work requests — several work verbs chained together.
+  //    "Research the top 3 AI coding assistants, analyse which is best for a
+  //     student on a budget, write a short report, and send it to my Telegram"
+  //    used to fall through to a plain web search. Long, multi-verb requests
+  //    with a delivery target are ALWAYS missions.
+  const workVerbs =
+    t.match(/\b(?:research|analyse|analyz\w*|compare|compar\w*|summar\w*|write|draft|extract|rank|recommend|compile|gather|investigate|evaluate|assess|deep[- ]?dive|review|report on)\b/gi) ?? [];
+  const deliverTo =
+    /\b(?:telegram|whatsapp|e-?mail|dm me|message me|send (?:it|this|that|me)|(?:to|in) (?:my )?(?:notes|telegram|file)|as a file|save (?:it|this)|report|brief|video|reel)\b/i.test(t);
+  const chained = /\b(?:and|then|plus|also)\b/i.test(t) || /[,;]/.test(t);
+  if (workVerbs.length >= 2 && (chained || t.length > 60)) return t;
+  if (workVerbs.length >= 1 && deliverTo && t.length > 30) return t;
+
+  // 8. Decision asks: "... which is best/cheapest for X".
+  if (/\b(?:which|what)\b[\s\S]{0,40}\b(?:is|are)\b[\s\S]{0,24}\b(?:best|cheapest|fastest|better|recommended|worth it)\b/i.test(t)) return t;
+
+  // 9. Explicit work openers with real substance ("research X", "plan Y").
+  if (/^(?:please\s+|can you\s+|could you\s+|i want you to\s+)?(?:research|analyse|analyze|investigate|summari[sz]e|draft|compile|deep[- ]?dive into)\b/i.test(t) && t.length > 18)
+    return t;
+
   return null;
+}
+
+/**
+ * Natural-language widget requests → the Widgets surface.
+ * Returns the build prompt when the user wants a widget/panel/tracker made,
+ * or "" when they just want the existing widgets opened.
+ */
+function matchWidgetCommand(text: string): string | null {
+  const t = text.trim().replace(/^(?:hey\s+)?jarvis[,:]?\s*/i, "").trim();
+  // "widget"/"dashboard"/"tracker" are unambiguous; a bare "panel" only
+  // counts when the sentence is obviously about tracking something, so
+  // "open the settings panel" never lands here.
+  const strong = /\b(?:widgets?|mini[- ]?panels?|dashboards?|trackers?|tracking panel|hud (?:widget|panel)s?)\b/i;
+  const weak = /\bpanels?\b/i;
+  const build = /\b(?:build|make|create|add|generate|set ?up|give me|i want|i need|need)\b/i;
+  const open = /\b(?:show|open|view|list|display|my|pull up)\b/i;
+  const track = /\b(?:track(?:s|ing)?|monitor(?:s|ing)?|watch(?:ing)?|count(?:s|ing)?|log(?:s|ging)?|follow(?:s|ing)?|keep (?:an )?eye on|remind me)\b/i;
+
+  if (strong.test(t)) {
+    if (build.test(t)) return t;
+    if (open.test(t)) return "";
+    if (track.test(t)) return t;
+    return null;
+  }
+  // "build me a panel that tracks my assignments and crypto"
+  if (weak.test(t) && (track.test(t) || build.test(t))) return t;
+  // "show my panel"
+  if (weak.test(t) && open.test(t)) return "";
+  return null;
+}
+
+/** Natural-language Second Brain / memory-graph requests. */
+function matchBrainCommand(text: string): boolean {
+  const t = text.trim().replace(/^(?:hey\s+)?jarvis[,:]?\s*/i, "").trim();
+  return /\b(?:second brain|knowledge graph|memory (?:graph|constellation|map|brain)|brain (?:view|graph|map)|what do you (?:know|remember) about me|show me my (?:memories|brain))\b/i.test(t);
 }
 
 interface CommandBarProps {
@@ -127,7 +199,6 @@ interface CommandBarProps {
   onOpenVault?: () => void;
   onOpenDungeon?: () => void;
   onOpenHabits?: () => void;
-  onOpenTimeCapsule?: () => void;
   onOpenVoiceNotes?: () => void;
   onOpenWeather?: () => void;
   onOpenSpotify?: () => void;
@@ -149,7 +220,7 @@ interface CommandBarProps {
   onOpenFirecrawl?: () => void;
 }
 
-export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRemote, onOpenTelegram, onOpenCommHub, onOpenSecurity, onOpenVault, onOpenDungeon, onOpenHabits, onOpenTimeCapsule, onOpenVoiceNotes, onOpenWeather, onOpenSpotify, onOpenNews, onOpenCalendar, onOpenAutomation }: CommandBarProps = {}) {
+export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRemote, onOpenTelegram, onOpenCommHub, onOpenSecurity, onOpenVault, onOpenDungeon, onOpenHabits, onOpenVoiceNotes, onOpenWeather, onOpenSpotify, onOpenNews, onOpenCalendar, onOpenAutomation }: CommandBarProps = {}) {
   const [input, setInput] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const voiceBtnRef = useRef<HTMLButtonElement>(null);
@@ -176,6 +247,7 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
   const {
     interimTranscript,
     isSupported: voiceSupported,
+    micError,
     speak,
     startStreamingSpeak,
     sendStreamingChunk,
@@ -184,10 +256,12 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
     lastCommand,
     stopListening,
     hasSpokenRef,
+    resetMic,
   } = useJarvisVoice();
 
   const { setVolume, mute, unmute } = useVolumeControl();
   const setPendingMissionGoal = useJarvisStore((s) => s.setPendingMissionGoal);
+  const setPendingWidgetPrompt = useJarvisStore((s) => s.setPendingWidgetPrompt);
 
   // Derive the "actively listening for commands" state from the Jarvis state machine.
   // This is different from store.isListening which tracks the raw SpeechRecognition engine.
@@ -378,12 +452,35 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
   const processSystemCommand = async (text: string): Promise<string | null> => {
     const lower = text.toLowerCase();
 
+    // ─── AVENGERS ASSEMBLE ───────────────────────────────────────────────
+    // Absolute top priority: this is the cinematic easter egg. Matches
+    // "avengers assemble", "avengers, assemble!", "assemble the avengers".
+    if (/\b(avengers[\s,]+assemble|assemble\s+the\s+avengers|avengers\s+assembled?)\b/i.test(lower)) {
+      startAssemble();
+      return "Avengers… assemble.";
+    }
+
     // TIER 2A v3: HYBRID MISSION CONTROL (Firecrawl × Playwright)
     // Natural-language web missions — "find the best free react course and
     // open the best one", "find the odoo documentation … open both and
     // summarise …", or an explicit "mission: …". MUST run before the
     // generic file/search/music handlers below, which match the same
     // "find …" prefixes.
+    // Widgets / Second Brain come before missions: "build me a panel that
+    // tracks X" is a widget request, not a research mission.
+    const widgetPrompt = matchWidgetCommand(text);
+    if (widgetPrompt !== null) {
+      setPendingWidgetPrompt(widgetPrompt || null);
+      setActivePanel("widgets");
+      return widgetPrompt
+        ? "Building you a live widget for that now, Boss — it'll render straight into the HUD."
+        : "Opening your widgets, Boss.";
+    }
+    if (matchBrainCommand(text)) {
+      setActivePanel("second-brain");
+      return "Opening your Second Brain. Every memory is a star — click one to see how it connects.";
+    }
+
     const missionGoal = matchMissionCommand(text);
     if (missionGoal) {
       setPendingMissionGoal(missionGoal);
@@ -1436,13 +1533,7 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
       }
     }
 
-    // TIME CAPSULE COMMANDS
-    if (lower.includes("time capsule") || lower.includes("memories") || lower.includes("remember") || lower.includes("on this day")) {
-      if (lower.includes("open") || lower.includes("show") || lower.includes("check") || lower.includes("view")) {
-        onOpenTimeCapsule?.();
-        return "Opening the Time Capsule. Let's see what you've been up to, Boss.";
-      }
-    }
+
 
     // VOICE NOTES COMMANDS (Tier 1)
     // Skip if this is a macro command ("record macro", "stop recording" for macro, etc.)
@@ -2636,6 +2727,37 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
     if (lower.match(/\b(open\s+(?:the\s+)?(?:analytics|ghost\s+analytics|form\s+analytics)|analytics\s+panel|show\s+analytics)\b/)) {
       setActivePanel("analytics");
       return "Opening Ghost Analytics, Boss.";
+    }
+
+    // ─── TIER 4: 5 NEW WILD FEATURES ──────────────────────────────────────────
+    // 1. QR Code Teleporter
+    if (lower.match(/\b(teleport|teleporter|qr code|beam to phone|send to phone|qr beam|qr teleporter)\b/)) {
+      setActivePanel("qr-teleporter");
+      return "Quantum QR Teleporter online. Point your camera to beam active data to your phone, Boss.";
+    }
+
+    // 2. Proximity Awareness Radar
+    if (lower.match(/\b(proximity|radar|presence|nearby devices|detect phone|desk presence|who is nearby)\b/)) {
+      setActivePanel("proximity-scanner");
+      return "Activating Proximity Radar and Desk Presence Sentinel, Boss.";
+    }
+
+    // 3. AI Video Director
+    if (lower.match(/\b(video director|director mode|create video|generate video|make a video|render reel|video creator)\b/)) {
+      setActivePanel("video-director");
+      return "Stark Cinema AI Video Director engaged. Script your vision and I will composite it in 60 seconds, Boss.";
+    }
+
+    // 4. Spatial Desk & Room Scanner
+    if (lower.match(/\b(room scanner|desk scanner|where is my|locate object|find my charger|find my keys|spatial scanner)\b/)) {
+      setActivePanel("room-scanner");
+      return "Spatial Desk Scanner activated. Calibrating 3D coordinate lidar grid, Boss.";
+    }
+
+    // 5. Whiteboard OCR Live
+    if (lower.match(/\b(whiteboard|whiteboard ocr|scan notes|digitize notes|handwriting|scan diagram|transcribe notes)\b/)) {
+      setActivePanel("whiteboard-ocr");
+      return "Whiteboard OCR & Schematic Digitizer online. Contrast filters and vectorizer ready, Boss.";
     }
 
     return null;
@@ -3931,6 +4053,26 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
       transition={{ type: "spring", stiffness: 140, damping: 20, delay: 5 }}
     >
       <div className="max-w-2xl mx-auto">
+        {/* ─── Mic Error Banner ─── */}
+        {micError && (
+          <motion.div
+            initial={{ opacity: 0, y: 10, height: 0 }}
+            animate={{ opacity: 1, y: 0, height: "auto" }}
+            exit={{ opacity: 0, y: 10, height: 0 }}
+            className="mb-2 px-4 py-2 rounded-xl bg-accent-red/10 border border-accent-red/30 flex items-center justify-between gap-3"
+          >
+            <div className="flex items-center gap-2">
+              <span className="text-accent-red text-sm">⚠</span>
+              <span className="text-xs text-accent-red/90 font-rajdhani">{micError}</span>
+            </div>
+            <button
+              onClick={() => resetMic()}
+              className="text-xs font-orbitron text-reactor-core border border-reactor-core/40 px-2 py-0.5 rounded-md hover:bg-reactor-core/10 transition-colors flex-shrink-0"
+            >
+              Retry Mic
+            </button>
+          </motion.div>
+        )}
         {/* ─── Compact Voice Pill ─── */}
         <div
           className="holographic-panel rounded-[26px] px-4 pt-2 pb-2.5 shadow-[0_8px_40px_rgba(0,212,255,0.12),0_2px_16px_rgba(0,0,0,0.55)]"

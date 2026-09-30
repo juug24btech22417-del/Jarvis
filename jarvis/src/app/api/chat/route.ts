@@ -9,7 +9,7 @@ import { parseCommand, JARVISContext, buildSystemPrompt, parseIntentWithLLM, PER
 const execAsync = promisify(exec);
 import { retrieveRelevantMemories, formatMemoryContextAsPrompt } from "@/lib/memory/retriever";
 import { extractAndStoreMemories } from "@/lib/memory/extractor";
-import { bumpUsage } from "@/lib/memory/graph";
+import { bumpUsage, listEntityNames } from "@/lib/memory/graph";
 import { recordEvent } from "@/lib/memory/patterns";
 import { getCareContext, recordCareSignals, getPastWin } from "@/lib/companion/care";
 import {
@@ -1097,7 +1097,23 @@ export async function POST(request: Request) {
           log(`[Chat] ${label} failed (non-fatal):`, err?.message ?? err);
         });
       }, 4000);
-    defer(() => extractAndStoreMemories(lastUserMessage), "Memory extraction");
+    // The last few turns let the extractor resolve "he"/"that", and the names
+    // already in the graph let it reuse them so a repeated fact sharpens its
+    // node instead of adding a near-duplicate.
+    const recentTurns = (Array.isArray(messages) ? messages : [])
+      .slice(-6)
+      .map(
+        (m: { role?: string; content?: unknown }) =>
+          `${m.role === "assistant" ? "JARVIS" : "User"}: ${String(m.content ?? "").replace(/\s+/g, " ").slice(0, 400)}`
+      )
+      .join("\n");
+    defer(
+      async () => {
+        const known = await listEntityNames(60).catch(() => [] as string[]);
+        return extractAndStoreMemories(lastUserMessage, recentTurns, known.join(", "));
+      },
+      "Memory extraction"
+    );
     defer(() => recordCareSignals(lastUserMessage), "Care signal recording", true);
     defer(() => maybeAutoMilestone(lastUserMessage), "Milestone auto-detect", true);
 

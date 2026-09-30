@@ -5,7 +5,9 @@
 // GET (no jobId) → list
 
 import { NextRequest, NextResponse } from "next/server";
-import { planGoal, approveJob, cancelJob, resumeCheckpoint, getJob, listJobs } from "@/services/AgentService";
+import { planGoal, approveJob, cancelJob, resumeCheckpoint, getJob, listJobs, listJobSummaries } from "@/services/AgentService";
+import { renderVideoBrief, briefSummary } from "@/services/MissionVideoService";
+import { putJob, flushMissions } from "@/lib/agent/store";
 
 export async function GET(req: NextRequest) {
   const jobId = req.nextUrl.searchParams.get("jobId");
@@ -13,6 +15,10 @@ export async function GET(req: NextRequest) {
     const job = getJob(jobId);
     if (!job) return NextResponse.json({ error: "Job not found" }, { status: 404 });
     return NextResponse.json(job);
+  }
+  // ?summary=1 → lightweight history rail (id/goal/status/timestamps).
+  if (req.nextUrl.searchParams.get("summary") === "1") {
+    return NextResponse.json({ jobs: listJobSummaries() });
   }
   return NextResponse.json({ jobs: listJobs() });
 }
@@ -38,6 +44,27 @@ export async function POST(req: NextRequest) {
       if (!job) return NextResponse.json({ error: "Job not found" }, { status: 404 });
       return NextResponse.json(job);
     }
+    if (action === "video_brief") {
+      const job = getJob(jobId);
+      if (!job) return NextResponse.json({ error: "Job not found" }, { status: 404 });
+      // Serve audio/imagery from the origin the panel is actually using.
+      const { path: file, slides } = renderVideoBrief(job, undefined, { baseUrl: req.nextUrl.origin });
+      job.artifacts = job.artifacts ?? [];
+      if (!job.artifacts.some((a) => a.value === file)) {
+        job.artifacts.push({
+          id: `brief_${Date.now()}`,
+          kind: "video",
+          label: "Mission video brief",
+          value: file,
+          stepId: "panel",
+          at: Date.now(),
+        });
+      }
+      putJob(job);
+      flushMissions();
+      return NextResponse.json({ path: file, slides: slides.length, summary: briefSummary(slides) });
+    }
+
     if (action === "resume") {
       // Checkpoint answer from the user (e.g. which option they picked).
       const pick = typeof body.pick === "string" ? body.pick.trim() : "";
@@ -58,6 +85,11 @@ export async function POST(req: NextRequest) {
   if (goal.length > 600) return NextResponse.json({ error: "Goal too long (max 600 chars)" }, { status: 400 });
 
   // auto: true → fast lane (skip the approval gate, execute immediately).
-  const job = await planGoal(goal, { autoApprove: body.auto === true });
+  // watch: true → open a visible Chromium window for autonomous browser steps
+  // and stream live frames to the panel.
+  const job = await planGoal(goal, {
+    autoApprove: body.auto !== false,
+    watch: body.watch === true,
+  });
   return NextResponse.json(job, { status: 202 });
 }

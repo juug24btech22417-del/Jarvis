@@ -1,0 +1,55 @@
+[29/9/2026, 11:01:27 pm]
+### 🧾 Extracted Data
+
+- ```json
+{
+  "itinerary": [
+    {
+      "day": "Day 1",
+      "arrival": "Morning",
+      "activities": [
+        "Arrive in Madikeri via bus/shared taxi",
+        "Check‑in at homestay",
+        "Visit Abbey Falls (short walk, entry ₹20)",
+        "Explore Madikeri Fort & Raja’s Seat (free)",
+        "Dinner at homestay (included)"
+      ],
+      "accommodation": "Pine Ridge Homestay"
+    },
+    {
+      "day": "Day 2",
+      "activities": [
+        "Breakfast at homestay",
+        "Day trip to Talacauvery (entrance ₹10)",
+        "Lunch at local dhaba (₹150)",
+        "Visit Dubare Elephant Camp (entry ₹200, optional elephant ride ₹300)",
+        "Return to homestay for dinner"
+      ],
+      "accommodation": "Pine Ridge Homestay"
+    },
+    {
+      "day": "Day 3",
+      "activities": [
+        "Breakfast at homestay",
+        "Morning walk at Bhagamandala (free)",
+        "Shopping at Madikeri Market (budget ₹200)",
+        "Check‑out and departure to Bangalore"
+      ],
+      "accommodation": "N/A"
+    }
+  ],
+  "accommodation_options": [
+    {
+      "name": "Pine Ridge Homestay",
+      "location": "Madikeri",
+      "price_per_night": "₹1,200",
+      "amenities": [
+        "Wi‑Fi",
+        "Breakfast",
+        "Local cuisine",
+        "Guided local tours"
+      ],
+      "contact": "tel:+91-123-456-7890"
+    },
+    {
+      "name": "Coorg Cottage
