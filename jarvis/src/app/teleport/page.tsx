@@ -154,25 +154,101 @@ function TeleportContent() {
     [voiceMuted]
   );
 
-  // Check Sonar Ping from PC
+  // Check Sonar Ping from PC — the PC can raise this from the radar or the
+  // workstation remote, so announce once and keep pulsing until it clears.
+  const sonarWasActive = useRef(false);
   useEffect(() => {
-    const timer = setInterval(async () => {
+    let cancelled = false;
+    const tick = async () => {
       try {
-        const res = await fetch("/api/teleport?pingCheck=1");
+        const res = await fetch("/api/teleport?pingCheck=1", { cache: "no-store" });
         const data = await res.json();
-        if (data?.phonePingActive) {
-          setSonarAlertActive(true);
-          if (typeof navigator !== "undefined" && "vibrate" in navigator) {
-            navigator.vibrate([300, 150, 300, 150, 500]);
-          }
-          speakText("Sonar ping received from Stark console! Location beacon active!");
-        } else {
-          setSonarAlertActive(false);
+        if (cancelled) return;
+        const active = !!data?.phonePingActive;
+        setSonarAlertActive(active);
+        if (typeof navigator !== "undefined" && "vibrate" in navigator && active) {
+          navigator.vibrate(sonarWasActive.current ? [300, 180, 300] : [500, 200, 500, 200, 700]);
         }
+        if (active && !sonarWasActive.current) {
+          speakText("Sonar ping received from Stark console! Location beacon active!");
+        }
+        sonarWasActive.current = active;
       } catch {}
-    }, 3000);
-    return () => clearInterval(timer);
+    };
+    tick();
+    const timer = setInterval(tick, 1500);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   }, [speakText]);
+
+  // A real ring tone. Speech alone is silent on plenty of Android builds, and
+  // "the phone doesn't make a sound" was the whole complaint.
+  const sonarAudio = useRef<{
+    ctx: AudioContext | null;
+    timer: ReturnType<typeof setInterval> | null;
+  }>({ ctx: null, timer: null });
+
+  useEffect(() => {
+    const unlock = () => {
+      const st = sonarAudio.current;
+      try {
+        if (!st.ctx) {
+          const Ctor = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+          st.ctx = new Ctor();
+        }
+        if (st.ctx.state === "suspended") void st.ctx.resume();
+      } catch {
+        /* audio unavailable — the overlay and vibration still fire */
+      }
+    };
+    window.addEventListener("pointerdown", unlock, { once: true });
+    return () => window.removeEventListener("pointerdown", unlock);
+  }, []);
+
+  useEffect(() => {
+    const st = sonarAudio.current;
+    if (!sonarAlertActive) {
+      if (st.timer) {
+        clearInterval(st.timer);
+        st.timer = null;
+      }
+      return;
+    }
+    const blip = (freq: number, dur: number) => {
+      const ctx = st.ctx;
+      if (!ctx || ctx.state === "suspended") return;
+      try {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.value = freq;
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        const t = ctx.currentTime;
+        gain.gain.setValueAtTime(0.0001, t);
+        gain.gain.exponentialRampToValueAtTime(0.35, t + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+        osc.start(t);
+        osc.stop(t + dur + 0.03);
+      } catch {
+        /* ignore a transient audio failure */
+      }
+    };
+    blip(1046, 0.3);
+    window.setTimeout(() => blip(784, 0.3), 220);
+    st.timer = setInterval(() => {
+      blip(1046, 0.3);
+      window.setTimeout(() => blip(784, 0.3), 220);
+    }, 1150);
+    return () => {
+      if (st.timer) {
+        clearInterval(st.timer);
+        st.timer = null;
+      }
+    };
+  }, [sonarAlertActive]);
 
   // Fetch PC Payload
   const BASE = id ? `/api/teleport?id=${id}` : "/api/teleport";

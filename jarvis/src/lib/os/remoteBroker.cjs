@@ -11,6 +11,7 @@ const os = require("os");
 const { exec } = require("child_process");
 
 const input = require("./input.cjs");
+const { APPS } = require("./apps.cjs");
 
 const PORT = 3311;
 const app = express();
@@ -19,7 +20,7 @@ app.use(express.json());
 // The phone is on the LAN; allow the control page to call us.
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
@@ -38,6 +39,117 @@ function lanIP() {
 // Health/identity — the remote page checks this to show the right title.
 app.get("/api/info", (req, res) => {
   res.json({ app: "jarvis-remote", host: os.hostname(), ip: lanIP() });
+});
+
+// ── Find-my-phone: the PC raises a ping, the phone page rings ───────────────
+//
+// A ping is STICKY: it keeps ringing until the phone acknowledges it (or the
+// window expires). Android freezes background tabs, so a short window meant a
+// ring could be missed entirely if the screen was off when it was raised.
+const PING_WINDOW_MS = 120_000;
+let lastPingAt = 0;
+let lastPingAckAt = 0;
+let lastPhonePollAt = 0; // last contact from a real client (not this machine)
+
+function isLocal(req) {
+  const ip = req.socket.remoteAddress || "";
+  return ip === "::1" || ip === "127.0.0.1" || ip.startsWith("::ffff:127.") || ip === "::ffff:127.0.0.1";
+}
+
+app.post("/api/ping", (req, res) => {
+  lastPingAt = Date.now();
+  lastPingAckAt = 0;
+  res.json({ success: true, at: lastPingAt, windowMs: PING_WINDOW_MS });
+});
+
+app.get("/api/ping", (req, res) => {
+  if (!isLocal(req)) lastPhonePollAt = Date.now();
+  const ageMs = lastPingAt ? Date.now() - lastPingAt : Infinity;
+  const expired = !Number.isFinite(ageMs) || ageMs > PING_WINDOW_MS;
+  const acked = lastPingAckAt >= lastPingAt && lastPingAckAt > 0;
+  res.json({
+    success: true,
+    ringing: !expired && !acked,
+    at: lastPingAt,
+    ageMs: Number.isFinite(ageMs) ? ageMs : null,
+    windowMs: PING_WINDOW_MS,
+  });
+});
+
+// The phone confirms it is actually ringing — stops the sticky ping.
+app.post("/api/ping/ack", (req, res) => {
+  lastPingAckAt = Date.now();
+  res.json({ success: true, at: lastPingAckAt });
+});
+
+// ── Presence beacon: the phone reports itself, and its real LAN IP is read
+//    from the socket so JARVIS can match it to the scanned device and label it.
+//
+//    `rssi` is optional and honest: a browser cannot read Wi-Fi RSSI, so it is
+//    only ever filled in by a client that can (an Android automation posting
+//    the real dBm to this endpoint). Without it the beacon still proves
+//    presence and reports link RTT, which is a real measurement too.
+const beacons = new Map(); // ip -> { ip, beaconId, model, label, rttMs, rssi, ..., at }
+const BEACON_TTL_MS = 60_000;
+
+function numOrNull(v) {
+  return Number.isFinite(Number(v)) ? Number(v) : null;
+}
+
+app.post("/api/beacon", (req, res) => {
+  const ip = req.socket.remoteAddress || "";
+  const b = req.body || {};
+  const rssi = numOrNull(b.rssi);
+  beacons.set(ip, {
+    ip,
+    beaconId: b.beaconId ? String(b.beaconId).slice(0, 48) : "",
+    model: b.model ? String(b.model).slice(0, 40) : null,
+    label: b.label ? String(b.label).slice(0, 40) : null,
+    platform: b.platform ? String(b.platform).slice(0, 40) : null,
+    connection: b.connection ? String(b.connection).slice(0, 24) : null,
+    downlinkMbps: numOrNull(b.downlinkMbps),
+    rttMs: numOrNull(b.rttMs),
+    // dBm is always negative — anything else is not a radio reading.
+    rssi: rssi != null && rssi < 0 && rssi > -120 ? rssi : null,
+    battery: numOrNull(b.battery),
+    batteryCharging: typeof b.batteryCharging === "boolean" ? b.batteryCharging : null,
+    at: Date.now(),
+  });
+  res.json({ success: true, ip });
+});
+
+// Beacon mode turned off on the phone → drop it immediately.
+app.delete("/api/beacon", (req, res) => {
+  beacons.delete(req.socket.remoteAddress || "");
+  res.json({ success: true });
+});
+
+app.get("/api/beacon", (req, res) => {
+  if (!isLocal(req)) lastPhonePollAt = Date.now();
+  const now = Date.now();
+  const fresh = [...beacons.values()]
+    .filter((b) => now - b.at < BEACON_TTL_MS)
+    .map((b) => ({ ...b, ageMs: now - b.at }));
+  res.json({ success: true, beacons: fresh, ttlMs: BEACON_TTL_MS });
+});
+
+// Is a phone actually connected to this broker right now? Used by the proximity
+// panel so "my phone never rang" is diagnosable instead of a silent mystery.
+app.get("/api/status", (req, res) => {
+  const now = Date.now();
+  const pollAgeMs = lastPhonePollAt ? now - lastPhonePollAt : null;
+  res.json({
+    success: true,
+    host: os.hostname(),
+    ip: lanIP(),
+    port: PORT,
+    url: `http://${lanIP()}:${PORT}/remote`,
+    // The remote page polls every 1.5s, so a poll in the last 15s means connected.
+    phoneConnected: pollAgeMs != null && pollAgeMs < 15_000,
+    lastPhonePollMs: pollAgeMs,
+    beaconCount: [...beacons.values()].filter((b) => now - b.at < BEACON_TTL_MS).length,
+    ringing: lastPingAt > lastPingAckAt && now - lastPingAt < PING_WINDOW_MS,
+  });
 });
 
 // Media + volume commands.
@@ -142,15 +254,6 @@ app.post("/api/type", (req, res) => {
 });
 
 // Launch apps — explicit allowlist only, never raw shell from the phone.
-const APPS = {
-  spotify: { label: "Spotify", cmd: 'start "" "spotify:"' },
-  chrome: { label: "Chrome", cmd: 'start "" chrome' },
-  explorer: { label: "Files", cmd: 'start "" explorer' },
-  terminal: { label: "Terminal", cmd: 'start "" cmd' },
-  notepad: { label: "Notepad", cmd: 'start "" notepad' },
-  calc: { label: "Calculator", cmd: 'start "" calc' },
-  taskmgr: { label: "Task Manager", cmd: 'start "" taskmgr' },
-};
 app.get("/api/apps", (req, res) => {
   res.json({ success: true, apps: Object.entries(APPS).map(([id, a]) => ({ id, label: a.label })) });
 });
@@ -216,6 +319,46 @@ app.get("/remote", (req, res) => {
   .volrow button { padding:12px 16px; }
   .status { min-height:18px; text-align:center; font-size:11px; color:var(--dim); padding:6px 0 10px; }
 
+  /* ── Find-my-phone ring + sound unlock ── */
+  #ring { position:fixed; inset:0; display:none; z-index:50; align-items:center; justify-content:center;
+          flex-direction:column; gap:12px; text-align:center; padding:24px;
+          background:radial-gradient(60% 60% at 50% 38%, rgba(0,212,255,.30), rgba(4,7,13,.97));
+          backdrop-filter:blur(8px); }
+  #ring.on { display:flex; }
+  #ring .bells { font-size:74px; animation:swing .5s ease-in-out infinite alternate; }
+  @keyframes swing { from { transform:rotate(-14deg) scale(1); } to { transform:rotate(14deg) scale(1.08); } }
+  #ring h1 { font-size:18px; margin:0; color:#bfe9ff; letter-spacing:.08em; }
+  #ring p { margin:0; color:#6b8ba3; font-size:12px; }
+  #ring button { margin-top:10px; padding:15px 30px; border-radius:18px; border:none;
+                 background:var(--cyan); color:#02141d; font-weight:800; letter-spacing:.14em; font-size:13px; }
+  #soundbtn { position:fixed; left:14px; right:14px; bottom:84px; z-index:40; display:none;
+              padding:15px; border:none; border-radius:18px; background:var(--cyan); color:#02141d;
+              font-weight:800; letter-spacing:.06em; font-size:13px; box-shadow:0 8px 30px rgba(0,212,255,.35); }
+  #soundbtn.on { display:block; }
+  #soundbtn.done { display:none; }
+
+  /* ── Presence beacon tab ── */
+  .beacon { flex:1; overflow:auto; padding:14px 14px 18px; display:flex; flex-direction:column; gap:12px; }
+  .bcard { border:1px solid var(--line); border-radius:20px; background:var(--panel); padding:16px; }
+  .brow { display:flex; justify-content:space-between; align-items:baseline; gap:14px; font-size:12.5px;
+          padding:8px 0; border-bottom:1px solid rgba(18,40,58,.75); }
+  .brow:last-child { border-bottom:none; padding-bottom:0; }
+  .brow .k { color:var(--dim); letter-spacing:.1em; flex:0 0 auto; }
+  .brow .v { text-align:right; word-break:break-word; }
+  .btoggle { display:flex; align-items:center; justify-content:space-between; gap:14px; }
+  .btoggle .lab { font-size:13.5px; letter-spacing:.04em; display:flex; align-items:center; gap:8px; }
+  .btoggle .sub { font-size:10.5px; color:var(--dim); margin-top:5px; line-height:1.5; max-width:210px; }
+  .switch { width:54px; height:32px; border-radius:999px; border:none; background:#16303f; position:relative;
+            flex:0 0 auto; padding:0; transition:background .18s; }
+  .switch i { position:absolute; top:3px; left:3px; width:26px; height:26px; border-radius:999px; background:#5b7787;
+              transition:transform .18s, background .18s; }
+  .switch.on { background:var(--cyan); }
+  .switch.on i { transform:translateX(22px); background:#02141d; }
+  .pill { font-size:9.5px; font-weight:700; letter-spacing:.1em; padding:3px 8px; border-radius:999px;
+          border:1px solid var(--line); color:var(--dim); }
+  .pill.live { color:#5cf2b6; border-color:#1b5c45; }
+  .hintline { font-size:10.5px; color:var(--dim); line-height:1.6; padding:0 4px; }
+
   /* ── Keyboard tab ── */
   .typeline { display:flex; gap:8px; padding:6px 12px 2px; }
   .typeline input { flex:1; background:var(--panel); border:1px solid var(--line); color:var(--txt);
@@ -227,7 +370,7 @@ app.get("/remote", (req, res) => {
   .krows button { padding:13px 0; font-size:13px; border-radius:12px; }
 
   /* ── Tab bar ── */
-  nav { display:grid; grid-template-columns:repeat(4,1fr); border-top:1px solid var(--line);
+  nav { display:grid; grid-template-columns:repeat(5,1fr); border-top:1px solid var(--line);
         background:rgba(6,12,20,.92); backdrop-filter:blur(10px); padding-bottom:env(safe-area-inset-bottom); }
   nav button { border:none; background:none; color:var(--dim); font-size:10px; letter-spacing:.12em;
                padding:10px 0 12px; display:flex; flex-direction:column; gap:4px; align-items:center; }
@@ -300,11 +443,45 @@ app.get("/remote", (req, res) => {
   <div class="status"></div>
 </main>
 
+<main id="tab-beacon">
+  <div class="beacon">
+    <div class="bcard btoggle">
+      <div>
+        <div class="lab">Presence beacon <span class="pill" id="bstate">OFF</span></div>
+        <div class="sub">While on, this phone announces itself to JARVIS every 6 seconds.</div>
+      </div>
+      <button class="switch" id="bswitch" aria-label="Toggle presence beacon"><i></i></button>
+    </div>
+    <div class="bcard" style="padding-top:10px; padding-bottom:12px">
+      <div class="brow"><span class="k">DEVICE</span><span class="v" id="bdev">&mdash;</span></div>
+      <div class="brow"><span class="k">IP ADDRESS</span><span class="v" id="bip">&mdash;</span></div>
+      <div class="brow"><span class="k">LINK RTT</span><span class="v" id="brtt">&mdash;</span></div>
+      <div class="brow"><span class="k">WIFI RSSI</span><span class="v" id="brssi">&mdash;</span></div>
+      <div class="brow"><span class="k">LAST REPORT</span><span class="v" id="bat">&mdash;</span></div>
+    </div>
+    <div class="hintline">
+      Browsers are not allowed to read Wi&#8209;Fi signal strength, so RSSI stays empty until a real
+      reading is posted to <code>/api/beacon</code> (e.g. from an Android automation). Presence,
+      IP and link RTT are real and reported automatically.
+    </div>
+  </div>
+</main>
+
+<div id="ring">
+  <div class="bells">&#128276;</div>
+  <h1>J.A.R.V.I.S. IS PINGING YOUR PHONE</h1>
+  <p>Boss asked me to locate you.</p>
+  <button id="ringstop">STOP ALERT</button>
+</div>
+
+<button id="soundbtn">TAP TO ENABLE ALERT SOUND</button>
+
 <nav>
   <button data-t="pad" class="active"><span class="ic">&#9635;</span>PAD</button>
   <button data-t="keys"><span class="ic">&#9000;</span>KEYS</button>
   <button data-t="media"><span class="ic">&#9836;</span>MEDIA</button>
   <button data-t="apps"><span class="ic">&#9636;</span>APPS</button>
+  <button data-t="beacon"><span class="ic">&#9673;</span>BEACON</button>
 </nav>
 
 <script>
@@ -475,6 +652,159 @@ app.get("/remote", (req, res) => {
   fetch('/api/info').then(r => r.json()).then(d => {
     $('#host').textContent = 'ARC REMOTE · ' + (d.host || '');
   }).catch(() => {});
+
+  // ── Find-my-phone ring ──────────────────────────────────────────────────
+  let actx = null, ringTimer = null, ringing = false;
+  function unlockSound() {
+    try {
+      if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+      if (actx.state === 'suspended') actx.resume();
+      try { localStorage.setItem('jarvis_sound', '1'); } catch {}
+      var b = $('#soundbtn'); if (b) { b.classList.remove('on'); b.classList.add('done'); }
+      blip(880, 0.08);
+    } catch (e) {}
+  }
+  function blip(freq, dur) {
+    if (!actx) return;
+    try {
+      var o = actx.createOscillator(), g = actx.createGain();
+      o.type = 'sine'; o.frequency.value = freq;
+      o.connect(g); g.connect(actx.destination);
+      var t = actx.currentTime;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.4, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.start(t); o.stop(t + dur + 0.03);
+    } catch (e) {}
+  }
+  // Rings until someone presses STOP (or the PC-side ping window expires).
+  // Unlocking sound needs one tap, so the overlay + vibration must stand alone.
+  var wasRinging = false;
+  function startRing() {
+    if (ringing) return;
+    ringing = true;
+    $('#ring').classList.add('on');
+    try { $('.bells') && ($('.bells').style.display = 'block'); } catch (e) {}
+    if (navigator.vibrate) navigator.vibrate([600, 200, 600, 200, 600]);
+    ringTimer = setInterval(function () {
+      if (!actx) unlockSound();
+      if (actx && actx.state === 'suspended') { try { actx.resume(); } catch (e) {} }
+      blip(1046, 0.35);
+      setTimeout(function () { blip(784, 0.3); }, 220);
+      setTimeout(function () { blip(1046, 0.3); }, 440);
+      if (navigator.vibrate) navigator.vibrate([400, 180, 400]);
+    }, 1150);
+    // Tell the PC the ring actually landed, so the ping stops re-firing.
+    fetch('/api/ping/ack', { method: 'POST' }).catch(function () {});
+  }
+  function stopRing() {
+    ringing = false;
+    if (ringTimer) { clearInterval(ringTimer); ringTimer = null; }
+    $('#ring').classList.remove('on');
+    if (navigator.vibrate) navigator.vibrate(0);
+  }
+  $('#ringstop').addEventListener('click', stopRing);
+  $('#soundbtn').addEventListener('click', unlockSound);
+  document.addEventListener('pointerdown', function () { if (!actx) unlockSound(); }, { once: true });
+  try { if (localStorage.getItem('jarvis_sound') !== '1') $('#soundbtn').classList.add('on'); } catch { $('#soundbtn').classList.add('on'); }
+
+  // Android suspends background tabs, so also check the moment the page wakes.
+  function checkPing() {
+    fetch('/api/ping', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
+      if (d.ringing && !wasRinging) startRing();
+      if (!d.ringing && wasRinging) stopRing();
+      wasRinging = !!d.ringing;
+    }).catch(function () {});
+  }
+  setInterval(checkPing, 1500);
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) { checkPing(); checkPing(); }
+  });
+  window.addEventListener('focus', checkPing);
+  window.addEventListener('pageshow', checkPing);
+  checkPing();
+  // A ring raised while the page was asleep should land on wake, not be missed.
+  setTimeout(checkPing, 3000);
+
+  // ── Presence beacon: report this phone (its IP is read from the socket) ──
+  var beaconId = '';
+  try { beaconId = localStorage.getItem('jarvis_beacon_id') || ''; } catch {}
+  if (!beaconId) {
+    beaconId = 'pb-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    try { localStorage.setItem('jarvis_beacon_id', beaconId); } catch {}
+  }
+  var beaconOn = true;
+  try { beaconOn = localStorage.getItem('jarvis_beacon') !== '0'; } catch {}
+  var beaconTimer = null, beaconSentAt = 0, beaconRtt = null, beaconSeen = [];
+
+  function modelFromUA() {
+    var ua = navigator.userAgent || '';
+    var m = ua.match(/;\s*(SM-[A-Z0-9]+|Pixel [A-Za-z0-9 ]+|Redmi [A-Za-z0-9 ]+|OnePlus [A-Za-z0-9]+|CPH[0-9]+|V[0-9]{4,})[;)]/i);
+    if (m) return m[1].trim();
+    if (/iPhone/i.test(ua)) return 'iPhone';
+    if (/iPad/i.test(ua)) return 'iPad';
+    return '';
+  }
+  function netInfo() {
+    var c = navigator.connection || navigator.mozConnection || navigator.webkitConnection || null;
+    return {
+      connection: c ? (c.effectiveType || c.type || null) : null,
+      downlinkMbps: c && isFinite(c.downlink) ? Math.round(c.downlink * 10) / 10 : null,
+      netRttMs: c && isFinite(c.rtt) ? c.rtt : null,
+    };
+  }
+  function beaconPaint() {
+    var sw = $('#bswitch'), st = $('#bstate');
+    if (!sw || !st) return;
+    sw.classList.toggle('on', beaconOn);
+    st.textContent = beaconOn ? 'LIVE' : 'OFF';
+    st.classList.toggle('live', beaconOn);
+    var n = netInfo();
+    var me = beaconSeen.filter(function (b) { return b.beaconId === beaconId; })[0] || beaconSeen[0] || null;
+    $('#bdev').textContent = modelFromUA() || 'This phone';
+    $('#bip').textContent = (me && me.ip) ? me.ip : '\u2014';
+    $('#brtt').textContent = beaconRtt != null
+      ? Math.round(beaconRtt) + ' ms'
+      : (n.netRttMs != null ? n.netRttMs + ' ms (network est.)' : '\u2014');
+    $('#brssi').textContent = (me && me.rssi != null) ? me.rssi + ' dBm' : 'not exposed to browsers';
+    $('#bat').textContent = beaconSentAt ? Math.round((Date.now() - beaconSentAt) / 1000) + 's ago' : '\u2014';
+  }
+  function postBeacon() {
+    if (!beaconOn) return;
+    var t0 = performance.now();
+    fetch('/api/info', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function () {
+      beaconRtt = Math.round((performance.now() - t0) * 10) / 10;
+      var n = netInfo();
+      return fetch('/api/beacon', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          beaconId: beaconId, model: modelFromUA(), rttMs: beaconRtt,
+          platform: navigator.platform || '',
+          connection: n.connection, downlinkMbps: n.downlinkMbps,
+        }),
+      });
+    }).then(function () { beaconSentAt = Date.now(); beaconPaint(); }).catch(function () {});
+  }
+  function setBeacon(on) {
+    beaconOn = !!on;
+    try { localStorage.setItem('jarvis_beacon', beaconOn ? '1' : '0'); } catch {}
+    if (beaconTimer) { clearInterval(beaconTimer); beaconTimer = null; }
+    if (beaconOn) {
+      postBeacon();
+      beaconTimer = setInterval(postBeacon, 6000);
+    } else {
+      beaconRtt = null; beaconSentAt = 0;
+      fetch('/api/beacon', { method: 'DELETE' }).catch(function () {});
+    }
+    beaconPaint();
+  }
+  if ($('#bswitch')) $('#bswitch').addEventListener('click', function () { setBeacon(!beaconOn); });
+  setBeacon(beaconOn);
+  setInterval(function () {
+    fetch('/api/beacon', { cache: 'no-store' }).then(function (r) { return r.json(); })
+      .then(function (d) { beaconSeen = (d && d.beacons) || []; beaconPaint(); })
+      .catch(function () {});
+  }, 3000);
 </script>
 </body></html>`);
 });

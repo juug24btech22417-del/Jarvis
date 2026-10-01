@@ -7,95 +7,6 @@ import fs from "fs/promises";
 
 const execAsync = promisify(exec);
 
-const CORE_AUDIO_C_SHARP = `
-using System;
-using System.Runtime.InteropServices;
-
-public class Audio {
-    [DllImport("ole32.dll")]
-    private static extern int CoCreateInstance(ref Guid rclsid, IntPtr pUnkOuter, int dwClsContext, ref Guid riid, out IntPtr ppv);
-
-    private static readonly Guid CLSID_MMDeviceEnumerator = new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E");
-    private static readonly Guid IID_IMMDeviceEnumerator   = new Guid("A95664D2-9614-4F35-A746-DE8DB63617E6");
-    private static readonly Guid IID_IAudioEndpointVolume  = new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
-
-    [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IMMDeviceEnumerator {
-        int EnumAudioEndpoints(int dataFlow, int dwStateMask, out IntPtr ppDevices);
-        [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IntPtr ppEndpoint);
-    }
-
-    [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IMMDevice {
-        [PreserveSig] int Activate(ref Guid iid, uint clsCtx, IntPtr activationParams, [MarshalAs(UnmanagedType.IUnknown)] out object ppInterface);
-        [PreserveSig] int OpenPropertyStore(uint stgmAccess, out IntPtr ppProperties);
-        [PreserveSig] int GetId([MarshalAs(UnmanagedType.LPWStr)] out string ppstrId);
-        [PreserveSig] int GetState(out uint pdwState);
-    }
-
-    [ComImport, Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IAudioEndpointVolume {
-        int RegisterControlChangeNotify(IntPtr pNotify);
-        int UnregisterControlChangeNotify(IntPtr pNotify);
-        int GetChannelCount(out uint pnChannelCount);
-        int SetMasterVolumeLevel(float fLevelDB, ref Guid pguidEventContext);
-        int SetMasterVolumeLevelScalar(float fLevel, ref Guid pguidEventContext);
-        int GetMasterVolumeLevel(out float pfLevelDB);
-        int GetMasterVolumeLevelScalar(out float pfLevel);
-        int SetChannelVolumeLevel(uint nChannel, float fLevelDB, ref Guid pguidEventContext);
-        int SetChannelVolumeLevelScalar(uint nChannel, float fLevel, ref Guid pguidEventContext);
-        int GetChannelVolumeLevel(uint nChannel, out float pfLevelDB);
-        int GetChannelVolumeLevelScalar(uint nChannel, out float pfLevel);
-        int SetMute([MarshalAs(UnmanagedType.Bool)] bool bMute, ref Guid pguidEventContext);
-        int GetMute(out bool bMute);
-    }
-
-    private static IAudioEndpointVolume GetVolumeInterface() {
-        Guid clsid = CLSID_MMDeviceEnumerator;
-        Guid iid   = IID_IMMDeviceEnumerator;
-        IntPtr pEnum;
-        int hr = CoCreateInstance(ref clsid, IntPtr.Zero, 1, ref iid, out pEnum);
-        if (hr != 0) throw new System.Runtime.InteropServices.COMException("CoCreateInstance failed: 0x" + hr.ToString("X8"), hr);
-
-        var enumerator = (IMMDeviceEnumerator)Marshal.GetObjectForIUnknown(pEnum);
-        IntPtr pDevice;
-        hr = enumerator.GetDefaultAudioEndpoint(0, 1, out pDevice);
-        if (hr != 0) throw new System.Runtime.InteropServices.COMException("GetDefaultAudioEndpoint failed: 0x" + hr.ToString("X8"), hr);
-
-        var device = (IMMDevice)Marshal.GetObjectForIUnknown(pDevice);
-        Guid volIid = IID_IAudioEndpointVolume;
-        object volObj;
-        hr = device.Activate(ref volIid, 23, IntPtr.Zero, out volObj);
-        if (hr != 0) throw new System.Runtime.InteropServices.COMException("Activate IAudioEndpointVolume failed: 0x" + hr.ToString("X8"), hr);
-
-        return (IAudioEndpointVolume)volObj;
-    }
-
-    public static float GetVolume() {
-        var vol = GetVolumeInterface();
-        float level;
-        vol.GetMasterVolumeLevelScalar(out level);
-        return level * 100f;
-    }
-
-    public static void SetVolume(float percent) {
-        var vol = GetVolumeInterface();
-        Guid g = Guid.Empty;
-        float scalar = Math.Max(0f, Math.Min(1f, percent / 100f));
-        vol.SetMasterVolumeLevelScalar(scalar, ref g);
-    }
-
-    public static void ToggleMute() {
-        var vol = GetVolumeInterface();
-        bool muted;
-        vol.GetMute(out muted);
-        Guid g = Guid.Empty;
-        vol.SetMute(!muted, ref g);
-    }
-}
-`;
-
-
 // ─── CORS helpers ──────────────────────────────────────────────────────────
 function cors(res: NextResponse) {
   res.headers.set("Access-Control-Allow-Origin", "*");
@@ -105,6 +16,20 @@ function cors(res: NextResponse) {
 }
 export async function OPTIONS() {
   return cors(NextResponse.json({ ok: true }));
+}
+
+// Volume is handled by the native multi-path module (Core Audio -> winmm ->
+// hardware keys) so it keeps working even where the Core Audio COM activation
+// is rejected. Lazy require: native FFI .cjs must not be bundled.
+type VolumeModule = {
+  getMasterVolume: () => number;
+  setMasterVolume: (level: number) => { before: number; after: number; method: string };
+  toggleMute: () => { muted: boolean; method: string };
+};
+let volMod: VolumeModule | null = null;
+function volume(): VolumeModule {
+  if (!volMod) volMod = require("@/lib/os/volume.cjs") as VolumeModule;
+  return volMod;
 }
 
 // ─── Known app aliases → Windows command ──────────────────────────────────
@@ -178,68 +103,25 @@ export async function POST(req: NextRequest) {
       description = `Searching the web for: ${query}`;
     }
 
-    // 4. System controls — volume via winmm.dll!waveOutSetVolume.
-    //    This is the only API that ACTUALLY changes the OS master
-    //    volume (verified end-to-end: read 100%, write 50%, read
-    //    back 50%; persists across calls; reflects in the Windows
-    //    volume slider).
-    //
-    //    SAPI.SpVoice.Volume looked tempting but only changes SAPI's
-    //    own TTS volume (reverts when the COM object is released).
-    //    IAudioEndpointVolume / IMMDeviceEnumerator COM binding
-    //    fails with REGDB_E_CLASSNOTREG on this machine's audio
-    //    stack. winmm.dll ships with every Windows install and
-    //    works without registration.
-    //
-    //    waveOutSetVolume takes a uint32 with bits 0-15 = left
-    //    channel, 16-31 = right channel, in 0-65535 scale.
-    //    waveOutGetVolume(IntPtr.Zero) reads the first device's
-    //    volume (== the default waveOut endpoint = the master).
-    else if (command === "volume_up") {
-      const script = `
-$Source = @'
-${CORE_AUDIO_C_SHARP}
-'@
-Add-Type -TypeDefinition $Source -ErrorAction Stop
-$cur = [Audio]::GetVolume()
-$next = [Math]::Min(100, $cur + 5)
-[Audio]::SetVolume($next)
-Write-Output ("before:" + [int]$cur + " after:" + [int]$next)
-`;
-      tempScriptPath = path.join(os.tmpdir(), `jarvis_vol_up_${Date.now()}_${Math.random().toString(36).slice(2)}.ps1`);
-      await fs.writeFile(tempScriptPath, script, "utf8");
-      shellCmd = `powershell -NonInteractive -File "${tempScriptPath}"`;
-      description = "Volume up (+5)";
-    }
-    else if (command === "volume_down") {
-      const script = `
-$Source = @'
-${CORE_AUDIO_C_SHARP}
-'@
-Add-Type -TypeDefinition $Source -ErrorAction Stop
-$cur = [Audio]::GetVolume()
-$next = [Math]::Max(0, $cur - 5)
-[Audio]::SetVolume($next)
-Write-Output ("before:" + [int]$cur + " after:" + [int]$next)
-`;
-      tempScriptPath = path.join(os.tmpdir(), `jarvis_vol_down_${Date.now()}_${Math.random().toString(36).slice(2)}.ps1`);
-      await fs.writeFile(tempScriptPath, script, "utf8");
-      shellCmd = `powershell -NonInteractive -File "${tempScriptPath}"`;
-      description = "Volume down (-5)";
+    // 4. System controls — volume via @/lib/os/volume.cjs, which tries Core
+    //    Audio then winmm (waveOutSetVolume, no COM needed, ships with every
+    //    Windows install) then hardware volume keys. One broken rail can never
+    //    take volume control down.
+    // FFI calls (no shell) — return immediately rather than falling through to execAsync.
+    else if (command === "volume_up" || command === "volume_down") {
+      const delta = command === "volume_up" ? 5 : -5;
+      const r = volume().setMasterVolume(volume().getMasterVolume() + delta);
+      return cors(
+        NextResponse.json({
+          success: true,
+          description: `Volume ${delta > 0 ? "+" : ""}${delta}% (now ${r.after}% via ${r.method})`,
+          ...r,
+        })
+      );
     }
     else if (command === "mute") {
-      const script = `
-$Source = @'
-${CORE_AUDIO_C_SHARP}
-'@
-Add-Type -TypeDefinition $Source -ErrorAction Stop
-[Audio]::ToggleMute()
-Write-Output "muted"
-`;
-      tempScriptPath = path.join(os.tmpdir(), `jarvis_vol_mute_${Date.now()}_${Math.random().toString(36).slice(2)}.ps1`);
-      await fs.writeFile(tempScriptPath, script, "utf8");
-      shellCmd = `powershell -NonInteractive -File "${tempScriptPath}"`;
-      description = "Muting system volume";
+      const r = volume().toggleMute();
+      return cors(NextResponse.json({ success: true, description: r.muted ? "Muted" : "Unmuted", ...r }));
     }
     else if (command === "screenshot") {
       filePath = path.join(os.tmpdir(), `jarvis_ss_${Date.now()}.png`);
@@ -363,20 +245,10 @@ Write-Output "muted"
     }
 
     else if (command === "volume_set" && typeof body.level === "number") {
-      const target = Math.max(0, Math.min(100, body.level));
-      const script = `
-$Source = @'
-${CORE_AUDIO_C_SHARP}
-'@
-Add-Type -TypeDefinition $Source -ErrorAction Stop
-$cur = [Audio]::GetVolume()
-[Audio]::SetVolume(${target})
-Write-Output ("before:" + [int]$cur + " after:${target}")
-`;
-      tempScriptPath = path.join(os.tmpdir(), `jarvis_vol_set_${Date.now()}_${Math.random().toString(36).slice(2)}.ps1`);
-      await fs.writeFile(tempScriptPath, script, "utf8");
-      shellCmd = `powershell -NonInteractive -File "${tempScriptPath}"`;
-      description = `Setting volume to ${target}%`;
+      const r = volume().setMasterVolume(Number(body.level));
+      return cors(
+        NextResponse.json({ success: true, description: `Volume set to ${r.after}% (via ${r.method})`, ...r })
+      );
     }
 
     // 10. Brightness up (+10) via Windows WMI (laptop internal display only).

@@ -10,8 +10,10 @@ import {
   KNOWN_KINDS,
   autoInferDependencies,
   estimatePlan,
+  heuristicPlan,
   kindsAllowedForRole,
   maybeAppendBrowserStep,
+  multiOpenIntent,
   needsBrowserInteraction,
   pickSimilarPastGoals,
   planNeedsApproval,
@@ -250,6 +252,42 @@ section("pickSimilarPastGoals");
 }
 
 check("known kinds include v5 browser agency", KNOWN_KINDS.has("browser_act") && KNOWN_KINDS.has("browser_login") && KNOWN_KINDS.has("delegate") && KNOWN_KINDS.has("video_brief"));
+
+/* ----------------------------- multi-open ----------------------------- */
+
+section("multiOpenIntent");
+
+check("three + different panels → multi-open", multiOpenIntent("find three websites to watch movies for free and open all three websites in different panels") !== null);
+check("top 5 + open → multi-open", multiOpenIntent("get the top 5 budget laptops and open them") !== null);
+check("single open is not multi", multiOpenIntent("find the best free react course and open it") === null);
+check("count without open intent is not multi", multiOpenIntent("find three movie sites") === null);
+{
+  const m = multiOpenIntent("find three websites to watch movies for free and open all three websites in different panels");
+  check("count parsed from word", m?.n === 3, String(m?.n));
+  check("query cleaned of instructions", m?.query === "watch movies for free", m?.query);
+}
+
+section("heuristicPlan — multi-open");
+
+{
+  const plan = heuristicPlan("find three websites to watch movies for free and open all three websites in different panels");
+  check("instant plan produced", plan !== null);
+  const search = plan?.steps.find((s) => s.kind === "firecrawl_search");
+  const open = plan?.steps.find((s) => s.kind === "browser_open");
+  check("search limit leaves room for 3 picks", Number(search?.params.limit ?? 0) >= 5, String(search?.params.limit));
+  check("single browser_open opens the whole ranked list", open?.params.url === "from:mo2.urls", String(open?.params.url));
+  check("count caps the tabs at 3", Number(open?.params.count) === 3, String(open?.params.count));
+  check("browser_open depends on the decide step", (open?.dependsOn ?? []).includes("mo2"));
+}
+
+{
+  // Regression: the plain single "find X and open it" shape must still win when
+  // the user did not ask for several different tabs.
+  const plan = heuristicPlan("find the best free react course and open it");
+  const open = plan?.steps.find((s) => s.kind === "browser_open");
+  check("single-open plan unchanged", open?.params.url === "from:f2.url", String(open?.params.url));
+  check("single-open plan has no count cap", open?.params.count === undefined);
+}
 
 /* ----------------------------- summary ----------------------------- */
 

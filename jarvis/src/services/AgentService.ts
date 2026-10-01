@@ -42,6 +42,7 @@ import {
   estimatePlan,
   heuristicPlan,
   maybeAppendBrowserStep,
+  multiOpenIntent,
   pickSimilarPastGoals,
   planNeedsApproval,
   validateAndRepairPlan,
@@ -516,6 +517,11 @@ function speedDirective(goal: string): string {
     return `${common} This is a normal research/comparison goal: cap the plan at 5 steps. Use firecrawl_search (limit 5) -> firecrawl_extract or llm_summarize -> llm_decide, and only add web_scrape/deep_research if the first search genuinely came back thin.`;
   }
 
+  const multi = multiOpenIntent(goal);
+  if (multi) {
+    return `${common} This is a MULTI-OPEN mission: find ${multi.n} distinct results and open them in separate tabs. Use ONLY: firecrawl_search (limit ${Math.max(5, Math.min(multi.n + 2, 10))}) -> llm_decide (input 'from:<searchStepId>') -> browser_open (url 'from:<decideStepId>.urls', count ${multi.n}). Do NOT emit one browser_open per item and do NOT add web_scrape/firecrawl_extract/deep_research.`;
+  }
+
   return `${common} This is a simple open-and-go mission — optimize for speed. For weather use weather_lookup; for music use spotify_action or youtube_open with a query; for opening videos use youtube_open; for timers use timer_set. For finding/browsing things use ONLY: firecrawl_search (limit 5) -> llm_decide (input 'from:<searchStepId>') -> browser_open (url 'from:<decideStepId>.url'). Do NOT add web_scrape, firecrawl_extract, or deep_research steps.`;
 }
 
@@ -619,7 +625,21 @@ function resolveParam(value: unknown, job: AgentJob, deps: Map<string, StepResul
 
   const out = dep.result as Record<string, unknown> | undefined;
   if (field === "urls") {
-    const urls = extractUrls(out).map((h) => h.url);
+    // A decide step exposes its winner + ranked alternatives — use them all so
+    // "open N of them in separate tabs" can open N DIFFERENT pages. Falls back
+    // to every hit for plain search results.
+    const rec = out as Record<string, unknown> | undefined;
+    const urls: string[] = [];
+    const push = (u: unknown) => {
+      if (typeof u === "string" && u.startsWith("http") && !urls.includes(u)) urls.push(u);
+    };
+    if (rec) {
+      push(rec.url);
+      if (Array.isArray(rec.alternatives)) {
+        for (const a of rec.alternatives as Array<Record<string, unknown>>) push(a?.url);
+      }
+    }
+    if (urls.length === 0) for (const h of extractUrls(out)) push(h.url);
     return urls.length > 0 ? urls : value;
   }
   if (field === "choice") return String(out?.choice ?? out?.decision ?? out?.pick ?? value);
@@ -1505,6 +1525,8 @@ async function runStep(
 
     case "browser_open": {
       const urlSpec = step.params.url;
+      // Optional cap: "open 3 of them in separate tabs" -> count: 3.
+      const maxOpen = Number(step.params.count) > 0 ? Math.min(Math.floor(Number(step.params.count)), 8) : 0;
       let urls: string[] = [];
       if (Array.isArray(urlSpec)) {
         urls = (urlSpec as unknown[]).map(String).filter((u) => u.startsWith("http"));
@@ -1598,6 +1620,7 @@ async function runStep(
         }
       }
       urls = finalUrls.length > 0 ? finalUrls : urls;
+      if (maxOpen > 0 && urls.length > maxOpen) urls = urls.slice(0, maxOpen);
 
       for (const u of urls) launchUrlOnWindows(u);
       emitMissionEvent(job.id, "log", `Opened in your browser: ${urls.join(", ")}`, { stepId: step.id, openUrls: urls });

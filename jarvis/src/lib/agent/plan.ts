@@ -321,6 +321,48 @@ export function findSiteInGoal(goal: string): string | null {
   return null;
 }
 
+/** Number words up to ten, for "find three sites" style goals. */
+const NUMBER_WORDS: Record<string, number> = {
+  two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+};
+
+/** Strip instruction noise from a multi-open goal to get a clean search query. */
+function extractMultiQuery(goal: string): string {
+  let s = goal.trim().replace(/[.!]+$/, "");
+  // Drop the trailing "and open ... in separate tabs" instruction.
+  s = s.replace(/\b(?:and\s+)?(?:then\s+)?(?:open|show|launch|display|put)\b.*$/i, "");
+  if (!s.trim()) s = goal.trim().replace(/[.!]+$/, "");
+  // Drop leading find/search verbs.
+  s = s.replace(/^(?:please\s+)?(?:find|search(?: for)?|look up|get me|get|show me|show|recommend|give me|list)\s+/i, "");
+  // Drop the count.
+  s = s.replace(/\b(?:\d{1,2}|two|three|four|five|six|seven|eight|nine|ten)\b/gi, "");
+  // Drop filler nouns that add nothing to a search query.
+  s = s.replace(/\b(?:websites?|web\s?sites?|sites?|pages?|links?|places?|resources?|options?|results?)\b/gi, "");
+  s = s.replace(/\s+/g, " ").trim();
+  s = s.replace(/^(?:to|for|of|that|which|with|about)\s+/i, "").trim();
+  return s || goal.trim();
+}
+
+/**
+ * Detect "find N things and open them all in separate tabs/panels" style goals.
+ * Returns the count + a cleaned search query, or null.
+ */
+export function multiOpenIntent(goal: string): { n: number; query: string } | null {
+  const g = goal.trim().replace(/[.!]+$/, "");
+  const wantsMultiple =
+    /\b(?:open|show|launch|display)\s+(?:all|each|every|them|those|both)\b/i.test(g) ||
+    /\b(?:in|across|on|into)\s+(?:\d+\s+)?(?:different|separate|multiple|distinct|new)\s+(?:tabs?|panels?|windows?)\b/i.test(g) ||
+    /\b(?:different|separate|multiple|distinct)\s+(?:tabs?|panels?|windows?)\b/i.test(g) ||
+    /\bopen\s+(?:each|every)\s+one\b/i.test(g) ||
+    /\btop\s+\d+\b[\s\S]*\bopen\b/i.test(g);
+  if (!wantsMultiple) return null;
+  const m = g.match(/\b(\d{1,2}|two|three|four|five|six|seven|eight|nine|ten)\b/i);
+  if (!m) return null;
+  const n = NUMBER_WORDS[m[1].toLowerCase()] ?? parseInt(m[1], 10);
+  if (!Number.isFinite(n) || n < 2) return null;
+  return { n: Math.min(n, 8), query: extractMultiQuery(g) };
+}
+
 /**
  * Instant planner — recognises the handful of goal shapes that make up most
  * real usage and returns the exact plan the LLM would have produced, in
@@ -373,9 +415,32 @@ export function heuristicPlan(goal: string): AgentPlan | null {
     return wrap(`YouTube: ${m[1]}`, [{ id: "y1", kind: "youtube_open", title: `Play ${m[1]}`, params: { query: m[1] } }]);
   }
 
+  // ── find N things and open them all (separate tabs / panels) ───────────
+  const multi = multiOpenIntent(g);
+  if (multi) {
+    const limit = Math.max(5, Math.min(multi.n + 2, 10));
+    return wrap(`Find ${multi.n} options and open them: ${multi.query}`, [
+      { id: "mo1", kind: "firecrawl_search", title: `Search: ${multi.query}`, params: { query: multi.query, limit } },
+      {
+        id: "mo2",
+        kind: "llm_decide",
+        title: `Rank the top ${multi.n} matches`,
+        params: { question: `Pick the ${multi.n} best DISTINCT results for: ${multi.query}`, input: "from:mo1" },
+        dependsOn: ["mo1"],
+      },
+      {
+        id: "mo3",
+        kind: "browser_open",
+        title: `Open ${multi.n} of them in separate tabs`,
+        params: { url: "from:mo2.urls", count: multi.n },
+        dependsOn: ["mo2"],
+      },
+    ]);
+  }
+
   // ── find X and open it (the classic) ───────────────────────────────────
   m = g.match(/^(?:find|search for|look up|get me|recommend)(?: me)? (?:the )?(.{4,90}?)(?: and open (?:it|that|the best(?: one)?))?$/i);
-  if (m && !tooComplex) {
+  if (m && !tooComplex && !multiOpenIntent(g)) {
     const query = m[1].replace(/\s+and open.*$/i, "").trim();
     return wrap(`Find and open: ${query}`, [
       { id: "f1", kind: "firecrawl_search", title: `Search: ${query}`, params: { query, limit: 5 } },

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getLanIP, getAllLanIPs } from "@/lib/net/lanIp";
+import { isLoopbackHost, notePhoneContact, phoneContactAgeMs, phonePingActive, raisePhonePing } from "@/lib/os/phonePing";
 
 export interface TeleportPayload {
   id: string;
@@ -17,7 +18,6 @@ const g = globalThis as unknown as {
   __jarvisTeleportStore?: Map<string, TeleportPayload>;
   __jarvisTeleportInbox?: TeleportPayload[];
   __jarvisActiveBeamId?: string;
-  __jarvisPhonePingActive?: number;
 };
 
 if (!g.__jarvisTeleportStore) {
@@ -36,10 +36,13 @@ export async function GET(req: NextRequest) {
   const allIps = getAllLanIPs();
 
   if (wantPing) {
-    const isPinged = (Date.now() - (g.__jarvisPhonePingActive || 0)) < 15000;
+    // The phone polls this through the LAN IP; the desktop uses localhost. That
+    // difference is how the proximity panel knows a phone is actually attached.
+    if (!isLoopbackHost(req.headers.get("host"))) notePhoneContact();
     return NextResponse.json({
       success: true,
-      phonePingActive: isPinged,
+      phonePingActive: phonePingActive(),
+      phoneSeenMs: phoneContactAgeMs(),
     });
   }
 
@@ -91,10 +94,15 @@ export async function POST(req: NextRequest) {
     const { action, type = "text", title = "Beamed Content", content, language, id: customId, command } = body;
 
     if (action === "ping-phone") {
-      g.__jarvisPhonePingActive = Date.now();
+      // Rings the /teleport page (via this module's pingCheck) AND the broker's
+      // /remote page. Whichever one the phone has open will light up.
+      raisePhonePing();
+      const { ringPhone } = await import("@/services/ProximityService");
+      const ringing = await ringPhone();
       return NextResponse.json({
         success: true,
-        message: "Sonar ping sent to phone beacon",
+        ringing,
+        message: ringing ? "Sonar ping sent to phone beacon" : "Phone remote is not reachable",
       });
     }
 
