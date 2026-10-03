@@ -24,6 +24,21 @@ import {
 // Use environment variable or default to port 3000 for the API base URL
 const API_BASE = process.env.INTERNAL_API_URL || 'http://localhost:3000';
 
+// Fallback persona when the client omits systemPrompt. Critically, providers
+// (notably NVIDIA NIM) reject any message whose `content` field is missing —
+// an undefined systemPrompt used to serialize to `{"role":"system"}`, produce
+// an HTTP 400, and force every reply onto the slow fallback chain.
+const DEFAULT_SYSTEM_PROMPT =
+  "You are JARVIS, a concise, witty AI assistant. Address the user as Boss. " +
+  "Answer directly and helpfully, and keep replies short unless asked for detail.";
+
+// Shared SSE headers for every streaming lane (NVIDIA, Gemini, Groq, OpenRouter).
+const SSE_HEADERS: Record<string, string> = {
+  "Content-Type": "text/event-stream",
+  "Cache-Control": "no-cache",
+  Connection: "keep-alive",
+};
+
 // ─── Timeout-aware fetch wrapper ───────────────────────────────────
 // Prevents the app from hanging when external APIs are down/slow
 function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: number = 8000): Promise<Response> {
@@ -360,10 +375,11 @@ async function tryOneOpenRouterModel(
   model: string,
   orMessages: Array<{ role: string; content: string }>,
   apiKey: string
-): Promise<string> {
+): Promise<Response> {
   // Throws on failure so Promise.any() can skip to the next winner.
   const c = new AbortController();
-  const t = setTimeout(() => c.abort(), 10000);
+  // 6s cap on time-to-headers only (cleared once the response resolves).
+  const t = setTimeout(() => c.abort(), 6000);
   let response: Response;
   try {
     response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -377,7 +393,7 @@ async function tryOneOpenRouterModel(
       // max_tokens raised (was 768): Code Forge replies embed a complete
       // single-file web app; a tight cap truncated them mid-artifact.
       // Non-code replies still stop at EOS, so this costs nothing normally.
-      body: JSON.stringify({ model, messages: orMessages, max_tokens: 4096, temperature: 0.75 }),
+      body: JSON.stringify({ model, messages: orMessages, max_tokens: 4096, temperature: 0.75, stream: true }),
       signal: c.signal,
     });
   } finally {
@@ -387,17 +403,15 @@ async function tryOneOpenRouterModel(
     const errText = await response.text().catch(() => "");
     throw new Error(`HTTP ${response.status}: ${errText.slice(0, 80)}`);
   }
-  const data = await response.json();
-  const content = data.choices?.[0]?.message?.content?.trim();
-  if (!content) throw new Error("empty content");
-  return content;
+  // Return whatever model answered first as a live SSE stream.
+  return new Response(response.body, { headers: SSE_HEADERS });
 }
 
 async function tryOpenRouterFallback(
   messages: any[],
   systemPrompt: string,
   apiKey: string | undefined
-): Promise<NextResponse | null> {
+): Promise<Response | null> {
   if (!apiKey || apiKey.trim() === "" || apiKey === "your-api-key-here") {
     return null;
   }
@@ -410,15 +424,15 @@ async function tryOpenRouterFallback(
   }
 
   try {
-    // Race all models in parallel — fastest successful response wins.
-    const content = await Promise.any(
+    // Race all models in parallel — first to return stream headers wins.
+    const winner = await Promise.any(
       OPENROUTER_FALLBACK_MODELS.map(model =>
         tryOneOpenRouterModel(model, orMessages, apiKey)
-          .then(c => { console.log(`[OpenRouter fallback] Won race via ${model}`); return c; })
+          .then(r => { console.log(`[OpenRouter fallback] Won race via ${model}`); return r; })
           .catch(e => { console.warn(`[OpenRouter fallback] ${model} failed:`, e?.message); throw e; })
       )
     );
-    return NextResponse.json({ content, fallback: "openrouter" });
+    return winner;
   } catch {
     // AggregateError — all models failed.
     console.warn("[OpenRouter fallback] All models failed");
@@ -436,7 +450,7 @@ async function tryFallbacksInParallel(
   systemPrompt: string,
   lastMessage: string,
   stats: any
-): Promise<NextResponse> {
+): Promise<Response> {
   const mapped = messages.map((m: { role: string; content: string }) => ({ role: m.role, content: m.content }));
 
   // Hard 10s deadline for the entire fallback phase — a dead provider
@@ -452,10 +466,16 @@ async function tryFallbacksInParallel(
       Promise.race([tryOpenRouterFallback(mapped, systemPrompt, process.env.OPENROUTER_API_KEY), deadline]),
     ]);
 
-    const winner =
-      (groqRes.status === "fulfilled" ? groqRes.value : null) ??
-      (orRes.status === "fulfilled" ? orRes.value : null);
-    if (winner) return winner;
+    const groqVal = groqRes.status === "fulfilled" ? groqRes.value : null;
+    const orVal = orRes.status === "fulfilled" ? orRes.value : null;
+    const winner = groqVal ?? orVal;
+    if (winner) {
+      // Cancel the losing stream so we don't hold an upstream connection open
+      // for the whole reply after the race is decided.
+      if (winner !== groqVal && groqVal?.body) groqVal.body.cancel().catch(() => {});
+      if (winner !== orVal && orVal?.body) orVal.body.cancel().catch(() => {});
+      return winner;
+    }
 
     console.warn("[Chat] All fallback providers failed — switching to offline mode");
     const offlineResponse = generateOfflineResponse(lastMessage, "rate_limited", stats);
@@ -485,7 +505,7 @@ async function tryGroqFallback(
   messages: any[],
   systemPrompt: string,
   apiKey: string | undefined
-): Promise<NextResponse | null> {
+): Promise<Response | null> {
   if (!apiKey || apiKey.trim() === "" || apiKey === "your-api-key-here") {
     return null;
   }
@@ -524,6 +544,9 @@ async function tryGroqFallback(
           // gpt-oss models are reasoners — keep their monologue out of the
           // reply and stop it from eating the token budget.
           reasoning_effort: "low",
+          // Stream: the user sees the first tokens immediately instead of
+          // staring at a bubble until the whole answer is generated.
+          stream: true,
         }),
         signal: c.signal,
       });
@@ -540,15 +563,8 @@ async function tryGroqFallback(
         return null;
       }
 
-      const data = await response.json();
-      const content = data.choices?.[0]?.message?.content?.trim();
-      if (!content) {
-        console.warn(`[Groq fallback] ${model} returned empty content`);
-        continue;
-      }
-
-      console.log(`[Groq fallback] Served response via ${model}`);
-      return NextResponse.json({ content, fallback: "groq", model });
+      console.log(`[Groq fallback] Streaming via ${model}`);
+      return new Response(response.body, { headers: SSE_HEADERS });
     } catch (e: any) {
       console.warn(`[Groq fallback] ${model} fetch failed:`, e?.name || e?.message);
       continue;
@@ -1080,10 +1096,25 @@ async function tryLiveInboxShortcut(
 
 export async function POST(request: Request) {
   try {
-    const { messages, systemPrompt } = await request.json();
-    if (!Array.isArray(messages)) {
+    const body = await request.json();
+    const rawMessages = body?.messages;
+    if (!Array.isArray(rawMessages)) {
       return NextResponse.json({ error: "messages must be an array" }, { status: 400 });
     }
+    // Hardening: every chat message must carry a string `content`. NVIDIA's
+    // validator 400s on a missing field, which silently pushed the whole
+    // request onto the slow fallback lanes ("replying too late" report).
+    const messages = rawMessages
+      .filter((m: any) => m && typeof m === "object")
+      .map((m: any) => ({
+        role: m.role === "assistant" || m.role === "system" ? m.role : "user",
+        content: typeof m.content === "string" ? m.content : m.content == null ? "" : String(m.content),
+      }));
+    // Same for the system prompt: never send an undefined/empty system message.
+    const systemPrompt =
+      typeof body?.systemPrompt === "string" && body.systemPrompt.trim()
+        ? body.systemPrompt
+        : DEFAULT_SYSTEM_PROMPT;
 
     const lastUserMessage = messages.find((m: { role: string }) => m.role === "user")?.content || "";
     // ── Deferred side-writes ──
