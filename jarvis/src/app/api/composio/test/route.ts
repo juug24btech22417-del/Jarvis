@@ -67,6 +67,13 @@ const SAMPLES: Record<JarvisEventSource, Omit<JarvisEvent, "id" | "occurredAt">>
     body: "Status: In Progress → In Review.",
     priority: "low",
   },
+  oracle: {
+    source: "oracle",
+    type: "research_complete",
+    title: "JARVIS: Research complete",
+    body: "Your Oracle research report is ready. Open the Research panel to read it.",
+    priority: "normal",
+  },
   test: {
     source: "test",
     type: "manual_test",

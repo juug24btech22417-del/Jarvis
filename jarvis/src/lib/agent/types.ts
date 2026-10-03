@@ -29,6 +29,12 @@ export type AgentStepKind =
   | "vision_inspect"
   | "file_list"
   | "file_open"
+  // v6 — machine ops (managed dev server, file tidy, repo inspection)
+  | "dev_server_start"
+  | "dev_server_stop"
+  | "dev_server_status"
+  | "file_organize"
+  | "repo_inspect"
   // v5 — real browser agency (autonomous, LLM-driven)
   | "browser_act"
   | "browser_screenshot"
@@ -197,6 +203,11 @@ export const STEP_KIND_LABELS: Record<AgentStepKind, string> = {
   vision_inspect: "Vision check",
   file_list: "List files",
   file_open: "Open file",
+  dev_server_start: "Start dev server",
+  dev_server_stop: "Stop dev server",
+  dev_server_status: "Dev server status",
+  file_organize: "Organize files",
+  repo_inspect: "Inspect repository",
   browser_act: "Autonomous browser",
   browser_screenshot: "Browser screenshot",
   browser_login: "Browser sign-in",
@@ -210,6 +221,7 @@ export const SPECIALIST_KINDS: Record<SpecialistRole, AgentStepKind[]> = {
   researcher: [
     "firecrawl_search", "web_search", "web_scrape", "firecrawl_extract",
     "deep_research", "llm_decide", "llm_summarize", "browser_act", "memory_store",
+    "repo_inspect", "dev_server_status",
   ],
   browser: [
     "browser_act", "browser_screenshot", "browser_login", "browser_replay",
@@ -219,7 +231,10 @@ export const SPECIALIST_KINDS: Record<SpecialistRole, AgentStepKind[]> = {
     "llm_summarize", "notes_create", "file_save", "telegram_send",
     "video_brief", "notify", "task_create",
   ],
-  analyst: ["llm_decide", "llm_summarize", "file_save", "notes_create", "notify"],
+  analyst: [
+    "llm_decide", "llm_summarize", "file_save", "notes_create", "notify",
+    "repo_inspect", "dev_server_status", "dev_server_start", "dev_server_stop", "file_organize",
+  ],
 };
 
 /** Relative Firecrawl-equivalent cost of each credit-spending step kind. */
@@ -244,7 +259,12 @@ export const STEP_CREDIT_WEIGHT: Partial<Record<AgentStepKind, number>> = {
  * machine. Sign-ins and recorded replays are user-visible, local actions and
  * run immediately — waiting for a nod on those was pure friction.
  */
-export const APPROVAL_REQUIRED_KINDS: AgentStepKind[] = ["shell_command"];
+export const APPROVAL_REQUIRED_KINDS: AgentStepKind[] = [
+  "shell_command",
+  "dev_server_start",
+  "dev_server_stop",
+  "file_organize",
+];
 
 /** Broad per-mission Firecrawl budget (scrapes/searches/extracts). */
 export const MISSION_CREDIT_CAP = 12;
@@ -301,10 +321,15 @@ export const PLANNER_SYSTEM_PROMPT = [
   "- checkpoint: {question: string, options: string[]} — pauses and asks user when choice is ambiguous.",
   "- timer_set: {minutes?: number, seconds?: number, label?: string} — starts a timer on this PC that rings when it ends. Use for workout/study/focus/session timing (e.g. 'set a 20-minute timer').",
   "- telegram_send: {text?: string, file?: string (\"from:<fileSaveStepId>\" or a filename), chatId?: string} — sends a message — or the text of a saved file — to the user's Telegram. Use whenever the user asks to send/message them, and for things that must reach their phone.",
-  "- shell_command: {command: string, description?: string} — runs ONE safe whitelisted shell command on this PC: git status/log/diff/branch, node/npm versions, npm run build/test/lint, npm install, curl/ping checks (e.g. 'curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000'), tasklist, netstat, 'code' to open the project in VS Code. ONLY for machine-level requests ('is my server running?', 'open my project in VS Code', 'fix my dev environment'). Commands must finish on their own (max ~3 min) — NEVER start long-running dev servers; instead check status and report/suggest. Missions with this step always ask for user approval first.",
+  "- shell_command: {command: string, description?: string} — runs ONE safe whitelisted shell command on this PC: git status/log/diff/branch, node/npm versions, npm run build/test/lint, npm install, curl/ping checks (e.g. 'curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000'), tasklist, netstat, 'code' to open the project in VS Code. ONLY for machine-level requests ('is my server running?', 'open my project in VS Code', 'fix my dev environment'). Commands must finish on their own (max ~3 min) — NEVER start a long-running server with shell_command; use dev_server_start for that. Missions with this step always ask for user approval first.",
   "- vision_inspect: {url?: string, question?: string} — screenshots a webpage (url) or the whole screen and answers with AI vision. Use when the user asks to VERIFY something visually ('does the site look right?', 'is it actually playing?') and as a FALLBACK when other approaches cannot find or confirm something.",
   "- file_list: {folder?: 'Downloads'|'Desktop'|'Documents', extension?: string} — lists files in a local user folder (newest first), optionally filtered by extension (e.g. 'pdf'). Use for 'open my Downloads folder', 'find the newest PDF', 'my recent files'. NEVER use shell commands like xdg-open or ls for files/folders.",
   "- file_open: {name?: string, folder?: 'Downloads'|'Desktop'|'Documents', from?: \"from:<fileListStepId>\"} — opens a local file with its default Windows app (e.g. the newest PDF from a file_list step). Pair: file_list (folder 'Downloads', extension 'pdf') -> file_open (from '<fileListStepId>').",
+  "- dev_server_start: {command?: string, port?: number, cwd?: string, waitMs?: number} — THE managed way to start a dev server. Launches ONE detached, tracked child (default 'npm run dev' on port 3000), waits until the port actually responds, and keeps its output for later steps. Use whenever the user says 'start my dev server / run the app / bring the server up'. Pair it with dev_server_status. Always asks for approval.",
+  "- dev_server_status: {port?: number} — reports whether a dev server is running on a port, whether JARVIS started it, plus uptime / HTTP status / recent output. Use for 'is my server running?', 'check localhost:3000', and to verify a dev_server_start step came up (this is how you do 'while it's starting').",
+  "- dev_server_stop: {port?: number} — cleanly stops the managed dev server on a port (kills only a server JARVIS started). Use for 'stop the server', 'shut down the dev server'. Always asks for approval.",
+  "- file_organize: {folder?: 'Downloads'|'Desktop'|'Documents', mode?: 'by-type'|'archive', dryRun?: boolean, olderThanDays?: number} — SAFELY tidies a folder: by-type sorts files into Images/Documents/Videos/Audio/Archives/Code/Installers subfolders; archive moves files older than N days (default 30) into an 'Archive' folder. dryRun defaults to TRUE (reports the plan, moves nothing). Only set dryRun:false when the user has explicitly said to go ahead / actually move them after a preview. Set mode:'undo' to reverse the most recent EXECUTED tidy-up ('undo the last tidy-up', 'put my files back'); never combine undo with dryRun. Always asks for approval.",
+  "- repo_inspect: {path?: string, package?: string} — inspects a Node project: reads package.json (name/version/deps/scripts), runs 'npm outdated', and with a `package` param also 'npm view <package> version'. Use for 'are my dependencies outdated?', 'inspect my project', 'what is the latest version of X?'.",
   "NOTE: You cannot control the user's phone (DND, phone apps, SMS). For such requests do the PC-side parts and reach the user via telegram_send instead.",
   "MUSIC RULE: at most ONE audio step per plan — NEVER combine spotify_action AND youtube_open for music in the same plan (double playback). For study/work/prep sessions pick exactly ONE focus-music step (prefer spotify_action with a focus/lofi query).",
   "AUDIENCE RULE: The user is a college student. For 'learn something interesting', educational or study content choose substantive adult-level material (science explainers, documentaries, tech talks, university lectures) — NEVER kids' content (shapes, colors, nursery rhymes, cartoons).",
@@ -320,11 +345,27 @@ export const PLANNER_SYSTEM_PROMPT = [
   "Example: 'I have two hours free. Set up a productive coding session for me' (AMBIGUOUS — interpret the goal yourself): Step 1 (shell_command 'code' to open the editor) -> Step 2 (youtube_open 'deep focus lofi music') -> Step 3 (timer_set 120 minutes 'focus session') -> Step 4 (notify with the session plan). For ambiguous goals like 'set me up', 'get me ready', 'make this time productive' — decide WHAT to do yourself from context and build the plan; do not ask unless something valuable is truly unclear (then use checkpoint). PREP SESSIONS: exactly ONE music step + ONE timer + organizing steps (task_create/notes_create) — never two music steps.",
   "Example: 'Get me ready for tomorrow's college work': Step 1 (task_create 'Review tomorrow\'s classes and assignments') -> Step 2 (spotify_action play 'deep focus study playlist') -> Step 3 (timer_set 90 minutes 'study session'). ONE music step only.",
   "Example: 'I want to learn something interesting for 30 minutes. Find something and set me up': Step 1 (firecrawl_search 'best short documentaries OR fascinating science explainers for curious adults') -> Step 2 (llm_decide most mind-expanding pick for a college student, input 'from:step1') -> Step 3 (browser_open 'from:step2.url') -> Step 4 (timer_set 30 minutes 'learning session'). Choose genuinely fascinating adult-level content.",
-  "Example: 'Open my project in VS Code and check whether my dev server is running': Step 1 (shell_command 'code') -> Step 2 (shell_command curl localhost:3000 status check). If the server is down, report it and suggest the command — do not try to keep a server running yourself.",
+  "Example: 'Open my project in VS Code and check whether my dev server is running': Step 1 (shell_command 'code') -> Step 2 (dev_server_status port 3000). If it is down, report it and offer to start it.",
+  "Example: 'Start my dev server and tell me when it is up, then while it is starting note it in my tasks': Step 1 (dev_server_start port 3000) -> Step 2 (dev_server_status port 3000, dependsOn step 1) -> Step 3 (task_create 'Verify the app loads' ) — step 3 has NO dependsOn so it runs WHILE the server starts.",
+  "Example: 'My Downloads folder is a mess — sort it out': Step 1 (file_list folder 'Downloads') -> Step 2 (file_organize folder 'Downloads' mode 'by-type', dryRun true) -> Step 3 (notify summarizing the plan). Do NOT set dryRun:false unless the user already said go ahead.",
+  "Example: 'Are my project dependencies outdated and what is the latest version of react?': Step 1 (repo_inspect package 'react') -> Step 2 (notify with the outdated list).",
   "Example: 'Open my Downloads folder, find the newest PDF, open it, screenshot the first page, tell me what it contains': Step 1 (file_list folder 'Downloads' extension 'pdf') -> Step 2 (file_open from '<step1>') -> Step 3 (vision_inspect question 'A PDF should be open on screen — what does its first page contain?'). NEVER use xdg-open, ls, start or explorer shell commands for files — this PC is Windows and only file_list/file_open handle local files.",
   "SPEED RULES: For simple 'find X and open it' / 'play X' goals use the minimal chain: firecrawl_search (limit 5) -> llm_decide (input 'from:<searchId>') -> browser_open (url 'from:<decideId>.url'). Do NOT add web_scrape, firecrawl_extract or deep_research unless the user explicitly asks for research, comparison, specs, extraction or summaries — they are slow and cost credits.",
   "MULTI-OPEN RULE: When the user asks to find SEVERAL things and open them all (e.g. 'find three websites to watch movies for free and open all three in different panels/tabs'), the ONE decide step already ranks a winner plus alternatives. Do NOT emit one browser_open per item — emit a single browser_open with url 'from:<decideStepId>.urls' and count <N>. Bump the search limit to N+2 so there are enough distinct results.",
   "Example: 'Find three websites to watch movies for free and open all three in separate tabs': Step 1 (firecrawl_search 'websites to watch movies for free', limit 5) -> Step 2 (llm_decide question 'pick the 3 best distinct results', input 'from:step1') -> Step 3 (browser_open url 'from:step2.urls', count 3).",
   "If the user wants to watch or play something, use youtube_open directly with a query — no separate search step needed.",
+  "MISSION TIERS — recognise the SHAPE of the request and use its recipe:",
+  "1) FIGURE-IT-OUT / 'just handle it' (e.g. 'I have 90 minutes free, decide something useful', 'make this time useful', 'you choose'): DO NOT ask. Decide yourself — firecrawl_search for the most valuable option -> llm_decide -> browser_open -> set a timer_set for the session. Only use a checkpoint if the choice is genuinely personal and irreversible.",
+  "2) LEARN (e.g. 'I want to learn something useful today', 'set up a learning session'): firecrawl_search a high-quality adult resource -> browser_open -> timer_set (respect any stated duration). ONE music step maximum.",
+  "3) PREP / WORKSPACE (e.g. 'prepare my coding workspace', 'start my dev environment'): shell_command 'code' to open the editor + ONE spotify_action focus step + timer_set + task_create for what to work on.",
+  "4) DEV-ENV / PROJECT CHECK (e.g. 'check whether my project is running', 'inspect my project for issues'): use dev_server_status to check the server, repo_inspect for the project/dependencies, and shell_command for git status only. To actually START the app use dev_server_start (never shell_command), then verify with dev_server_status. Finish with notify.",
+  "5) FILE TIDY (e.g. 'my laptop is cluttered'): file_list across Downloads/Desktop/Documents, then file_organize (dryRun defaults true) to propose real moves into category folders; only set dryRun:false once the user says go ahead. To reverse a previous tidy-up use file_organize with mode:'undo'. Never delete files. No shell commands for files.",
+  "6) RESEARCH -> DECIDE -> OPEN (e.g. 'research three tools, compare, open the best'): firecrawl_search -> llm_summarize comparison -> llm_decide -> browser_open the winner.",
+  "7) OSS CONTRIBUTION (e.g. 'find an open-source project I could contribute to'): firecrawl_search 'good first issue beginner friendly' -> llm_decide -> browser_open the repository.",
+  "8) DIGEST / DELIVER (e.g. 'research X, save it as a file and send it to me on Telegram'): firecrawl_search -> llm_summarize -> file_save (or notes_create) -> telegram_send.",
+  "9) VISUAL VERIFY (e.g. 'open the site and verify visually that it worked'): the browser step (browser_act / browser_open) followed by vision_inspect to confirm the outcome.",
+  "10) PARALLEL MULTITASKING (e.g. 'research the news AND open my project AND start music'): give the independent branches NO dependsOn so they run concurrently.",
+  "INVESTIGATION (e.g. 'something is wrong with my dev environment — investigate', 'is this API actually free', 'is this library still maintained'): collect EVIDENCE, don't guess — run the relevant shell diagnostics AND/OR firecrawl_search the specific claim, then report findings with the evidence. Use browser_act when the evidence only exists behind a live page (GitHub activity, pricing page).",
+  "CONTEXT CHAIN (follow-ups like 'open the second one', 'now find its docs', 'compare it with the first'): these are handled by the mission follow-up layer — do not attempt to plan them from scratch.",
   "Keep plans clean, under 8 steps. Output ONLY valid JSON — no markdown, no conversational commentary.",
 ].join(" ");

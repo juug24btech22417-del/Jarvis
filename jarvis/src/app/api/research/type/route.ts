@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import axios from 'axios';
 import { RESEARCH_PROMPTS } from '@/services/ResearchPrompts';
 import { ALL_REPORT_TYPES, type ReportType } from '@/services/ResearchTypes';
+import { parseJsonLoose } from '@/lib/llm/looseJson';
 
 const API_BASE = process.env.INTERNAL_API_URL || 'http://localhost:3000';
 
@@ -23,7 +24,7 @@ export async function POST(req: NextRequest) {
 
     try {
       const res = await axios.post(`${API_BASE}/api/research-llm`, { prompt });
-      const parsed = JSON.parse(res.data.content || '{}');
+      const parsed = parseJsonLoose<any>(res.data.content || '', {});
       const type = (ALL_REPORT_TYPES.includes(parsed.type)
         ? parsed.type
         : 'deep_research') as ReportType;

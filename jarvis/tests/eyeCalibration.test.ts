@@ -79,12 +79,20 @@ if (fit) {
 
 section("Degenerate fits are refused");
 
-check("an all-zero fit is rejected", !fitIsSane([0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
-check("a real iris-scale fit is accepted", fitIsSane([7, 0.5, 0, 0, 0.5, -7, 0.5, 0, 0, 0.5]));
-check(
-  "a wild over-amplified fit is rejected",
-  !fitIsSane([80, 0, 0, 0, 0.5, 80, 0, 0, 0, 0.5])
-);
+// 8-feature (16-coefficient) model: [h, v, yaw, pitch, h², v², h·v, bias]
+// repeated for the x axis (0-7) then the y axis (8-15).
+const REAL_IRIS_FIT: StoredCoeffs = [
+  7.2, 0, -0.35, 0, 0, 0, 0, 0.5,
+  0, -9, 0, -0.45, 0, 0, 0, 0.5,
+];
+const WILD_FIT: StoredCoeffs = [
+  80, 0, 0, 0, 0, 0, 0, 0.5,
+  0, 80, 0, 0, 0, 0, 0, 0.5,
+];
+
+check("an all-zero fit is rejected", !fitIsSane(Array(16).fill(0) as StoredCoeffs));
+check("a real iris-scale fit is accepted", fitIsSane(REAL_IRIS_FIT));
+check("a wild over-amplified fit is rejected", !fitIsSane(WILD_FIT));
 check("too few samples cannot fit", fitGaze(samples.slice(0, 4)) === null);
 
 section("Span normalization guarantees full-screen reach");
@@ -210,7 +218,7 @@ const store = new Map<string, string>();
   length: 0,
 } as unknown as Storage;
 
-const coeffs: StoredCoeffs = [7, 0.5, 0, 0, 0.5, -7, 0.5, 0, 0, 0.5];
+const coeffs: StoredCoeffs = REAL_IRIS_FIT;
 saveCalibration(coeffs);
 const loaded = loadCalibration();
 check(
@@ -221,7 +229,7 @@ check(
 // A v3 payload (the old signal definition) under the current key must be
 // refused: the features changed units, so applying it would map a correct
 // signal through the wrong affine.
-store.set("jarvis:eye-calib-v4", JSON.stringify({ v: 3, coeffs }));
+store.set("jarvis:eye-calib-v7", JSON.stringify({ v: 3, coeffs }));
 check("a v3 payload is refused", loadCalibration() === null);
 
 // Legacy keys are cleaned up on save.

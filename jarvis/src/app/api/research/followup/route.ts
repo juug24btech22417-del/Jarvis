@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db/queries';
 import { oracleResearchService } from '@/services/OracleResearchService';
 import { RESEARCH_PROMPTS } from '@/services/ResearchPrompts';
 import { ALL_REPORT_TYPES, type ReportType } from '@/services/ResearchTypes';
+import { parseJsonLoose } from '@/lib/llm/looseJson';
 
 const API_BASE = process.env.INTERNAL_API_URL || 'http://localhost:3000';
 
@@ -61,7 +62,7 @@ export async function POST(req: NextRequest) {
       const res = await axios.post(`${API_BASE}/api/research-llm`, {
         prompt: `${prompt}\n\nReturn ONLY JSON: { "query": "...", "type": "..." }`,
       });
-      const parsed = JSON.parse(res.data.content || '{}');
+      const parsed = parseJsonLoose<any>(res.data.content || '', {});
       if (typeof parsed.query === 'string' && parsed.query.trim()) {
         rewrittenQuery = parsed.query.trim();
       }

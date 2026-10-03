@@ -14,6 +14,7 @@ import { addHoverScale, createRipple, animateTyping } from "@/lib/animations/gsa
 import PersonaSwitcher from "@/components/ui/PersonaSwitcher";
 import type { Macro } from "@/lib/ghost/macroTypes";
 import { startAssemble } from "@/lib/cinematic/assembleStore";
+import { isMissionFollowup } from "@/lib/agent/followupRefs";
 
 /**
  * Code Forge: route code that JARVIS wrote into the panel instead of the chat.
@@ -2812,12 +2813,46 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
   };
 
   // Process command using LLM-based intent parsing
+  // Cross-turn "last mission" (Tier 8): "open the second one", "find its
+  // repo", "compare it with the first" resolve against the most recent
+  // mission's artifacts instead of being planned from scratch. Returns null
+  // so the message falls through to normal handling when there's no mission.
+  const answerLastMission = async (message: string): Promise<string | null> => {
+    try {
+      const lastRes = await fetch("/api/agent/last", { cache: "no-store" });
+      if (!lastRes.ok) return null;
+      const last = await lastRes.json();
+      const job = last?.job;
+      if (!job?.id) return null;
+      const res = await fetch("/api/agent/followup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId: job.id, message }),
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      const answer = typeof data?.answer === "string" ? data.answer.trim() : "";
+      if (!answer) return null;
+      const goal = typeof job.goal === "string" ? job.goal : "your last mission";
+      return `On your last mission (“${goal.slice(0, 90)}”) —\n\n${answer}`;
+    } catch {
+      return null;
+    }
+  };
+
   const processFlexibleCommand = async (text: string): Promise<string | null> => {
     // Fast path: obvious conversational/smalltalk messages can never match a
     // device intent. Skip the LLM parse entirely — zero NVIDIA quota spent,
     // zero rate-limit pressure on the chat request that fires alongside it.
     const FAST_PATH_CHAT = /^(whats up|what'?s up|wassup|sup|yo|hey+|hi+|hello+|howdy|how are you|how are ya|how'?s it going|good (?:morning|afternoon|evening|night)|you (?:there|awake|good)|you up|thanks|thank you|good ?bye|goodnight|gn)\s*[!.?]*\s*$/i;
     if (FAST_PATH_CHAT.test(text.trim())) return null;
+
+    // Cross-turn mission follow-up — handled before intent parsing so
+    // "open the second one" never becomes a device intent.
+    if (isMissionFollowup(text)) {
+      const missionAnswer = await answerLastMission(text);
+      if (missionAnswer) return missionAnswer;
+    }
 
     // Abort any stale intent call before starting a new one.
     intentAbortRef.current?.abort();
@@ -3811,7 +3846,7 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
   }, [userName, memories, tasks, messages]);
 
   // Send message to Claude API
-  const sendToClaude = async (userMessage: string, signal?: AbortSignal) => {
+  const sendToClaude = async (userMessage: string, signal?: AbortSignal, attempt = 0) => {
     try {
       setState("thinking");
       setStreamingContent("");
@@ -3969,10 +4004,25 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
         setState("idle");
       }
     } catch (error) {
+      const err = error as Error & { name?: string };
+      // A user barge-in / panel close aborts the request — that is not a
+      // failure, so stay quiet (the old generic error fired on these too).
+      if (err?.name === "AbortError") {
+        setState("idle");
+        return;
+      }
       console.error("Error sending to Claude:", error);
+      // One silent retry: dev-server compiles, a provider switching lanes, and
+      // transient network blips all used to surface as a hard failure.
+      if (attempt === 0) {
+        setTimeout(() => {
+          void sendToClaude(userMessage, signal, 1);
+        }, 800);
+        return;
+      }
       addMessage({
         role: "assistant",
-        content: "I'm afraid that didn't work, Boss. The AI service may be unavailable. Please try again.",
+        content: `That didn't go through, Boss — ${err?.message || "the AI service looks unreachable"}. Give it a moment and try again.`,
       });
       setState("idle");
     }

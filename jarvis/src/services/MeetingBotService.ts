@@ -1622,11 +1622,7 @@ public class ChromeFocusHelper {
       console.log("JARVIS: Generating meeting summary...");
       let summary: MeetingSummary | null = null;
 
-      // 1. Direct AI Summarization with Gemini 2.5 Flash
-      const geminiKey = process.env.GEMINI_API_KEY;
-      if (geminiKey && captionLog.length > 0) {
-        try {
-          const prompt = `You are JARVIS, an elite executive AI assistant. Analyze the following meeting transcript and return a structured summary as JSON.
+      const summaryPrompt = `You are JARVIS, an elite executive AI assistant. Analyze the following meeting transcript and return a structured summary as JSON.
 
 Format strictly as JSON:
 {
@@ -1642,13 +1638,17 @@ Format strictly as JSON:
 Transcript:
 ${transcript.slice(0, 30000)}`;
 
+      // 1. Direct AI Summarization with Gemini 2.5 Flash
+      const geminiKey = process.env.GEMINI_API_KEY;
+      if (geminiKey && captionLog.length > 0) {
+        try {
           const geminiRes = await fetch(
             `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
             {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
-                contents: [{ parts: [{ text: prompt }] }],
+                contents: [{ parts: [{ text: summaryPrompt }] }],
                 generationConfig: {
                   responseMimeType: 'application/json',
                   temperature: 0.2,
@@ -1663,9 +1663,34 @@ ${transcript.slice(0, 30000)}`;
             if (textContent) {
               summary = this.extractValidJson(textContent);
             }
+          } else {
+            console.warn(
+              `JARVIS: Gemini summarization returned HTTP ${geminiRes.status}; falling back to LLM chain`
+            );
           }
         } catch (aiErr: any) {
           console.warn("JARVIS: Gemini summarization note:", aiErr.message);
+        }
+      }
+
+      // 2. Fallback: shared LLM chain (NVIDIA → OpenRouter → Groq). Covers a
+      // missing/rate-limited Gemini key so the bot never falls straight to a
+      // placeholder summary when it actually has a transcript to work with.
+      if (!summary && captionLog.length > 0) {
+        try {
+          const { runLlmChain } = await import('@/services/LlmChain');
+          const result = await runLlmChain(
+            `${summaryPrompt}\n\nReturn ONLY the raw JSON object — no markdown fences, no commentary.`,
+            { maxTokens: 2500, temperature: 0.2 }
+          );
+          if (result?.content) {
+            summary = this.extractValidJson(result.content);
+            if (summary) {
+              console.log(`JARVIS: Summary generated via ${result.provider} ${result.model}`);
+            }
+          }
+        } catch (chainErr: any) {
+          console.warn("JARVIS: LLM chain summarization note:", chainErr?.message);
         }
       }
 
@@ -1779,7 +1804,9 @@ ${transcript.slice(0, 30000)}`;
         object: 'block',
         type: 'paragraph',
         paragraph: {
-          rich_text: [{ type: 'text', text: { content: params.summary.summary } }],
+          rich_text: [
+            { type: 'text', text: { content: params.summary.summary.slice(0, 2000) } },
+          ],
         },
       },
       {
@@ -1837,8 +1864,24 @@ ${transcript.slice(0, 30000)}`;
           rich_text: [{ type: 'text', text: { content: 'Meeting Transcript' } }],
         },
       },
-      ...transcriptBlocks.slice(0, 50),
+      ...transcriptBlocks.slice(0, 120),
     ];
+
+    // Resolve the database's real property names instead of assuming
+    // "Name"/"Tags"/"URL" exist. A schema mismatch makes Notion reject
+    // the entire page, which is why meeting notes silently failed to sync.
+    const properties = await this.notionDatabaseProperties(
+      notionToken,
+      notionDatabaseId,
+      params.title,
+      params.meetingUrl,
+      ['Meeting', 'JARVIS-Bot']
+    );
+
+    // Notion caps a request at 100 blocks. Send the first batch, then
+    // append the rest so long transcripts are fully preserved.
+    const MAX_BLOCKS = 100;
+    const firstBatch = children.slice(0, MAX_BLOCKS);
 
     const res = await fetch('https://api.notion.com/v1/pages', {
       method: 'POST',
@@ -1849,16 +1892,8 @@ ${transcript.slice(0, 30000)}`;
       },
       body: JSON.stringify({
         parent: { database_id: notionDatabaseId },
-        properties: {
-          Name: {
-            title: [{ text: { content: params.title } }],
-          },
-          Tags: {
-            multi_select: [{ name: 'Meeting' }, { name: 'JARVIS-Bot' }],
-          },
-          ...(params.meetingUrl ? { URL: { url: params.meetingUrl } } : {}),
-        },
-        children,
+        properties,
+        ...(firstBatch.length ? { children: firstBatch } : {}),
       }),
     });
 
@@ -1868,7 +1903,94 @@ ${transcript.slice(0, 30000)}`;
     }
 
     const data = await res.json();
+
+    const leftover = children.slice(MAX_BLOCKS);
+    if (leftover.length) {
+      await this.notionAppendBlocks(notionToken, data.id, leftover);
+    }
+
     return data.url || null;
+  }
+
+  /** Resolve usable Notion database property payloads from the live schema. */
+  private async notionDatabaseProperties(
+    token: string,
+    databaseId: string,
+    title: string,
+    meetingUrl?: string,
+    tags: string[] = []
+  ): Promise<Record<string, any>> {
+    let titleProperty = 'Name';
+    const properties: Record<string, any> = {};
+    try {
+      const dbRes = await fetch(`https://api.notion.com/v1/databases/${databaseId}`, {
+        headers: { Authorization: `Bearer ${token}`, 'Notion-Version': '2022-06-28' },
+      });
+      if (dbRes.ok) {
+        const dbData = await dbRes.json();
+        const dbProperties = (dbData.properties || {}) as Record<string, any>;
+        for (const [name, def] of Object.entries(dbProperties)) {
+          if ((def as any).type === 'title') {
+            titleProperty = name;
+            break;
+          }
+        }
+        properties[titleProperty] = { title: [{ text: { content: title } }] };
+
+        if (meetingUrl) {
+          const urlProp = Object.entries(dbProperties).find(
+            ([, d]) => (d as any).type === 'url'
+          )?.[0];
+          if (urlProp) properties[urlProp] = { url: meetingUrl };
+        }
+
+        if (tags.length) {
+          const tagsProp = Object.entries(dbProperties).find(
+            ([, d]) => (d as any).type === 'multi_select' || (d as any).type === 'select'
+          )?.[0];
+          if (tagsProp) {
+            if (dbProperties[tagsProp].type === 'multi_select') {
+              properties[tagsProp] = { multi_select: tags.map((t) => ({ name: t })) };
+            } else {
+              properties[tagsProp] = { select: { name: tags[0] } };
+            }
+          }
+        }
+        return properties;
+      }
+    } catch (e: any) {
+      console.warn('JARVIS: Notion schema fetch failed:', e?.message);
+    }
+    // Schema unavailable — send the simplest valid title-only page.
+    properties[titleProperty] = { title: [{ text: { content: title } }] };
+    return properties;
+  }
+
+  /** Append blocks to a page in <=100-block batches. */
+  private async notionAppendBlocks(token: string, pageId: string, blocks: any[]) {
+    for (let i = 0; i < blocks.length; i += 100) {
+      const batch = blocks.slice(i, i + 100);
+      try {
+        const res = await fetch(`https://api.notion.com/v1/blocks/${pageId}/children`, {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Notion-Version': '2022-06-28',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ children: batch }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          console.error(
+            `JARVIS: Notion append ${i}-${i + batch.length} failed:`,
+            JSON.stringify(err)
+          );
+        }
+      } catch (e: any) {
+        console.error('JARVIS: Notion append error:', e?.message);
+      }
+    }
   }
 
   // ─── CHAT ──────────────────────────────────────────────────────────────

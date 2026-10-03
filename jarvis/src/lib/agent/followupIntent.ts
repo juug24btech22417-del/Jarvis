@@ -5,7 +5,9 @@
 // the service can actually DO them (send, save, render) instead of describing
 // them. Pure so the rules are unit-testable without Telegram or the agent LLM.
 
-export type FollowupActionKind = "telegram" | "video" | "file" | "note" | "none";
+import { ordinalIndex } from "./followupRefs";
+
+export type FollowupActionKind = "telegram" | "video" | "open" | "file" | "note" | "none";
 
 export interface FollowupAction {
   kind: FollowupActionKind;
@@ -23,6 +25,8 @@ const FILE_VERB = /\b(save|export|write|dump|download|put)\b/i;
 const FILE_NOUN = /\b(file|files|txt|text file|pdf|markdown|md|doc|document|csv|json)\b/i;
 const NOTE_VERB = /\b(add|save|create|put|make|store|note down|write)\b/i;
 const NOTE_NOUN = /\b(note|notes)\b/i;
+const OPEN_VERB = /\b(open|launch|show( me)?|display|pull up|go to|goto|browse)\b/i;
+const OPEN_TARGET = /\b(it|that|this|the one|the winner|them|those|both)\b/i;
 
 /**
  * Classify a follow-up message. Order matters — "make a video and send it to
@@ -43,6 +47,11 @@ export function detectFollowupAction(message: string): FollowupAction {
   // "make me a video brief", "turn this into a reel"
   if (VIDEO_VERB.test(m) && VIDEO_NOUN.test(m)) {
     return { kind: "video", trigger: "video" };
+  }
+
+  // "open the second one", "open it", "show me the winner" → open an artifact
+  if (OPEN_VERB.test(m) && (ordinalIndex(m) !== null || OPEN_TARGET.test(m))) {
+    return { kind: "open", trigger: "open" };
   }
 
   // "save it to a file", "export this as a markdown file"

@@ -1,37 +1,139 @@
 import { NextRequest, NextResponse } from "next/server";
+import {
+  NOTION_VERSION,
+  MAX_BLOCKS_PER_REQUEST,
+  sanitizeBlocks,
+  splitContentIntoBlocks,
+} from "@/lib/notion/notionBlocks";
 
 const NOTION_API_BASE = "https://api.notion.com/v1";
 
-// Helper to split content into Notion-compatible blocks (max 2000 chars per block)
-function splitContentIntoBlocks(content: string) {
-  const MAX_CHARS = 2000;
-  const blocks = [];
-  const paragraphs = content.split(/\n\s*\n/);
-  let currentBlock = "";
-
-  for (const para of paragraphs) {
-    if ((currentBlock + para).length <= MAX_CHARS) {
-      currentBlock += (currentBlock ? "\n\n" : "") + para;
-    } else {
-      if (currentBlock) blocks.push(currentBlock);
-      if (para.length > MAX_CHARS) {
-        let start = 0;
-        while (start < para.length) {
-          blocks.push(para.substring(start, start + MAX_CHARS));
-          start += MAX_CHARS;
-        }
-        currentBlock = "";
-      } else {
-        currentBlock = para;
-      }
+/** POST blocks to an existing page in <=100-block batches. */
+async function appendBlocks(pageId: string, token: string, blocks: any[]): Promise<void> {
+  for (let i = 0; i < blocks.length; i += MAX_BLOCKS_PER_REQUEST) {
+    const batch = blocks.slice(i, i + MAX_BLOCKS_PER_REQUEST);
+    const res = await fetch(`${NOTION_API_BASE}/blocks/${pageId}/children`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Notion-Version": NOTION_VERSION,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ children: batch }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      console.error(
+        `[Notion] Appending blocks ${i}-${i + batch.length} failed:`,
+        JSON.stringify(err)
+      );
+      // Keep going — a partial page is better than none.
     }
   }
-  if (currentBlock) blocks.push(currentBlock);
-  return blocks.map(text => ({
-    object: "block",
-    type: "paragraph",
-    paragraph: { rich_text: [{ type: "text", text: { content: text } }] },
-  }));
+}
+
+interface NotionPageResult {
+  pageId: string;
+  url: string;
+  appended: number;
+}
+
+/** Create a page and append any blocks beyond the first 100. */
+async function createPage(params: {
+  token: string;
+  parent: Record<string, any>;
+  properties: Record<string, any>;
+  children: any[];
+}): Promise<NotionPageResult> {
+  const { token, parent, properties, children } = params;
+  const firstBatch = children.slice(0, MAX_BLOCKS_PER_REQUEST);
+
+  const res = await fetch(`${NOTION_API_BASE}/pages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Notion-Version": NOTION_VERSION,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      parent,
+      properties,
+      ...(firstBatch.length ? { children: firstBatch } : {}),
+    }),
+  });
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    const err: any = new Error("Notion page creation failed");
+    err.details = error;
+    err.status = res.status;
+    throw err;
+  }
+
+  const data = await res.json();
+  const leftover = children.slice(MAX_BLOCKS_PER_REQUEST);
+  if (leftover.length) {
+    await appendBlocks(data.id, token, leftover);
+  }
+
+  return { pageId: data.id, url: data.url, appended: leftover.length };
+}
+
+/** Resolve the title/url/tags property names from a database schema. */
+async function buildDatabaseProperties(
+  token: string,
+  databaseId: string,
+  title: string,
+  url?: string,
+  tags: string[] = []
+): Promise<Record<string, any>> {
+  const dbRes = await fetch(`${NOTION_API_BASE}/databases/${databaseId}`, {
+    headers: { Authorization: `Bearer ${token}`, "Notion-Version": NOTION_VERSION },
+  });
+
+  let titleProperty = "Name";
+  let properties: Record<string, any> = {
+    Name: { title: [{ text: { content: title } }] },
+  };
+
+  if (dbRes.ok) {
+    const dbData = await dbRes.json();
+    const dbProperties = (dbData.properties || {}) as Record<string, any>;
+
+    for (const [propName, propData] of Object.entries(dbProperties)) {
+      if ((propData as any).type === "title") {
+        titleProperty = propName;
+        break;
+      }
+    }
+
+    properties = { [titleProperty]: { title: [{ text: { content: title } }] } };
+
+    if (url) {
+      const urlProp = Object.entries(dbProperties).find(
+        ([, data]) => (data as any).type === "url"
+      )?.[0];
+      if (urlProp) properties[urlProp] = { url };
+    }
+
+    if (tags.length > 0) {
+      const tagsProp = Object.entries(dbProperties).find(
+        ([, data]) => (data as any).type === "multi_select" || (data as any).type === "select"
+      )?.[0];
+      if (tagsProp) {
+        const propType = dbProperties[tagsProp].type;
+        if (propType === "multi_select") {
+          properties[tagsProp] = { multi_select: tags.map((tag) => ({ name: tag })) };
+        } else if (propType === "select") {
+          properties[tagsProp] = { select: { name: tags[0] } };
+        }
+      }
+    }
+  } else {
+    console.warn("[Notion] Could not fetch database schema, using default property names");
+  }
+
+  return properties;
 }
 
 export async function POST(req: NextRequest) {
@@ -60,194 +162,124 @@ export async function POST(req: NextRequest) {
     const { title, url, content, tags = [], blocks: structuredBlocks } = body;
 
     if (!title) {
+      return NextResponse.json({ error: "Title required" }, { status: 400 });
+    }
+
+    const sanitized = sanitizeBlocks(structuredBlocks || []);
+    const children =
+      sanitized.length > 0
+        ? sanitized
+        : content
+        ? splitContentIntoBlocks(content)
+        : [];
+
+    // ── Database page ───────────────────────────────────────────────
+    if (notionDatabaseId) {
+      const properties = await buildDatabaseProperties(
+        notionToken,
+        notionDatabaseId,
+        title,
+        url,
+        tags
+      );
+
+      try {
+        const result = await createPage({
+          token: notionToken,
+          parent: { database_id: notionDatabaseId },
+          properties,
+          children,
+        });
+        return NextResponse.json({
+          success: true,
+          pageId: result.pageId,
+          url: result.url,
+          appended: result.appended,
+          message: "Saved to Notion database",
+        });
+      } catch (structuredErr: any) {
+        // Structured blocks were rejected. Retry with markdown paragraphs
+        // so the report still lands in Notion.
+        if (structuredBlocks?.length) {
+          console.warn(
+            "[Notion] Structured page failed, retrying with markdown fallback:",
+            JSON.stringify(structuredErr?.details || structuredErr?.message)
+          );
+          const result = await createPage({
+            token: notionToken,
+            parent: { database_id: notionDatabaseId },
+            properties,
+            children: splitContentIntoBlocks(content || ""),
+          });
+          return NextResponse.json({
+            success: true,
+            pageId: result.pageId,
+            url: result.url,
+            appended: result.appended,
+            message: "Saved to Notion database (markdown fallback)",
+          });
+        }
+        return NextResponse.json(
+          { error: "Notion API error", details: structuredErr?.details || String(structuredErr) },
+          { status: structuredErr?.status || 500 }
+        );
+      }
+    }
+
+    // ── Standalone page (no database configured) ─────────────────────
+    const parentPageId = process.env.NOTION_PARENT_PAGE_ID;
+    if (!parentPageId) {
       return NextResponse.json(
-        { error: "Title required" },
+        {
+          error: "No Notion destination configured",
+          setup: [
+            "Set NOTION_DATABASE_ID (preferred) or NOTION_PARENT_PAGE_ID in .env.local",
+            "Share the target page/database with your Notion integration",
+          ],
+        },
         { status: 400 }
       );
     }
 
-    // If database ID is set, create a database page
-    if (notionDatabaseId) {
-      // First, get the database schema to find the correct property names
-      const dbResponse = await fetch(`${NOTION_API_BASE}/databases/${notionDatabaseId}`, {
-        headers: {
-          Authorization: `Bearer ${notionToken}`,
-          "Notion-Version": "2022-06-28",
-        },
+    const pageChildren = [
+      ...(url ? [{ object: "block", type: "bookmark", bookmark: { url } }] : []),
+      ...children,
+    ];
+
+    try {
+      const result = await createPage({
+        token: notionToken,
+        parent: { page_id: parentPageId },
+        properties: { title: [{ text: { content: title } }] },
+        children: pageChildren,
       });
-
-      let properties: Record<string, any> = {};
-      let titleProperty = "Name"; // Default fallback
-
-      if (dbResponse.ok) {
-        const dbData = await dbResponse.json();
-        const dbProperties = dbData.properties as Record<string, any>;
-
-        // Find the title property (type: "title")
-        for (const [propName, propData] of Object.entries(dbProperties)) {
-          if ((propData as any).type === "title") {
-            titleProperty = propName;
-            break;
-          }
-        }
-
-        console.log("[Notion] Database schema:", Object.keys(dbProperties));
-        console.log("[Notion] Using title property:", titleProperty);
-
-        // Build properties dynamically based on database schema
-        properties = {
-          [titleProperty]: {
-            title: [
-              {
-                text: { content: title },
-              },
-            ],
-          },
-        };
-
-        // Add URL if database has a URL property
-        if (url) {
-          const urlProp = Object.entries(dbProperties).find(
-            ([_, data]) => (data as any).type === "url"
-          )?.[0];
-          if (urlProp) {
-            properties[urlProp] = { url };
-          }
-        }
-
-        // Add tags if database has a multi_select or select property
-        if (tags.length > 0) {
-          const tagsProp = Object.entries(dbProperties).find(
-            ([_, data]) => (data as any).type === "multi_select" || (data as any).type === "select"
-          )?.[0];
-          if (tagsProp) {
-            const propType = dbProperties[tagsProp].type;
-            if (propType === "multi_select") {
-              properties[tagsProp] = {
-                multi_select: tags.map((tag: string) => ({ name: tag })),
-              };
-            } else if (propType === "select") {
-              // For select, use only the first tag
-              properties[tagsProp] = {
-                select: { name: tags[0] },
-              };
-            }
-          }
-        }
-      } else {
-        // Fallback to default property names if we can't fetch schema
-        console.warn("[Notion] Could not fetch database schema, using defaults");
-        properties = {
-          Name: {
-            title: [
-              {
-                text: { content: title },
-              },
-            ],
-          },
-          ...(url && {
-            URL: { url },
-          }),
-          ...(tags.length > 0 && {
-            Tags: {
-              multi_select: tags.map((tag: string) => ({ name: tag })),
-            },
-          }),
-        };
-      }
-
-      const response = await fetch(`${NOTION_API_BASE}/pages`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${notionToken}`,
-          "Notion-Version": "2022-06-28",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          parent: { database_id: notionDatabaseId },
-          properties,
-          // Prefer structured blocks when the caller sent them. The
-          // Oracle research pipeline passes a pre-shaped Notion block
-          // array (headings, callouts, tables, lists) that renders
-          // cleanly in Notion without losing the comparison/market
-          // structure. Fall back to flat markdown paragraphs.
-          children:
-            structuredBlocks && structuredBlocks.length > 0
-              ? structuredBlocks
-              : content
-              ? splitContentIntoBlocks(content)
-              : undefined,
-        }),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        return NextResponse.json(
-          { error: "Notion API error", details: error },
-          { status: 500 }
-        );
-      }
-
-      const data = await response.json();
       return NextResponse.json({
         success: true,
-        pageId: data.id,
-        url: data.url,
-        message: "Saved to Notion database",
+        pageId: result.pageId,
+        url: result.url,
+        appended: result.appended,
+        message: "Saved to Notion",
       });
-    }
-
-    // Without database, create a simple page
-    const response = await fetch(`${NOTION_API_BASE}/pages`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${notionToken}`,
-        "Notion-Version": "2022-06-28",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        parent: { page_id: process.env.NOTION_PARENT_PAGE_ID },
-        properties: {
-          title: [
-            {
-              text: { content: title },
-            },
-          ],
-        },
-        children: [
-          ...(url
-            ? [
-                {
-                  object: "block",
-                  type: "bookmark",
-                  bookmark: { url },
-                },
-              ]
-            : []),
-          ...(structuredBlocks && structuredBlocks.length > 0
-            ? structuredBlocks
-            : content
-            ? splitContentIntoBlocks(content)
-            : []),
-        ],
-      }),
-    });
-
-    if (!response.ok) {
-      const error = await response.json();
+    } catch (structuredErr: any) {
+      if (structuredBlocks?.length && content) {
+        const result = await createPage({
+          token: notionToken,
+          parent: { page_id: parentPageId },
+          properties: { title: [{ text: { content: title } }] },
+          children: splitContentIntoBlocks(content),
+        });
+        return NextResponse.json({
+          success: true,
+          pageId: result.pageId,
+          url: result.url,
+          message: "Saved to Notion (markdown fallback)",
+        });
+      }
       return NextResponse.json(
-        { error: "Notion API error", details: error },
-        { status: 500 }
+        { error: "Notion API error", details: structuredErr?.details || String(structuredErr) },
+        { status: structuredErr?.status || 500 }
       );
     }
-
-    const data = await response.json();
-    return NextResponse.json({
-      success: true,
-      pageId: data.id,
-      url: data.url,
-      message: "Saved to Notion",
-    });
   } catch (error) {
     console.error("Notion API error:", error);
     return NextResponse.json(
@@ -257,7 +289,7 @@ export async function POST(req: NextRequest) {
   }
 }
 
-export async function GET(req: NextRequest) {
+export async function GET(_req: NextRequest) {
   return NextResponse.json({
     success: true,
     usage: {
@@ -268,6 +300,7 @@ export async function GET(req: NextRequest) {
         url: "https://example.com/article",
         content: "Optional notes",
         tags: ["work", "important"],
+        blocks: "Optional pre-shaped Notion block array",
       },
     },
     setup: {

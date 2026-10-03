@@ -9,11 +9,13 @@
 
 import path from "path";
 import fs from "fs";
+import { exec } from "child_process";
 import { randomUUID } from "crypto";
 import type { AgentJob, MissionArtifact } from "@/lib/agent/types";
 import { agentLlm } from "@/lib/agent/llm";
 import { getJob, putJob, flushMissions } from "@/lib/agent/store";
 import { detectFollowupAction, artifactFilename, type FollowupActionKind } from "@/lib/agent/followupIntent";
+import { pickByOrdinal } from "@/lib/agent/followupRefs";
 import { renderVideoBrief, briefSummary } from "@/services/MissionVideoService";
 
 /** Flatten a mission's successful step outputs into readable context blocks. */
@@ -40,9 +42,9 @@ export function buildMissionContext(job: AgentJob, budget = 6000): string {
 
   if (job.artifacts?.length) {
     blocks.push(
-      `### Artifacts\n` +
+      `### Artifacts (the user may refer to these as "the first/second one")\n` +
         job.artifacts
-          .map((a) => `- (${a.kind}) ${a.label}: ${a.value}`)
+          .map((a, i) => `- [${i + 1}] (${a.kind}) ${a.label}: ${a.value}`)
           .join("\n")
     );
   }
@@ -122,6 +124,33 @@ function notesDir(): string {
 }
 
 /**
+ * Open a mission artifact on the host: a URL in the browser, a file with its
+ * default app. Windows-first (the whole app is), and a no-op elsewhere.
+ */
+function openArtifactOnHost(target: string): boolean {
+  const value = (target || "").trim();
+  if (!value) return false;
+  const isUrl = /^https?:\/\//i.test(value);
+  if (!isUrl) {
+    try {
+      if (!fs.existsSync(value)) return false;
+    } catch {
+      return false;
+    }
+  }
+  if (process.platform !== "win32") return isUrl; // nothing to launch server-side
+  try {
+    const clean = value.replace(/"/g, "%22");
+    exec(`cmd.exe /c start "" "${clean}"`, (err) => {
+      if (err) console.warn("[Followup] open failed (non-fatal):", err.message);
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Run the imperative follow-up. Returns a confirmation block for the chat and
  * a structured result for the API/UI. Never throws for expected failures
  * (missing Telegram target, disk error) — it explains what happened instead.
@@ -152,6 +181,23 @@ export async function executeFollowupAction(job: AgentJob, message: string): Pro
     } catch (e) {
       return { kind: "telegram", ok: false, detail: `Telegram send failed: ${(e as Error).message}` };
     }
+  }
+
+  if (action.kind === "open") {
+    const artifacts = job.artifacts ?? [];
+    if (!artifacts.length) {
+      return { kind: "open", ok: false, detail: "This mission didn't produce anything I can open." };
+    }
+    const picked = pickByOrdinal(artifacts, message) ?? artifacts[0];
+    const ok = openArtifactOnHost(picked.value);
+    return {
+      kind: "open",
+      ok,
+      detail: ok
+        ? `Opening “${picked.label}”${picked.kind === "url" ? ` — ${picked.value}` : ""}.`
+        : `I found “${picked.label}” (${picked.value}) but couldn't open it automatically.`,
+      artifact: { kind: picked.kind, label: picked.label, value: picked.value },
+    };
   }
 
   if (action.kind === "video") {

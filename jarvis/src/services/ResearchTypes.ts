@@ -35,6 +35,7 @@ export type ReportBlock =
   | { type: "numbered_list"; items: string[] }
   | { type: "table"; rows: string[][] }
   | { type: "callout"; text: string; emoji?: string }
+  | { type: "image"; url: string; caption?: string }
   | { type: "divider" };
 
 export interface StructuredReport {

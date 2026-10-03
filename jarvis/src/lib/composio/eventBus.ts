@@ -16,6 +16,7 @@ export type JarvisEventSource =
   | "notion"
   | "linear"
   | "jira"
+  | "oracle"
   | "test";
 
 export type JarvisEventPriority = "low" | "normal" | "high";

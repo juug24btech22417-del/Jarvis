@@ -45,6 +45,8 @@ function blockToMarkdown(block: ReportBlock): string[] {
     }
     case "callout":
       return [`> ${block.emoji ? block.emoji + " " : ""}${block.text}`, ""];
+    case "image":
+      return [`![${block.caption || "image"}](${block.url})`, block.caption ? `_${block.caption}_` : "", ""];
     case "divider":
       return [`---`, ""];
   }
@@ -94,6 +96,8 @@ function notionBlock(block: ReportBlock): unknown | null {
       return notionTable(block.rows);
     case "callout":
       return notionCallout(block.text, block.emoji);
+    case "image":
+      return notionImage(block.url, block.caption);
     case "divider":
       return { object: "block", type: "divider", divider: {} };
   }
@@ -144,6 +148,18 @@ function notionCallout(text: string, emoji = "💡") {
     callout: {
       rich_text: rt(text),
       icon: { type: "emoji", emoji },
+    },
+  };
+}
+
+function notionImage(url: string, caption?: string) {
+  return {
+    object: "block",
+    type: "image",
+    image: {
+      type: "external",
+      external: { url },
+      ...(caption ? { caption: rt(caption) } : {}),
     },
   };
 }

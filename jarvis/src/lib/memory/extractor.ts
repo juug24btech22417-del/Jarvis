@@ -120,6 +120,10 @@ export async function extractMemoriesFromMessage(
       timeoutMs: 14_000,
       label: "memory",
       json: true,
+      // Stay off the interactive chat's hot lanes (Gemini/NVIDIA primary).
+      // Background memory work on the same free quota was what turned a 2s
+      // reply into a 20-30s one after the second brain shipped.
+      providerOrder: ["openrouter", "groq", "gemini", "nvidia"],
     });
     const parsed = parseJsonLoose<{ entities?: unknown; relationships?: unknown }>(raw);
     if (!parsed) {
@@ -230,37 +234,38 @@ export async function processExtraction(extraction: ExtractionResult): Promise<{
   return { created, updated, links, skipped };
 }
 
-/**
- * High-level function: extract and store memories from a user message.
- * Called (deferred) after every chat turn, so the graph upgrades itself from
- * conversation — mention a person or a personal detail and it lands here.
- */
-export async function extractAndStoreMemories(
-  userMessage: string,
-  conversationContext?: string,
-  knownContext?: string
-): Promise<{
+interface ExtractionJob {
+  message: string;
+  context?: string;
+  known?: string;
+}
+
+// ── Extraction scheduler ──────────────────────────────────────────
+// Only ONE extraction runs at a time, and a burst of turns collapses to the
+// most recent pending message. Combined with the provider re-ordering above,
+// this keeps background memory work from ever competing with the chat reply
+// for the same free LLM quota.
+const EXTRACTION_COOLDOWN_MS = 8_000;
+let extractionInFlight = false;
+let pendingExtraction: ExtractionJob | null = null;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function runExtractionJob(job: ExtractionJob): Promise<{
   success: boolean;
   addedEntities: string[];
   addedRelationships: string[];
   updatedEntities: string[];
   message?: string;
 }> {
-  const empty = { success: true, addedEntities: [], addedRelationships: [], updatedEntities: [] };
-
-  if (!shouldExtract(userMessage)) {
-    return { ...empty, message: "Nothing durable to learn" };
-  }
-
-  const extraction = await extractMemoriesFromMessage(userMessage, conversationContext, knownContext);
+  const extraction = await extractMemoriesFromMessage(job.message, job.context, job.known);
   if (extraction.entities.length === 0 && extraction.relationships.length === 0) {
-    return { ...empty, message: "No new information to learn" };
+    return { success: true, addedEntities: [], addedRelationships: [], updatedEntities: [], message: "No new information to learn" };
   }
 
   const result = await processExtraction(extraction);
-
   if (result.created.length + result.updated.length + result.links.length === 0) {
-    return { ...empty, message: "Information already known" };
+    return { success: true, addedEntities: [], addedRelationships: [], updatedEntities: [], message: "Information already known" };
   }
 
   console.log(
@@ -279,6 +284,62 @@ export async function extractAndStoreMemories(
     updatedEntities: result.updated,
     message: parts.join(" · ") || "Nothing to change",
   };
+}
+
+/**
+ * High-level function: extract and store memories from a user message.
+ * Called (deferred) after every chat turn, so the graph upgrades itself from
+ * conversation — mention a person or a personal detail and it lands here.
+ *
+ * Serialized + coalesced: a burst of turns never spawns parallel model calls
+ * fighting the reply for quota.
+ */
+export async function extractAndStoreMemories(
+  userMessage: string,
+  conversationContext?: string,
+  knownContext?: string
+): Promise<{
+  success: boolean;
+  addedEntities: string[];
+  addedRelationships: string[];
+  updatedEntities: string[];
+  message?: string;
+}> {
+  const empty: {
+    success: boolean;
+    addedEntities: string[];
+    addedRelationships: string[];
+    updatedEntities: string[];
+    message?: string;
+  } = { success: true, addedEntities: [], addedRelationships: [], updatedEntities: [] };
+
+  if (!shouldExtract(userMessage)) {
+    return { ...empty, message: "Nothing durable to learn" };
+  }
+
+  // Already busy → remember only the newest message and let the running loop
+  // pick it up after the cooldown. Never stack model calls.
+  if (extractionInFlight) {
+    pendingExtraction = { message: userMessage, context: conversationContext, known: knownContext };
+    return { ...empty, message: "Queued (extraction already running)" };
+  }
+
+  extractionInFlight = true;
+  try {
+    let job: ExtractionJob | null = { message: userMessage, context: conversationContext, known: knownContext };
+    let first = true;
+    let lastResult = empty;
+    while (job) {
+      if (!first) await sleep(EXTRACTION_COOLDOWN_MS);
+      first = false;
+      lastResult = await runExtractionJob(job);
+      job = pendingExtraction;
+      pendingExtraction = null;
+    }
+    return lastResult;
+  } finally {
+    extractionInFlight = false;
+  }
 }
 
 /**

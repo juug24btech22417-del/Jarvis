@@ -1090,13 +1090,13 @@ export async function POST(request: Request) {
     // Memory extraction, care signals, milestones and event logs all hit
     // Prisma. Run a few seconds AFTER the reply so they can never compete
     // with the response for the DB connection or the event loop.
-    const defer = (fn: () => Promise<unknown>, label: string, warn = false) =>
+    const defer = (fn: () => Promise<unknown>, label: string, warn = false, delayMs = 4000) =>
       setTimeout(() => {
         fn().catch((err) => {
           const log = warn ? console.warn : console.error;
           log(`[Chat] ${label} failed (non-fatal):`, err?.message ?? err);
         });
-      }, 4000);
+      }, delayMs);
     // The last few turns let the extractor resolve "he"/"that", and the names
     // already in the graph let it reuse them so a repeated fact sharpens its
     // node instead of adding a near-duplicate.
@@ -1112,7 +1112,11 @@ export async function POST(request: Request) {
         const known = await listEntityNames(60).catch(() => [] as string[]);
         return extractAndStoreMemories(lastUserMessage, recentTurns, known.join(", "));
       },
-      "Memory extraction"
+      "Memory extraction",
+      false,
+      // Extra headroom so the extraction model call starts after the reply has
+      // finished streaming and the interactive lanes are idle again.
+      6500
     );
     defer(() => recordCareSignals(lastUserMessage), "Care signal recording", true);
     defer(() => maybeAutoMilestone(lastUserMessage), "Milestone auto-detect", true);
@@ -1171,7 +1175,11 @@ export async function POST(request: Request) {
     // start immediately.
     const SMALL_TALK = /^(whats up|what'?s up|wassup|sup|yo|hey|heyy+|hi|hello|howdy|how are you|how are ya|hows it going|how'?s it going|good (?:morning|afternoon|evening|night)|you (?:there|awake|good)|you up)\s*[!.?]*\s*$/i;
     const skipContext = OFFLINE_FAST.some((p) => p.test(lastUserMessage)) || SMALL_TALK.test(lastUserMessage.trim());
-    const CONTEXT_TIMEOUT_MS = 900;
+    // Context budget. The retriever now runs every DB read in parallel (and
+    // caches for 20s), so it normally resolves in tens of ms — this ceiling is
+    // purely the "cold/dying DB" escape hatch. Kept small so a sick database
+    // can never tax the reply. First token should land well under 3s.
+    const CONTEXT_TIMEOUT_MS = 550;
     const withTimeout = <T>(p: Promise<T>, ms: number, fallback: T): Promise<T> =>
       new Promise<T>((resolve) => {
         const t = setTimeout(() => resolve(fallback), ms);
@@ -1207,7 +1215,7 @@ export async function POST(request: Request) {
       memoryContext = formatMemoryContextAsPrompt(memoryData);
       retrievedEntityIds = memoryData.entityIds;
     } else {
-      console.warn("[Chat] Memory/care context skipped (1.5s deadline) — prioritizing reply speed");
+      console.warn("[Chat] Memory/care context skipped (550ms deadline) — prioritizing reply speed");
     }
     const carePromptBlock = care?.promptBlock ?? "";
 
@@ -2507,10 +2515,14 @@ const emailProgrammaticMatch =
       });
     }
   } catch (error) {
-    console.error("Error in chat API:", error);
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 }
-    );
+    // Never hand the UI a bare 500 for a chat turn — the CommandBar turns a
+    // non-OK response into "the AI service may be unavailable", which is both
+    // alarming and uninformative. Return a graceful 200 the client can show.
+    console.error("[Chat] Unhandled error — serving graceful fallback:", error);
+    return NextResponse.json({
+      content:
+        "Something glitched on my side just then, Boss. Say that once more — if it repeats, my language providers are probably rate-limited for a moment.",
+      offline: true,
+    });
   }
 }

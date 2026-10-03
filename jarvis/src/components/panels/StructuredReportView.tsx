@@ -125,6 +125,23 @@ function BlockView({
           <p>{block.text}</p>
         </motion.div>
       );
+    case "image":
+      return (
+        <motion.figure {...fadeIn(baseDelay)} className="space-y-1">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={block.url}
+            alt={block.caption || "Report image"}
+            loading="lazy"
+            className="w-full rounded-xl border border-white/10 object-cover max-h-64"
+          />
+          {block.caption && (
+            <figcaption className="text-[11px] text-white/50 italic">
+              {block.caption}
+            </figcaption>
+          )}
+        </motion.figure>
+      );
     case "divider":
       return <hr className="border-white/10 my-2" />;
   }

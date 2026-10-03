@@ -29,6 +29,8 @@ import {
   MISSION_CREDIT_CAP,
 } from "@/lib/agent/types";
 import { addEntity, addRelationship } from "@/lib/memory/graph";
+import { createTask } from "@/lib/db/queries";
+import { extractFollowUpTasks, collectRemainingItems } from "@/lib/agent/missionFollowups";
 import {
   emitMissionEvent,
   clearMissionEvents,
@@ -37,6 +39,10 @@ import { searchWebWithFallback, sanitizeHits, type SearchHit as FallbackSearchHi
 import { exec, spawn } from "child_process";
 import fs from "fs";
 import path from "path";
+import { startDevServer, stopDevServer, devServerStatus } from "@/lib/agent/devServers";
+import { planFileOrganization, uniqueName, type OrganizeFile } from "@/lib/agent/fileOrganize";
+import { recordOrganize, undoLastOrganize, type OrganizeMoveRecord } from "@/lib/agent/fileOrganizeLog";
+import { parsePackageFacts, parseOutdated, summarizeRepoInspect, isSafePackageName } from "@/lib/agent/repoInspect";
 import {
   autoInferDependencies,
   estimatePlan,
@@ -48,6 +54,9 @@ import {
   validateAndRepairPlan,
   kindsAllowedForRole,
   stepCreditWeight,
+  classifyGoal,
+  categoryDirective,
+  fallbackPlan,
 } from "@/lib/agent/plan";
 import {
   getJob as storeGetJob,
@@ -196,12 +205,17 @@ export async function planGoal(goal: string, opts?: { autoApprove?: boolean; wat
   // sign-in, orders/cart, price) get their plan built locally — no LLM
   // round-trip at all. Everything else goes to the planner.
   const instant = heuristicPlan(goal);
+  // Category routing hint keeps the LLM on the proven step recipe for the
+  // mission shape (tidy-up / dev-env / investigate / news / …) instead of
+  // free-styling an inefficient chain.
+  const category = classifyGoal(goal);
+  const routing = categoryDirective(category);
   for (let attempt = 0; attempt < (instant ? 1 : 2); attempt++) {
     if (attempt > 0) {
       await new Promise((r) => setTimeout(r, 700));
     }
     try {
-      const plan = instant ?? (await callPlanner(goal, speedDirective(goal) + memoryDirective(goal)));
+      const plan = instant ?? (await callPlanner(goal, speedDirective(goal) + routing + memoryDirective(goal)));
       if (instant) {
         emitMissionEvent(job.id, "log", "⚡ Instant plan — no planner round-trip needed", { instant: true });
         console.log(`[Agent] instant plan for "${goal.slice(0, 60)}" (${plan.steps.length} steps)`);
@@ -234,6 +248,36 @@ export async function planGoal(goal: string, opts?: { autoApprove?: boolean; wat
       lastError = (e as Error)?.message || String(e);
       console.warn(`[Agent] planner attempt ${attempt + 1} failed:`, lastError);
     }
+  }
+
+  // Every LLM provider failed. Rather than dropping the mission, fall back to
+  // a deterministic recipe for this goal's category — still executable, still
+  // parallelised, and honest about being a fallback.
+  try {
+    const plan = fallbackPlan(goal, category);
+    validateAndRepairPlan(plan);
+    maybeAppendBrowserStep(plan, goal);
+    plan.estimate = estimatePlan(plan);
+    if (plan.steps.some((s) => s.kind === "delegate")) plan.supervisor = true;
+    if (planNeedsApproval(plan)) job.auto = false;
+    job.plan = plan;
+    job.status = "awaiting_approval";
+    console.warn(`[Agent] planner unreachable (${lastError ?? "unknown"}) — using ${category} fallback plan`);
+    emitMissionEvent(job.id, "status", `Planner unreachable — using a built-in ${category} plan (${plan.steps.length} steps)`, {
+      status: "awaiting_approval",
+      plan,
+      fallback: true,
+    });
+    if (autoApprove && job.auto) {
+      void approveJob(job.id).catch((e) => {
+        job.status = "failed";
+        job.error = (e as Error)?.message || String(e);
+        emitMissionEvent(job.id, "error", job.error, { status: "failed" });
+      });
+    }
+    return job;
+  } catch (fallbackErr) {
+    console.error("[Agent] fallback plan failed too:", fallbackErr);
   }
 
   job.status = "failed";
@@ -283,6 +327,9 @@ export async function approveJob(jobId: string): Promise<AgentJob> {
         report: buildReport(job),
         partial: job.partial === true,
       });
+      // Bridge the mission's leftovers into the Command Deck. Fire-and-forget
+      // so task creation can never delay or fail the mission itself.
+      void syncMissionFollowUpTasks(job);
     }
   } catch (e) {
     job.status = "failed";
@@ -757,6 +804,25 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   });
 }
 
+/**
+ * Run a command in a directory and return its stdout. Tolerant of a non-zero
+ * exit when stdout is still useful (e.g. `npm outdated --json` exits 1 when it
+ * HAS results, which is exactly when we want them).
+ */
+function runCapture(command: string, cwd: string, timeoutMs: number): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${command} timed out`)), timeoutMs);
+    exec(command, { cwd, timeout: timeoutMs, maxBuffer: 2 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+      clearTimeout(t);
+      if (!stdout && err && !stderr) {
+        reject(err);
+        return;
+      }
+      resolve(String(stdout).trim());
+    });
+  });
+}
+
 /** Harvest concrete artifacts a step produced so the panel + follow-ups see them. */
 function collectArtifacts(job: AgentJob, step: AgentStep, result: unknown): void {
   if (!result || typeof result !== "object") return;
@@ -767,7 +833,15 @@ function collectArtifacts(job: AgentJob, step: AgentStep, result: unknown): void
     if (job.artifacts.some((a) => a.value === value)) return;
     job.artifacts.push({ id: randomUUID(), kind, label, value, stepId: step.id, at: Date.now() });
   };
-  if (typeof out.path === "string") add("file", String(out.filename ?? path.basename(out.path)), out.path);
+  if (typeof out.path === "string" && out.path) {
+    // Only register real files — repo_inspect/file_organize return a directory
+    // as `path`, which would otherwise pollute the artifact list.
+    try {
+      if (fs.statSync(out.path).isFile()) add("file", String(out.filename ?? path.basename(out.path)), out.path);
+    } catch {
+      // not a real file — skip
+    }
+  }
   if (Array.isArray(out.screenshots)) {
     for (const s of out.screenshots) if (typeof s === "string") add("image", `${step.title.slice(0, 40)} screenshot`, s);
   }
@@ -2405,6 +2479,192 @@ async function runStep(
       return { path: file, slides: slides.length, summary: briefSummary(slides) };
     }
 
+    /* ── v6: managed dev server ────────────────────────────────────── */
+
+    case "dev_server_start": {
+      const command = typeof step.params.command === "string" && step.params.command.trim() ? step.params.command.trim() : "npm run dev";
+      const port = Number(step.params.port ?? 3000) || 3000;
+      const cwd = typeof step.params.cwd === "string" && step.params.cwd.trim() ? path.resolve(step.params.cwd.trim()) : undefined;
+      const waitMs = Number(step.params.waitMs ?? 45_000) || 45_000;
+      log(`Starting dev server: ${command} (port ${port})`);
+      const res = await startDevServer({ command, cwd, port, waitMs });
+      log(res.message);
+      if (!res.ok) throw new Error(res.message);
+      return {
+        ok: true,
+        port,
+        pid: res.pid,
+        command,
+        cwd: res.cwd,
+        ready: res.ready,
+        alreadyRunning: res.alreadyRunning,
+        output: res.output,
+        summary: `### 🚀 Dev server\n\n${res.message}\n\n${res.output ? `\`\`\`\n${res.output.slice(-900)}\n\`\`\`` : "_(no output captured yet)_"}`,
+      };
+    }
+
+    case "dev_server_stop": {
+      const port = Number(step.params.port ?? 3000) || 3000;
+      log(`Stopping the managed dev server on port ${port}`);
+      const res = await stopDevServer({ port });
+      log(res.message);
+      return { ok: res.ok, port, pid: res.pid, summary: `### 🛑 Dev server\n\n${res.message}` };
+    }
+
+    case "dev_server_status": {
+      const port = Number(step.params.port ?? 3000) || 3000;
+      log(`Checking the dev server on port ${port}`);
+      const res = await devServerStatus({ port });
+      log(res.message);
+      return {
+        running: res.running,
+        managed: res.managed,
+        port,
+        pid: res.pid,
+        ready: res.ready,
+        httpStatus: res.httpStatus,
+        output: res.output,
+        summary: `### 📡 Dev server status\n\n${res.message}${res.output ? `\n\n\`\`\`\n${res.output.slice(-700)}\n\`\`\`` : ""}`,
+      };
+    }
+
+    /* ── v6: repository inspection ─────────────────────────────────── */
+
+    case "repo_inspect": {
+      const dir = typeof step.params.path === "string" && step.params.path.trim() ? path.resolve(step.params.path.trim()) : process.cwd();
+      const targetPkg = typeof step.params.package === "string" ? step.params.package.trim() : "";
+      const pkgPath = path.join(dir, "package.json");
+      if (!fs.existsSync(pkgPath)) throw new Error(`repo_inspect: no package.json found in ${dir}`);
+      let facts = null;
+      try {
+        facts = parsePackageFacts(JSON.parse(fs.readFileSync(pkgPath, "utf8")));
+      } catch {
+        facts = null;
+      }
+      if (!facts) throw new Error("repo_inspect: package.json could not be parsed");
+      log(`Inspecting ${facts.name}@${facts.version} (${facts.totalDeps} dependencies)`);
+
+      // `npm outdated` exits non-zero WHEN it has results — stdout is still valid.
+      let outdated: ReturnType<typeof parseOutdated> = [];
+      try {
+        const raw = await runCapture("npm outdated --json", dir, 60_000);
+        outdated = parseOutdated(JSON.parse(raw || "{}"));
+      } catch {
+        // no npm / no lockfile — report package.json facts only
+      }
+      log(outdated.length ? `${outdated.length} outdated package(s)` : "Dependencies look current");
+
+      let packageLatest: string | undefined;
+      if (targetPkg) {
+        if (!isSafePackageName(targetPkg)) throw new Error(`repo_inspect: unsafe package name "${targetPkg}"`);
+        try {
+          packageLatest = (await runCapture(`npm view ${targetPkg} version`, dir, 45_000)).split(/\r?\n/).pop()?.trim() || undefined;
+          if (packageLatest) log(`Latest ${targetPkg}: ${packageLatest}`);
+        } catch {
+          // registry unreachable — skip
+        }
+      }
+
+      return {
+        name: facts.name,
+        version: facts.version,
+        path: dir,
+        dependencies: facts.dependencies,
+        devDependencies: facts.devDependencies,
+        scripts: facts.scripts,
+        outdated,
+        ...(targetPkg ? { package: targetPkg, packageLatest } : {}),
+        summary: summarizeRepoInspect(facts, outdated, {
+          package: targetPkg || undefined,
+          packageLatest,
+          path: dir,
+        }),
+      };
+    }
+
+    /* ── v6: safe file tidy-up ─────────────────────────────────────── */
+
+    case "file_organize": {
+      const FOLDERS: Record<string, string> = { downloads: "Downloads", desktop: "Desktop", documents: "Documents" };
+      const folderKey = String(step.params.folder ?? "Downloads").toLowerCase();
+      const folder = FOLDERS[folderKey] ?? "Downloads";
+      const dir = path.join(process.env.USERPROFILE || "C:\\Users\\dhruv", folder);
+
+      // mode: "undo" reverses the most recent executed tidy-up.
+      if (String(step.params.mode ?? "").toLowerCase() === "undo") {
+        log("Undoing the last file tidy-up");
+        const res = undoLastOrganize();
+        log(res.message);
+        return {
+          undo: true,
+          restored: res.restored,
+          failed: res.failed,
+          summary: `### ↩️ Undo last tidy-up\n\n${res.message}`,
+        };
+      }
+
+      const mode = step.params.mode === "archive" ? "archive" : "by-type";
+      const dryRun = step.params.dryRun !== false; // dry run is the default
+      const olderThanDays = Number(step.params.olderThanDays ?? 30) || 30;
+
+      let entries: fs.Dirent[] = [];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isFile());
+      } catch {
+        throw new Error(`file_organize: could not read ${dir}`);
+      }
+      const files: OrganizeFile[] = entries.map((e) => ({ name: e.name, mtime: fs.statSync(path.join(dir, e.name)).mtimeMs }));
+      const plan = planFileOrganization(files, { mode, olderThanDays });
+      log(`${dryRun ? "Planning" : "Moving"} ${plan.moves.length} file(s) in ${folder}${dryRun ? " (dry run)" : ""}`);
+
+      const moved: string[] = [];
+      const failures: string[] = [];
+      const records: OrganizeMoveRecord[] = [];
+      if (!dryRun) {
+        for (const m of plan.moves) {
+          const destDir = path.join(dir, m.to);
+          const src = path.join(dir, m.name);
+          try {
+            fs.mkdirSync(destDir, { recursive: true });
+            const finalName = uniqueName(m.name, new Set(fs.readdirSync(destDir)));
+            const dest = path.join(destDir, finalName);
+            fs.renameSync(src, dest);
+            records.push({ from: src, to: dest });
+            moved.push(`${m.name} → ${m.to}/${finalName}`);
+          } catch (e) {
+            failures.push(`${m.name}: ${(e as Error).message.slice(0, 60)}`);
+          }
+        }
+        // Remember the exact moves so "undo" can put everything back.
+        if (records.length) recordOrganize({ folder, dir, mode, moves: records });
+        log(`Moved ${moved.length} file(s)${failures.length ? `, ${failures.length} failed` : ""}`);
+      }
+
+      const shown = plan.moves.slice(0, 30).map((m) => `- ${m.name} → **${m.to}/**`).join("\n");
+      const summary = [
+        `### 🗂️ File tidy-up — ${folder}${dryRun ? " _(dry run — nothing moved)_" : ""}`,
+        "",
+        plan.moves.length ? shown : "_Nothing to move._",
+        plan.moves.length > 30 ? `…and ${plan.moves.length - 30} more` : "",
+        plan.skipped.length ? `\nLeft in place: ${plan.skipped.length} file(s)` : "",
+        failures.length ? `\n⚠️ Failed: ${failures.join("; ")}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      return {
+        dryRun,
+        folder,
+        path: dir,
+        mode,
+        planned: plan.moves.length,
+        moved,
+        skipped: plan.skipped,
+        undoable: !dryRun && records.length > 0,
+        summary,
+      };
+    }
+
     default: {
       const exhaustive: never = step.kind;
       throw new Error(`unknown step kind: ${exhaustive}`);
@@ -2561,6 +2821,14 @@ export function buildReport(job: AgentJob): string {
     }
     lines.push("");
   }
+  // What remains — the actionable leftovers the Command Deck will track.
+  const remaining = collectRemainingItems(job);
+  if (remaining.length > 0) {
+    lines.push(`## What remains`);
+    for (const item of remaining) lines.push(`- ${item}`);
+    lines.push("");
+  }
+
   const findings = job.results.filter((r) => r.status === "ok");
   for (const r of findings) {
     const out = r.result as Record<string, unknown> | undefined;
@@ -2578,6 +2846,38 @@ export function buildReport(job: AgentJob): string {
     for (const u of urls) lines.push(`- ${u}`);
   }
   return lines.join("\n");
+}
+
+/**
+ * Turn a finished mission's follow-ups into real Command Deck tasks.
+ * Best-effort: any failure here is logged and swallowed.
+ */
+async function syncMissionFollowUpTasks(job: AgentJob): Promise<void> {
+  try {
+    const report = buildReport(job);
+    const items = extractFollowUpTasks(job, report);
+    if (items.length === 0) return;
+    const created: string[] = [];
+    for (const item of items) {
+      try {
+        await createTask({
+          title: item.title,
+          priority: item.priority,
+          dueDate: item.dueAt ?? undefined,
+        });
+        created.push(item.title);
+      } catch (e) {
+        console.warn("[Agent] follow-up task create failed (non-fatal):", (e as Error)?.message);
+      }
+    }
+    if (created.length > 0) {
+      emitMissionEvent(job.id, "log", `Added ${created.length} follow-up task(s) to your Command Deck`, {
+        followUpTasks: created,
+      });
+    }
+  } catch (e) {
+    console.warn("[Agent] follow-up task sync failed (non-fatal):", (e as Error)?.message);
+  }
 }
 
 function STEP_KIND_LABEL(kind: string): string {

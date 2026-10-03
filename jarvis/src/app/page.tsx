@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { QrCode, Radio, Clapperboard, Scan, FileText, Brain } from "lucide-react";
+import { QrCode, Radio, Clapperboard, Scan, FileText, Brain, ListTodo } from "lucide-react";
 import ArcReactor from "@/components/reactor/ArcReactor";
 import AvengersAssemble from "@/components/cinematic/AvengersAssemble";
 import StatusHUD from "@/components/panels/StatusHUD";
@@ -58,6 +58,7 @@ import AgentPanel from "@/components/panels/AgentPanel";
 import MissionControlPanel from "@/components/panels/MissionControlPanel";
 import WidgetsPanel from "@/components/panels/WidgetsPanel";
 import SecondBrainPanel from "@/components/panels/SecondBrainPanel";
+import TaskTimerDashboard from "@/components/panels/TaskTimerDashboard";
 import WidgetRail from "@/components/hud/WidgetRail";
 import AnalyticsPanel from "@/components/panels/AnalyticsPanel";
 import MacroPanel from "@/components/panels/MacroPanel";
@@ -662,6 +663,8 @@ export default function Home() {
   const [missionOpen, setMissionOpen] = useState(false);
   const [widgetsOpen, setWidgetsOpen] = useState(false);
   const [secondBrainOpen, setSecondBrainOpen] = useState(false);
+  // Unified Task + Timer command deck
+  const [taskDeckOpen, setTaskDeckOpen] = useState(false);
   // Ghost Analytics
   const [analyticsOpen, setAnalyticsOpen] = useState(false);
   // Record & Replay Macros
@@ -704,6 +707,7 @@ export default function Home() {
     setMissionOpen(false);
     setWidgetsOpen(false);
     setSecondBrainOpen(false);
+    setTaskDeckOpen(false);
     setMacroOpen(false);
     setAnalyticsOpen(false);
     setAgentOpen(false);
@@ -824,8 +828,12 @@ export default function Home() {
         setWhiteboardOpen(true);
         recordPanelOpen("whiteboard-ocr");
         break;
-      case "chat":
       case "tasks":
+        // Tasks + timers share one command deck.
+        setTaskDeckOpen(true);
+        recordPanelOpen("tasks");
+        break;
+      case "chat":
       case "memory":
       case "notes":
       case "code":
@@ -870,7 +878,7 @@ export default function Home() {
     calendarOpen, skillTrainerOpen, imageGeneratorOpen, summarizerOpen, webScraperOpen,
     nasaOpen, huggingFaceOpen, iftttOpen, browserOpen, localLLMOpen, visionOpen,
     automationOpen, priceTrackerOpen, transcriptionOpen, playwrightOpen, proxyOpen,
-    agentOpen, missionOpen, widgetsOpen, secondBrainOpen, macroOpen, analyticsOpen,
+    agentOpen, missionOpen, widgetsOpen, secondBrainOpen, taskDeckOpen, macroOpen, analyticsOpen,
     teleportOpen, proximityOpen, videoDirectorOpen, roomScannerOpen, whiteboardOpen,
     firecrawlOpen,
   ].some(Boolean);
@@ -1020,6 +1028,22 @@ export default function Home() {
             >
               <div className="absolute inset-0 rounded-full bg-gradient-to-br from-cyan-500/25 to-violet-600/10 opacity-70 group-hover:opacity-100 transition-opacity" />
               <Brain className="w-5 h-5 text-cyan-300 group-hover:text-cyan-100 transition-colors drop-shadow-[0_0_8px_rgba(0,243,255,0.8)] relative z-10" />
+            </motion.button>
+
+            {/* Command Deck — tasks + timers */}
+            <motion.button
+              whileHover={{ scale: 1.08, y: -1 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => {
+                recordPanelOpen("tasks");
+                setTaskDeckOpen(true);
+              }}
+              title="Command Deck — your tasks and timers"
+              aria-label="Open Command Deck"
+              className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-amber-400/50 hover:border-amber-300 bg-[#1a1206]/90 hover:bg-[#241a08]"
+            >
+              <div className="absolute inset-0 rounded-full bg-gradient-to-br from-amber-500/25 to-orange-600/10 opacity-70 group-hover:opacity-100 transition-opacity" />
+              <ListTodo className="w-5 h-5 text-amber-300 group-hover:text-amber-100 transition-colors drop-shadow-[0_0_8px_rgba(255,190,60,0.8)] relative z-10" />
             </motion.button>
 
             {/* Telegram quick-launch button */}
@@ -1583,6 +1607,14 @@ export default function Home() {
 
           {/* Second Brain — the memory graph as a 3D constellation */}
           <SecondBrainPanel isOpen={secondBrainOpen} onClose={() => setSecondBrainOpen(false)} />
+
+          {/* Command Deck — tasks + timers in one closable dashboard. Stays
+              mounted so it can detect new tasks/timers and surface itself. */}
+          <TaskTimerDashboard
+            isOpen={taskDeckOpen}
+            onClose={() => setTaskDeckOpen(false)}
+            onNudge={() => setTaskDeckOpen(true)}
+          />
 
           {/* Always-on widget rail on the HUD */}
           <WidgetRail />

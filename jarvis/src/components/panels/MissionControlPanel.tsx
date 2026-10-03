@@ -67,11 +67,13 @@ import {
   Monitor,
   Radio,
   FlaskConical,
+  Server,
 } from "lucide-react";
 import { STEP_KIND_LABELS, type AgentJob, type JobStatus, type MissionArtifact, type BrowserRecording } from "@/lib/agent/types";
 import type { MissionEvent } from "@/lib/agent/events";
 import { useJarvisStore } from "@/store/jarvis.store";
 import Markdown from "@/components/panels/Markdown";
+import MissionOpsCard from "@/components/panels/MissionOpsCard";
 
 interface MissionControlPanelProps {
   isOpen: boolean;
@@ -135,6 +137,8 @@ const EXAMPLES: Array<{ icon: React.ReactNode; text: string; heavy: boolean }> =
   { icon: <Music className="w-3 h-3" />, text: "Find today's weather, play matching music on Spotify, and open tech news on YouTube", heavy: false },
   { icon: <FlaskConical className="w-3 h-3" />, text: "Research the best mechanical keyboard under 5000, extract the specs of the top pick, save it to notes and send it to my Telegram", heavy: false },
   { icon: <Terminal className="w-3 h-3" />, text: "Open my project in VS Code and check whether my dev server is running", heavy: true },
+  { icon: <Server className="w-3 h-3" />, text: "Start my dev server and tell me when it's up", heavy: true },
+  { icon: <FolderSearch className="w-3 h-3" />, text: "My Downloads folder is a mess — sort it into folders (dry run first)", heavy: true },
 ];
 
 // Icon per step kind — gives each step a visual identity in the plan.
@@ -171,6 +175,11 @@ const KIND_ICON: Record<string, React.ReactNode> = {
   browser_replay: <Play className="w-3 h-3" />,
   delegate: <Bot className="w-3 h-3" />,
   video_brief: <Clapperboard className="w-3 h-3" />,
+  dev_server_start: <Server className="w-3 h-3" />,
+  dev_server_stop: <Server className="w-3 h-3" />,
+  dev_server_status: <Radio className="w-3 h-3" />,
+  file_organize: <FolderSearch className="w-3 h-3" />,
+  repo_inspect: <FlaskConical className="w-3 h-3" />,
 };
 
 interface FeedItem {
@@ -1105,6 +1114,9 @@ export default function MissionControlPanel({ isOpen, onClose }: MissionControlP
                     )}
                   </section>
                 )}
+
+                {/* ── live systems card: managed dev servers + tidy-up undo ── */}
+                <MissionOpsCard isOpen={isOpen} />
 
                 {/* ── planning indicator ── */}
                 {phase === "planning" && (

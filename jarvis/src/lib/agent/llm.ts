@@ -21,6 +21,8 @@ function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: number):
   return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
 }
 
+export type LlmProviderName = "gemini" | "groq" | "openrouter" | "nvidia";
+
 export interface AgentLlmOptions {
   system: string;
   user: string;
@@ -30,6 +32,13 @@ export interface AgentLlmOptions {
   label?: string;
   /** Request a JSON object response where supported. */
   json?: boolean;
+  /**
+   * Preferred provider order. Providers not listed are appended in the default
+   * order. Used by background jobs (memory extraction) to stay OFF the lanes
+   * the interactive chat reply is racing on, so they never cause a rate-limit
+   * cascade that turns a 2s answer into a 20s one.
+   */
+  providerOrder?: LlmProviderName[];
 }
 
 /**
@@ -83,12 +92,17 @@ export async function agentLlm(opts: AgentLlmOptions): Promise<string> {
   const geminiKey = process.env.GEMINI_API_KEY;
   const nimKey = process.env.NVIDIA_API_KEY;
 
-  const chain: Array<() => Promise<string>> = [];
-  if (geminiKey) chain.push(() => attempt("gemini", GEMINI_URL, geminiKey, GEMINI_PLANNER_MODEL));
-  if (groqKey) for (const m of GROQ_PLANNER_MODELS) chain.push(() => attempt("groq", GROQ_URL, groqKey, m));
+  const byProvider: Record<LlmProviderName, Array<() => Promise<string>>> = {
+    gemini: [],
+    groq: [],
+    openrouter: [],
+    nvidia: [],
+  };
+  if (geminiKey) byProvider.gemini.push(() => attempt("gemini", GEMINI_URL, geminiKey, GEMINI_PLANNER_MODEL));
+  if (groqKey) for (const m of GROQ_PLANNER_MODELS) byProvider.groq.push(() => attempt("groq", GROQ_URL, groqKey, m));
   if (openrouterKey) {
     for (const m of OPENROUTER_PLANNER_MODELS) {
-      chain.push(() =>
+      byProvider.openrouter.push(() =>
         attempt("openrouter", OPENROUTER_URL, openrouterKey, m, {
           "HTTP-Referer": "http://localhost:3000",
           "X-Title": "JARVIS AI Assistant",
@@ -96,7 +110,15 @@ export async function agentLlm(opts: AgentLlmOptions): Promise<string> {
       );
     }
   }
-  if (nimKey) chain.push(() => attempt("nvidia", NIM_URL, nimKey, NIM_MODEL));
+  if (nimKey) byProvider.nvidia.push(() => attempt("nvidia", NIM_URL, nimKey, NIM_MODEL));
+
+  const defaultOrder: LlmProviderName[] = ["gemini", "groq", "openrouter", "nvidia"];
+  const order = opts.providerOrder && opts.providerOrder.length > 0
+    ? [...opts.providerOrder, ...defaultOrder.filter((p) => !opts.providerOrder!.includes(p))]
+    : defaultOrder;
+
+  const chain: Array<() => Promise<string>> = [];
+  for (const provider of order) chain.push(...byProvider[provider]);
 
   if (chain.length === 0) throw new Error(`no LLM provider key configured for ${label}`);
 

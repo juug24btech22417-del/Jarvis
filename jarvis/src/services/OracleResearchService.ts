@@ -8,6 +8,7 @@ import {
   ComparisonTrack,
 } from './ResearchTypes';
 import { structuredToNotionBlocks, structuredToMarkdown } from './StructuredReportConverters';
+import { parseJsonLoose, coerceArray } from '@/lib/llm/looseJson';
 
 const API_BASE = process.env.INTERNAL_API_URL || 'http://localhost:3000';
 
@@ -18,28 +19,17 @@ const DEPTH_SETTINGS = {
 };
 
 /**
- * LLMs frequently wrap JSON in markdown fences ("```json ... ```") or
- * add a one-line preamble ("The user wants me to compare..."). Node's
- * JSON.parse throws on any of that. This helper strips fences, finds
- * the first balanced {...} or [...] block, and parses it. Falls back
- * to a safe empty object on failure so callers can degrade gracefully.
+ * Deterministic fallback plan used when the planner LLM fails or returns
+ * an unusable shape. Guarantees the pipeline always has search queries,
+ * so a flaky model can never abort the whole research run.
  */
-function parseJsonLoose(text: string): any {
-  if (!text) return {};
-  let t = text.trim();
-  // Strip markdown code fences (```json ... ``` or ``` ... ```)
-  t = t.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
-  // If the string starts with prose, find the first JSON opener.
-  const firstBrace = t.search(/[\{\[]/);
-  if (firstBrace > 0) t = t.slice(firstBrace);
-  // Trim trailing junk after the last matching close-brace.
-  const lastBrace = Math.max(t.lastIndexOf('}'), t.lastIndexOf(']'));
-  if (lastBrace > 0 && lastBrace < t.length - 1) t = t.slice(0, lastBrace + 1);
-  try {
-    return JSON.parse(t);
-  } catch {
-    return {};
-  }
+function buildFallbackPlan(query: string, subject?: string): { query: string; goal: string }[] {
+  const base = subject ? `${subject} ${query}` : query;
+  return [
+    { query: base, goal: 'Primary sources and high-level overview' },
+    { query: `${base} latest news and developments`, goal: 'Most recent events and announcements' },
+    { query: `${base} analysis report`, goal: 'In-depth analysis and expert commentary' },
+  ];
 }
 
 /**
@@ -240,15 +230,19 @@ class OracleResearchService {
         // Step 3: synthesize structured comparison report.
         this.addLog(status, `Synthesizing structured comparison report...`, 82, 'synthesizing');
         const structured = await this.synthesizeComparison(query, subjects, internal);
-        status.structuredReport = structured;
-        status.reportMarkdown = structuredToMarkdown(structured);
+        this.addLog(status, `Attaching topic imagery...`, 88, 'synthesizing');
+        const illustrated = await this.attachImages(structured, query, subjects, reportType);
+        status.structuredReport = illustrated;
+        status.reportMarkdown = structuredToMarkdown(illustrated);
       } else {
         // Single-track plan.
-        const subQueries: any[] = await this.generateSubQueries(query, undefined, reportType);
-        status.subQueries = subQueries;
-        if (subQueries.length === 0) {
-          throw new Error('Failed to generate research plan.');
+        let subQueries: any[] = await this.generateSubQueries(query, undefined, reportType);
+        if (!Array.isArray(subQueries) || subQueries.length === 0) {
+          // Belt-and-braces: the planner helper already falls back, but
+          // never let an empty plan abort the run.
+          subQueries = buildFallbackPlan(query);
         }
+        status.subQueries = subQueries;
         this.addLog(status, `Generated ${subQueries.length} sub-queries.`, 20, 'searching');
 
         // Run the original iterative crawl loop.
@@ -316,8 +310,10 @@ class OracleResearchService {
         // Synthesize structured report for the inferred type.
         this.addLog(status, `Synthesizing ${reportType} report...`, 75, 'synthesizing');
         const structured = await this.synthesizeStructured(query, reportType, internal);
-        status.structuredReport = structured;
-        status.reportMarkdown = structuredToMarkdown(structured);
+        this.addLog(status, `Attaching topic imagery...`, 80, 'synthesizing');
+        const illustrated = await this.attachImages(structured, query, subjects, reportType);
+        status.structuredReport = illustrated;
+        status.reportMarkdown = structuredToMarkdown(illustrated);
       }
 
       // Step 4: persist to Notion (structured blocks if available).
@@ -458,11 +454,30 @@ class OracleResearchService {
 
       const res = await axios.post(`${API_BASE}/api/research-llm`, { prompt });
       const content = res.data.content || '';
-      const parsed = parseJsonLoose(content);
-      return Array.isArray(parsed.queries) ? parsed.queries : [];
+      const queries = coerceArray<{ query: string; goal: string }>(
+        content,
+        'queries',
+        (item) => {
+          if (!item) return null;
+          // Some models return a bare string array instead of objects.
+          if (typeof item === 'string') {
+            const q = item.trim();
+            return q ? { query: q, goal: 'Gather information relevant to the research query' } : null;
+          }
+          if (typeof item !== 'object') return null;
+          const q = typeof item.query === 'string' ? item.query.trim() : '';
+          if (!q) return null;
+          return { query: q, goal: typeof item.goal === 'string' ? item.goal.trim() : '' };
+        }
+      );
+      if (queries.length === 0) {
+        console.warn('[Oracle] Planner returned no usable queries, using fallback plan');
+        return buildFallbackPlan(query, subject);
+      }
+      return queries;
     } catch (e: any) {
-      console.error('[Oracle] Plan generation failed:', e?.message);
-      return [];
+      console.error('[Oracle] Plan generation failed, using fallback plan:', e?.message);
+      return buildFallbackPlan(query, subject);
     }
   }
 
@@ -508,7 +523,7 @@ class OracleResearchService {
   private async callSynthLlm(prompt: string, parseFn: (raw: string) => any): Promise<any> {
     const res = await axios.post(`${API_BASE}/api/research-llm`, {
       prompt,
-      maxTokens: 4000,
+      maxTokens: 8000,
       temperature: 0.1,
     });
     const raw = res.data.content || '';
@@ -525,8 +540,19 @@ class OracleResearchService {
         maxTokens: 1500,
         temperature: 0.1,
       });
-      const parsed = parseJsonLoose(res.data.content || '');
-      return Array.isArray(parsed.facts) ? parsed.facts : [];
+      const facts = coerceArray<string>(res.data.content || '', 'facts', (item) => {
+        if (typeof item === 'string') {
+          const s = item.trim();
+          return s || null;
+        }
+        // Tolerate {"fact": "..."} objects too.
+        if (item && typeof item === 'object' && typeof item.fact === 'string') {
+          const s = item.fact.trim();
+          return s || null;
+        }
+        return null;
+      });
+      return facts;
     } catch (e) {
       console.error('[Oracle] Fact extraction failed:', e);
       return [];
@@ -543,8 +569,8 @@ class OracleResearchService {
     // prompt doesn't blow past the LLM's context window — a 30k+ char
     // input causes truncation and an unparseable response.
     const perSubjectData: string[] = [];
-    const MAX_TOTAL = 16000;
-    const MAX_FACT = 400;
+    const MAX_TOTAL = 26000;
+    const MAX_FACT = 600;
     let totalLen = 0;
     for (const [subject, track] of internal.tracks.entries()) {
       if (totalLen >= MAX_TOTAL) break;
@@ -576,20 +602,20 @@ class OracleResearchService {
         console.log(`[Oracle] Comparison synth: rawLen=${raw.length}`);
         return parseJsonLoose(raw);
       });
-      // Retry once with a corrective prompt if the model didn't return valid JSON.
-      if (!parsed || !Array.isArray(parsed.blocks) || parsed.blocks.length === 0) {
+      // Retry once with a corrective prompt if the model didn't return blocks.
+      if (extractBlocks(parsed).length === 0) {
         console.warn('[Oracle] Comparison synth first attempt returned no blocks, retrying…');
-        const retryPrompt = `Your previous output was not valid JSON. Output ONLY the raw JSON object — no commentary, no markdown fences, no preamble. Start with "{" and end with "}".\n\n${prompt}`;
+        const retryPrompt = `Your previous output was not valid JSON. Output ONLY the raw JSON object — no commentary, no markdown fences, no preamble. Start with "{" and end with "}". The object must contain a "blocks" array.\n\n${prompt}`;
         parsed = await this.callSynthLlm(retryPrompt, parseJsonLoose);
       }
       // If the retry also failed, at least give the user the raw facts as
       // a paragraph block so the structured view isn't empty.
-      let blocks = normalizeBlocks(parsed.blocks || []);
+      let blocks = normalizeBlocks(extractBlocks(parsed));
       if (blocks.length === 0) {
         console.warn('[Oracle] Comparison synth: no blocks after retry, using raw facts');
-        const rawFactsBlock = buildRawFactsFallback(internal);
-        blocks = rawFactsBlock;
+        blocks = buildRawFactsFallback(internal);
       }
+      blocks = ensureSubstantial(blocks, internal);
       return {
         summary: parsed.summary || 'Comparison complete.',
         blocks,
@@ -612,8 +638,8 @@ class OracleResearchService {
     internal: TaskInternal
   ): Promise<StructuredReport> {
     let aggregated = '';
-    const MAX_TOTAL = 16000;
-    const MAX_FACT = 400;
+    const MAX_TOTAL = 26000;
+    const MAX_FACT = 600;
     internal.collectedFacts.forEach((facts, url) => {
       if (aggregated.length >= MAX_TOTAL) return;
       const trimmed = facts
@@ -631,16 +657,17 @@ class OracleResearchService {
 
     try {
       let parsed: any = await this.callSynthLlm(prompt, parseJsonLoose);
-      if (!parsed || !Array.isArray(parsed.blocks) || parsed.blocks.length === 0) {
+      if (extractBlocks(parsed).length === 0) {
         console.warn('[Oracle] Structured synth first attempt returned no blocks, retrying…');
-        const retryPrompt = `Your previous output was not valid JSON. Output ONLY the raw JSON object — no commentary, no markdown fences, no preamble. Start with "{" and end with "}".\n\n${prompt}`;
+        const retryPrompt = `Your previous output was not valid JSON. Output ONLY the raw JSON object — no commentary, no markdown fences, no preamble. Start with "{" and end with "}". The object must contain a "blocks" array.\n\n${prompt}`;
         parsed = await this.callSynthLlm(retryPrompt, parseJsonLoose);
       }
-      let blocks = normalizeBlocks(parsed.blocks || []);
+      let blocks = normalizeBlocks(extractBlocks(parsed));
       if (blocks.length === 0) {
         console.warn('[Oracle] Structured synth: no blocks after retry, using raw facts');
         blocks = buildRawFactsFallback(internal);
       }
+      blocks = ensureSubstantial(blocks, internal);
       return {
         summary: parsed.summary || 'Research complete.',
         blocks,
@@ -661,14 +688,119 @@ class OracleResearchService {
           ],
         };
       } catch (e2: any) {
+        // Every synthesizer attempt failed (e.g. all providers rate-limited).
+        // Surface the raw collected facts instead of a placeholder so the
+        // report is still useful and large enough to be worth reading.
         return {
-          summary: `Research completed but synthesis failed: ${e2?.message}`,
+          summary: `Synthesized overview unavailable (${e2?.message}). Showing the extracted facts from ${internal.collectedFacts.size} source(s).`,
           blocks: [
             { type: 'heading_1', text: query },
-            { type: 'paragraph', text: 'See the Sources tab for the raw facts.' },
+            ...buildRawFactsFallback(internal),
           ],
         };
       }
+    }
+  }
+
+  /**
+   * Search Pexels for landscape photos matching a topic. Returns an empty
+   * array when no key is configured or the API fails, so callers can treat
+   * imagery as strictly best-effort.
+   */
+  private async searchPexels(
+    query: string,
+    count: number
+  ): Promise<{ url: string; alt: string }[]> {
+    const key = process.env.PEXELS_API_KEY;
+    if (!key || key.trim() === '' || key === 'your-api-key-here' || count <= 0) return [];
+    try {
+      const res = await axios.get('https://api.pexels.com/v1/search', {
+        params: { query, per_page: count, orientation: 'landscape' },
+        headers: { Authorization: key },
+        timeout: 12000,
+      });
+      return (res.data?.photos || [])
+        .map((p: any) => ({
+          url: p?.src?.large2x || p?.src?.large || p?.src?.original || '',
+          alt: p?.alt || query,
+        }))
+        .filter((x: any) => typeof x.url === 'string' && x.url.startsWith('http'));
+    } catch (e: any) {
+      console.warn(`[Oracle] Pexels image search failed for "${query}":`, e?.message);
+      return [];
+    }
+  }
+
+  /**
+   * Best-effort: enrich a finished structured report with topic-related
+   * images. Main-topic photos are inserted under the title; for comparison
+   * reports, each subject also gets a labelled photo under its heading.
+   * If no images are found the report is returned unchanged.
+   */
+  private async attachImages(
+    report: StructuredReport,
+    query: string,
+    subjects: string[],
+    reportType: ReportType
+  ): Promise<StructuredReport> {
+    try {
+      const isComparison = reportType === 'comparison' && subjects.length > 0;
+
+      const [mainResult, subjectResults] = await Promise.all([
+        this.searchPexels(query, isComparison ? 2 : 3),
+        isComparison
+          ? Promise.allSettled(subjects.map((s) => this.searchPexels(s, 1)))
+          : Promise.resolve([] as PromiseSettledResult<{ url: string; alt: string }[]>[]),
+      ]);
+
+      const mainImages = mainResult;
+      const subjectImages: { subject: string; url: string; caption: string }[] = [];
+      if (isComparison) {
+        subjectResults.forEach((r, i) => {
+          if (r.status === 'fulfilled' && r.value[0]) {
+            subjectImages.push({
+              subject: subjects[i],
+              url: r.value[0].url,
+              caption: `${subjects[i]} — ${r.value[0].alt}`,
+            });
+          }
+        });
+      }
+
+      if (mainImages.length === 0 && subjectImages.length === 0) return report;
+
+      const blocks: ReportBlock[] = [...report.blocks];
+
+      // Main topic images go right under the title (or at the top).
+      const mainBlocks: ReportBlock[] = mainImages.map((im) => ({
+        type: 'image',
+        url: im.url,
+        caption: im.alt,
+      }));
+      const insertAt = blocks[0]?.type === 'heading_1' ? 1 : 0;
+      blocks.splice(insertAt, 0, ...mainBlocks);
+
+      // Labelled per-subject images sit directly beneath their heading.
+      for (const si of subjectImages) {
+        const needle = si.subject.toLowerCase();
+        const idx = blocks.findIndex(
+          (b) =>
+            (b.type === 'heading_2' || b.type === 'heading_3') &&
+            typeof b.text === 'string' &&
+            b.text.toLowerCase().includes(needle)
+        );
+        if (idx >= 0) {
+          blocks.splice(idx + 1, 0, { type: 'image', url: si.url, caption: si.caption });
+        }
+      }
+
+      console.log(
+        `[Oracle] Attached ${mainBlocks.length + subjectImages.length} image(s) to the report`
+      );
+      return { ...report, blocks };
+    } catch (e: any) {
+      console.warn('[Oracle] Image enrichment failed (non-fatal):', e?.message);
+      return report;
     }
   }
 
@@ -694,6 +826,22 @@ class OracleResearchService {
       return url;
     } catch (e: any) {
       console.error('[Oracle] Notion delivery failed:', e?.response?.data || e?.message);
+      // Retry once without structured blocks, sending the markdown as
+      // paragraphs. Structured blocks can be rejected (e.g. a malformed
+      // table or a too-large block payload); markdown almost never is.
+      if (structured) {
+        try {
+          const fallbackRes = await axios.post(`${API_BASE}/api/notion/create-page`, {
+            title: `${REPORT_TYPE_TITLES[reportType]}: ${title}`,
+            content: markdownFallback,
+            tags: ['Oracle', reportType.replace('_', '-')],
+          });
+          console.log('[Oracle] Notion delivery recovered via markdown fallback');
+          return fallbackRes.data?.url || fallbackRes.data?.pageId;
+        } catch (e2: any) {
+          console.error('[Oracle] Notion markdown fallback failed:', e2?.response?.data || e2?.message);
+        }
+      }
       return undefined;
     }
   }
@@ -802,46 +950,130 @@ const REPORT_TYPE_TITLES: Record<ReportType, string> = {
  * missing rows, etc). This sanitizes them so the renderer and Notion
  * pipeline can assume valid input.
  */
-function normalizeBlocks(raw: any[]): ReportBlock[] {
-  const ALLOWED = new Set([
-    'heading_1',
-    'heading_2',
-    'heading_3',
-    'paragraph',
-    'bulleted_list',
-    'numbered_list',
-    'table',
-    'callout',
-    'divider',
-  ]);
+/**
+ * Pull a block array out of whatever shape the model returned. Models
+ * variously emit a bare array, `{blocks:[...]}`, `{report:[...]}`, or a
+ * `{sections:[{heading, bullets}]}` outline. Anything unhandled here used
+ * to be reported as "no blocks" and silently discarded.
+ */
+export function extractBlocks(parsed: any): any[] {
+  if (!parsed) return [];
+  if (Array.isArray(parsed)) return parsed;
+  if (Array.isArray(parsed.blocks)) return parsed.blocks;
+  if (Array.isArray(parsed.report)) return parsed.report;
+  if (Array.isArray(parsed.content)) return parsed.content;
+  if (Array.isArray(parsed.sections)) {
+    const out: any[] = [];
+    for (const s of parsed.sections) {
+      if (!s || typeof s !== 'object') continue;
+      const title = s.heading || s.title || s.name || s.section;
+      if (typeof title === 'string' && title.trim()) {
+        out.push({ type: 'heading_2', text: title });
+      }
+      const items = s.items || s.points || s.bullets || s.bulletPoints || s.keyPoints;
+      if (Array.isArray(items) && items.length) {
+        out.push({ type: 'bulleted_list', items });
+      } else if (typeof s.content === 'string' && s.content.trim()) {
+        out.push({ type: 'paragraph', text: s.content });
+      } else if (typeof s.text === 'string' && s.text.trim()) {
+        out.push({ type: 'paragraph', text: s.text });
+      }
+    }
+    return out;
+  }
+  return [];
+}
+
+/**
+ * Normalize LLM-emitted blocks. The model sometimes returns almost-right
+ * shapes ("heading" instead of "heading_2", a list with a single `text`
+ * field, a bullet object instead of a string). This repairs them instead
+ * of silently dropping the block, which is what made whole reports vanish.
+ */
+export function normalizeBlocks(raw: any[]): ReportBlock[] {
+  const TYPE_ALIASES: Record<string, string> = {
+    title: 'heading_1',
+    heading: 'heading_2',
+    subheading: 'heading_3',
+    list: 'bulleted_list',
+    bullet_list: 'bulleted_list',
+    bullets: 'bulleted_list',
+    unordered_list: 'bulleted_list',
+    ordered_list: 'numbered_list',
+    text: 'paragraph',
+    body: 'paragraph',
+  };
   const out: ReportBlock[] = [];
+
+  const asText = (v: any): string => {
+    if (typeof v === 'string') return v;
+    if (v && typeof v === 'object') {
+      if (typeof v.text === 'string') return v.text;
+      if (typeof v.content === 'string') return v.content;
+    }
+    return '';
+  };
+
   for (const b of raw || []) {
-    if (!b || typeof b !== 'object' || !ALLOWED.has(b.type)) continue;
-    if (b.type === 'heading_1' || b.type === 'heading_2' || b.type === 'heading_3') {
-      if (typeof b.text === 'string' && b.text.trim()) {
-        out.push({ type: b.type, text: b.text } as ReportBlock);
-      }
-    } else if (b.type === 'paragraph') {
-      if (typeof b.text === 'string' && b.text.trim()) {
-        out.push({ type: 'paragraph', text: b.text });
-      }
-    } else if (b.type === 'bulleted_list' || b.type === 'numbered_list') {
-      const items = Array.isArray(b.items)
-        ? b.items.filter((i: any) => typeof i === 'string' && i.trim())
+    if (b == null) continue;
+    // A plain string block is just a paragraph.
+    if (typeof b === 'string') {
+      if (b.trim()) out.push({ type: 'paragraph', text: b.trim() });
+      continue;
+    }
+    if (typeof b !== 'object') continue;
+
+    let type = typeof b.type === 'string' ? b.type : '';
+    if (!type) {
+      // Infer the type from the keys when `type` is missing.
+      if (Array.isArray(b.items) || Array.isArray(b.bullets)) type = 'bulleted_list';
+      else if (Array.isArray(b.rows)) type = 'table';
+      else if (typeof b.url === 'string') type = 'image';
+      else if (typeof b.text === 'string' || typeof b.content === 'string') type = 'paragraph';
+      else continue;
+    }
+    if (TYPE_ALIASES[type]) type = TYPE_ALIASES[type];
+
+    if (type === 'heading_1' || type === 'heading_2' || type === 'heading_3') {
+      const text = asText(b.text ?? b.heading ?? b.title);
+      if (text.trim()) out.push({ type, text: text.trim() } as ReportBlock);
+    } else if (type === 'paragraph') {
+      const text = asText(b.text ?? b.content ?? b.body);
+      if (text.trim()) out.push({ type: 'paragraph', text: text.trim() });
+    } else if (type === 'bulleted_list' || type === 'numbered_list') {
+      const rawItems = Array.isArray(b.items)
+        ? b.items
+        : Array.isArray(b.bullets)
+        ? b.bullets
+        : Array.isArray(b.points)
+        ? b.points
+        : typeof b.text === 'string'
+        ? b.text.split(/\n+/)
         : [];
-      if (items.length) out.push({ type: b.type, items } as ReportBlock);
-    } else if (b.type === 'table') {
-      const rows = Array.isArray(b.rows)
-        ? b.rows
-            .filter((r: any) => Array.isArray(r))
-            .map((r: any[]) => r.map((c: any) => String(c ?? '—')))
-        : [];
-      if (rows.length) out.push({ type: 'table', rows });
-    } else if (b.type === 'callout') {
-      if (typeof b.text === 'string' && b.text.trim()) {
-        out.push({ type: 'callout', text: b.text, emoji: b.emoji || '💡' });
+      const items = rawItems
+        .map((i: any) => asText(i).replace(/^[-*•\d.)\s]+/, '').trim())
+        .filter(Boolean);
+      if (items.length) out.push({ type, items } as ReportBlock);
+    } else if (type === 'table') {
+      const rows = Array.isArray(b.rows) ? b.rows : Array.isArray(b.children) ? b.children : [];
+      const norm = rows
+        .filter((r: any) => Array.isArray(r))
+        .map((r: any[]) => r.map((c: any) => asText(c) || '—'));
+      if (norm.length) out.push({ type: 'table', rows: norm });
+    } else if (type === 'callout') {
+      const text = asText(b.text ?? b.content);
+      if (text.trim()) {
+        out.push({ type: 'callout', text: text.trim(), emoji: typeof b.emoji === 'string' ? b.emoji : '💡' });
       }
-    } else if (b.type === 'divider') {
+    } else if (type === 'image') {
+      if (typeof b.url === 'string' && b.url.startsWith('http')) {
+        out.push({
+          type: 'image',
+          url: b.url,
+          caption: typeof b.caption === 'string' ? b.caption : undefined,
+        });
+      }
+    } else if (type === 'divider') {
       out.push({ type: 'divider' });
     }
   }
@@ -854,6 +1086,62 @@ function normalizeBlocks(raw: any[]): ReportBlock[] {
  * the user still sees something useful in the structured view and in
  * the Notion page. Better than "Comparison complete." with nothing else.
  */
+/**
+ * Turn the collected facts into structured "Detailed findings" blocks.
+ * Used to guarantee a substantial report when the synthesizer returns only
+ * a title + summary (which some models do on short prompts).
+ */
+function buildDetailedFindings(internal: TaskInternal): ReportBlock[] {
+  const blocks: ReportBlock[] = [];
+
+  const addGroup = (title: string | undefined, factsByUrl: Map<string, string[]>) => {
+    const items: string[] = [];
+    factsByUrl.forEach((facts, url) => {
+      facts.forEach((f) => items.push(`${f} (source: ${url})`));
+    });
+    if (items.length === 0) return;
+    if (title) blocks.push({ type: 'heading_3', text: title });
+    blocks.push({ type: 'bulleted_list', items: items.slice(0, 25) });
+    if (items.length > 25) {
+      blocks.push({
+        type: 'paragraph',
+        text: `…and ${items.length - 25} more findings. See the Sources tab for the full list.`,
+      });
+    }
+  };
+
+  if (internal.tracks.size > 0) {
+    for (const [subject, track] of internal.tracks.entries()) {
+      addGroup(subject, track.facts);
+    }
+  } else {
+    addGroup(undefined, internal.collectedFacts);
+  }
+
+  if (blocks.length === 0) return [];
+  return [{ type: 'heading_2', text: 'Detailed findings' }, ...blocks];
+}
+
+/**
+ * Guard against terse model output: a report with fewer than three real
+ * content blocks (excluding the title, imagery and callouts) gets the raw
+ * findings appended under "Detailed findings".
+ */
+function ensureSubstantial(blocks: ReportBlock[], internal: TaskInternal): ReportBlock[] {
+  const CONTENT_TYPES = new Set([
+    'heading_2',
+    'heading_3',
+    'table',
+    'bulleted_list',
+    'numbered_list',
+    'paragraph',
+  ]);
+  const contentCount = blocks.filter((b) => CONTENT_TYPES.has(b.type)).length;
+  if (contentCount >= 3) return blocks;
+  const detailed = buildDetailedFindings(internal);
+  return detailed.length ? [...blocks, ...detailed] : blocks;
+}
+
 function buildRawFactsFallback(internal: TaskInternal): ReportBlock[] {
   const blocks: ReportBlock[] = [];
   blocks.push({
@@ -880,6 +1168,25 @@ function buildRawFactsFallback(internal: TaskInternal): ReportBlock[] {
       }
     }
   }
+
+  // Single-track runs store facts in `collectedFacts` rather than per-track
+  // maps, so without this branch a failed synthesizer would show only the
+  // warning callout and nothing else.
+  if (internal.tracks.size === 0 && internal.collectedFacts.size > 0) {
+    blocks.push({ type: 'heading_2', text: 'Collected facts' });
+    const items: string[] = [];
+    internal.collectedFacts.forEach((facts, url) => {
+      facts.forEach((f) => items.push(`${f} (source: ${url})`));
+    });
+    blocks.push({ type: 'bulleted_list', items: items.slice(0, 40) });
+    if (items.length > 40) {
+      blocks.push({
+        type: 'paragraph',
+        text: `… and ${items.length - 40} more facts. See the Sources tab for the full list.`,
+      });
+    }
+  }
+
   return blocks;
 }
 

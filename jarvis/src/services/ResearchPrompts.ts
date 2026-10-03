@@ -172,6 +172,21 @@ Guidelines per report type:
 
 Use only these block types: heading_1, heading_2, heading_3, paragraph,
 bulleted_list, numbered_list, table, callout, divider.
+
+Comprehensiveness (important — thin reports are treated as failures):
+- Produce a SUBSTANTIAL report, roughly 800-1500 words of body content.
+- Include at least 5 separate heading_2 sections for deep_research,
+  news_roundup, market_scan and briefing_memo; at least 4 steps plus a
+  "Prerequisites" callout for how_to.
+- Under every heading_2, use either a bulleted_list of 3-6 specific items or
+  2-4 paragraph blocks. Never leave a section with a single short line.
+- Include concrete numbers, dates, names and named sources wherever the
+  aggregated facts contain them.
+- End with a heading_2 "Key takeaways" followed by a bulleted_list of 3-5
+  points.
+- Never return only a title and a summary. If the facts are thin, still write
+  the full section structure and state what is unknown instead of stopping.
+
 The output is a single JSON object, no commentary, no markdown fences.
 Your very first character of output must be "{" and your last must be "}".`,
 
