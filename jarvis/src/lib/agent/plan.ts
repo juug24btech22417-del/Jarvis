@@ -14,6 +14,13 @@ import {
   type PlanEstimate,
 } from "./types";
 
+import { feedScrollIntent } from "../jarvis/commandRouting";
+
+// Feed detection is shared with the command bar so the two can't drift apart.
+// Re-exported here because existing importers (and tests) pull it from the
+// planner.
+export { feedScrollIntent };
+
 export const KNOWN_KINDS: ReadonlySet<string> = new Set<string>([
   // search / research
   "web_search", "web_scrape", "firecrawl_search", "firecrawl_extract",
@@ -426,6 +433,28 @@ export function heuristicPlan(goal: string): AgentPlan | null {
     const isHour = /^h/i.test(m[2]);
     return wrap(`${n} ${isHour ? "hour" : "minute"} timer`, [
       { id: "t1", kind: "timer_set", title: `${n}${isHour ? "h" : "m"} timer`, params: { minutes: isHour ? n * 60 : n, label: "Timer" } },
+    ]);
+  }
+
+  // ── scroll a social feed (shorts / reels / tiktok) ──────────────────────
+  // Must run BEFORE the music/video rule: "open youtube and watch shorts"
+  // would otherwise be captured as a plain YouTube search for "shorts".
+  const feed = feedScrollIntent(g);
+  if (feed) {
+    return wrap(`Scroll ${feed.label}`, [
+      {
+        id: "fs1",
+        kind: "browser_act",
+        title: `Open ${feed.label} and scroll through it`,
+        params: {
+          url: feed.url,
+          task:
+            `Open ${feed.label} at ${feed.url} and scroll through the feed. ` +
+            `Advance to the next item by pressing ArrowDown (or clicking the down/next control), ` +
+            `wait for each item to load, and go through about 10 items.`,
+          maxSteps: 14,
+        },
+      },
     ]);
   }
 

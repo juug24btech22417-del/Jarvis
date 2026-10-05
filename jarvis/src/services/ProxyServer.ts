@@ -33,21 +33,62 @@ function getAPIKey(keyName: string): string | undefined {
   return undefined;
 }
 
-// OpenRouter config — used for jarvis.internal interception
-const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+// ── Provider registry ───────────────────────────────────────────────────────
+// Verified against the live catalogues (Oct 2026). Free slugs get retired
+// frequently (NVIDIA EOL'd llama-3.1, Gemini retired 2.0-flash, and the
+// OpenRouter free tier rate-limits per account per day), so no single entry
+// is load-bearing: the chain skips a model the moment it answers
+// 400/404/410/429 and moves to the next one. This is what makes the overlay
+// survive a provider outage instead of showing a bare HTTP 500.
+type ProxyProviderId = "nvidia" | "groq" | "openrouter";
 
-// Text-only models (free tier)
-const FREE_MODELS = [
-  "google/gemma-4-31b-it:free",
-  "google/gemma-4-26b-a4b-it:free",
-  "nvidia/nemotron-3-ultra-550b-a55b:free",
-];
+interface ProxyProvider {
+  id: ProxyProviderId;
+  url: string;
+  keyEnv: string;
+  /** Text chat models, best first. */
+  models: string[];
+  /** Multimodal models that accept an image_url content part. */
+  visionModels: string[];
+  supportsVision: boolean;
+}
 
-// Vision-capable models (support image_url in messages)
-const VISION_MODELS = [
-  "google/gemini-2.0-flash-exp:free",
-  "google/gemini-2.5-flash-preview-05-20:free",
-  "google/gemma-4-31b-it:free",
+/** Per-model budget. Kept short so a rate-limited provider fails fast. */
+const PER_MODEL_TIMEOUT_MS = 9000;
+
+const PROVIDERS: ProxyProvider[] = [
+  {
+    id: "nvidia",
+    url: "https://integrate.api.nvidia.com/v1/chat/completions",
+    keyEnv: "NVIDIA_API_KEY",
+    models: [
+      "nvidia/nemotron-3-super-120b-a12b",
+      "nvidia/nemotron-3.5-lightning-30b-a3b",
+      "nvidia/nemotron-3-ultra-550b-a55b",
+    ],
+    visionModels: ["meta/llama-3.2-90b-vision-instruct"],
+    supportsVision: true,
+  },
+  {
+    id: "groq",
+    url: "https://api.groq.com/openai/v1/chat/completions",
+    keyEnv: "GROQ_API_KEY",
+    models: ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"],
+    visionModels: [],
+    supportsVision: false,
+  },
+  {
+    id: "openrouter",
+    url: "https://openrouter.ai/api/v1/chat/completions",
+    keyEnv: "OPENROUTER_API_KEY",
+    models: [
+      "nvidia/nemotron-3-super-120b-a12b:free",
+      "qwen/qwen3.8-27b:free",
+      "nvidia/nemotron-3-ultra-550b-a55b:free",
+    ],
+    visionModels: ["google/gemma-4-31b-it:free", "google/gemma-4-26b-a4b-it:free"],
+    supportsVision: true,
+  },
 ];
 
 const JARVIS_SYSTEM_PROMPT = `You are J.A.R.V.I.S., Tony Stark's extremely advanced, loyal, and witty AI assistant.
@@ -99,17 +140,12 @@ function parseActionFromReply(reply: string): { text: string; action?: Record<st
   }
 }
 
-const NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
-
 async function callLLM(
   query: string,
   url: string,
   domContent: string,
   screenshotBase64?: string
 ): Promise<string> {
-  const openrouterApiKey = getAPIKey("OPENROUTER_API_KEY");
-  const nvidiaApiKey = getAPIKey("NVIDIA_API_KEY");
-
   // ── Persistent memory injection ───────────────────────────────────────────
   // Build relevant memory context from the flat-file store and append to the
   // system prompt so the model knows user facts, preferences, and history.
@@ -143,98 +179,78 @@ async function callLLM(
     { role: "user", content: userContent },
   ];
 
-  // Try OpenRouter first if key is present
-  if (openrouterApiKey) {
-    const models = screenshotBase64 ? VISION_MODELS : FREE_MODELS;
-    for (const model of models) {
-      try {
-        console.log(`[Proxy] Trying OpenRouter model: ${model}`);
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 6000);
+  // ── Provider walk ─────────────────────────────────────────────────────────
+  // Walk providers in order, rotating to the next model the moment one answers
+  // 400/404/410 (retired slug) or 429 (rate-limited). Vision is attempted first
+  // when a screenshot was requested; if every vision model fails we still fall
+  // through to the text models so the user gets an answer instead of an error.
+  const errors: string[] = [];
+  let sawRateLimit = false;
 
-        const res = await fetch(OPENROUTER_URL, {
+  for (const provider of PROVIDERS) {
+    const apiKey = getAPIKey(provider.keyEnv);
+    if (!apiKey) continue;
+
+    const wantsImage = Boolean(screenshotBase64) && provider.supportsVision;
+    const attempts: Array<{ model: string; withImage: boolean }> = [
+      ...(wantsImage ? provider.visionModels.map((m) => ({ model: m, withImage: true })) : []),
+      ...provider.models.map((m) => ({ model: m, withImage: false })),
+    ];
+
+    for (const { model, withImage } of attempts) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), PER_MODEL_TIMEOUT_MS);
+      try {
+        console.log(`[Proxy] Trying ${provider.id}/${model}${withImage ? " (vision)" : ""}`);
+        const res = await fetch(provider.url, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${openrouterApiKey}`,
-            "HTTP-Referer": "http://localhost:3000",
-            "X-Title": "JARVIS",
+            Authorization: `Bearer ${apiKey}`,
+            ...(provider.id === "openrouter"
+              ? { "HTTP-Referer": "http://localhost:3000", "X-Title": "JARVIS" }
+              : {}),
           },
           body: JSON.stringify({
             model,
-            messages,
+            messages: [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: withImage ? userContent : query },
+            ],
             temperature: 0.7,
             max_tokens: 800,
           }),
           signal: controller.signal,
         });
 
-        clearTimeout(timeoutId);
-
         if (res.ok) {
           const data = await res.json();
           const reply = data.choices?.[0]?.message?.content?.trim();
           if (reply) {
-            console.log(`[Proxy] Successful reply from OpenRouter model: ${model}`);
+            console.log(`[Proxy] Served via ${provider.id}/${model}`);
             return reply;
           }
+          errors.push(`${provider.id}/${model}: empty response`);
         } else {
-          const errorText = await res.text();
-          console.warn(`[Proxy] OpenRouter model ${model} failed with status ${res.status}:`, errorText);
+          if (res.status === 429) sawRateLimit = true;
+          const errorText = await res.text().catch(() => "");
+          errors.push(`${provider.id}/${model}: HTTP ${res.status}`);
+          console.warn(`[Proxy] ${provider.id}/${model} → HTTP ${res.status}: ${errorText.slice(0, 140)}`);
         }
       } catch (e: any) {
-        console.warn(`[Proxy] OpenRouter call to ${model} failed:`, e.name === "AbortError" ? "Timeout after 6s" : e.message || e);
-      }
-    }
-  }
-
-  // Fallback to NVIDIA NIM if key is present
-  if (nvidiaApiKey) {
-    const nvidiaModels = screenshotBase64
-      ? ["meta/llama-3.2-90b-vision-instruct"]
-      : ["meta/llama-3.1-8b-instruct", "meta/llama-3.1-70b-instruct"];
-
-    for (const model of nvidiaModels) {
-      try {
-        console.log(`[Proxy] Falling back to NVIDIA model: ${model}`);
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000);
-
-        const res = await fetch(NVIDIA_URL, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${nvidiaApiKey}`,
-          },
-          body: JSON.stringify({
-            model,
-            messages,
-            temperature: 0.7,
-            max_tokens: 800,
-          }),
-          signal: controller.signal,
-        });
-
+        const reason = e?.name === "AbortError" ? `timeout ${PER_MODEL_TIMEOUT_MS}ms` : e?.message || String(e);
+        errors.push(`${provider.id}/${model}: ${reason}`);
+        console.warn(`[Proxy] ${provider.id}/${model} failed: ${reason}`);
+      } finally {
         clearTimeout(timeoutId);
-
-        if (res.ok) {
-          const data = await res.json();
-          const reply = data.choices?.[0]?.message?.content?.trim();
-          if (reply) {
-            console.log(`[Proxy] Successful reply from NVIDIA model: ${model}`);
-            return reply;
-          }
-        } else {
-          const errorText = await res.text();
-          console.warn(`[Proxy] NVIDIA model ${model} failed with status ${res.status}:`, errorText);
-        }
-      } catch (e: any) {
-        console.warn(`[Proxy] NVIDIA call to ${model} failed:`, e.name === "AbortError" ? "Timeout after 10s" : e.message || e);
       }
     }
   }
 
-  throw new Error("All LLM providers and models failed");
+  const failure: any = new Error("All LLM providers failed");
+  failure.details = errors;
+  failure.rateLimited = sawRateLimit && errors.every((d) => d.includes("HTTP 429"));
+  throw failure;
 }
 
 
@@ -317,12 +333,28 @@ function handleJarvisInternalRequest(ctx: any, bodyBuffer: Buffer): void {
       })
       .catch((err) => {
         const isTimeout = err?.message === "LLM_TIMEOUT";
-        const userMsg = isTimeout
-          ? "Apologies, Boss. The AI providers are slow right now. Please try again in a moment."
-          : err?.message || String(err);
-        console.error("[Proxy Promise Error]:", isTimeout ? "LLM 20s timeout" : err);
-        const errorBody = JSON.stringify({ success: false, error: userMsg });
-        res.writeHead(isTimeout ? 503 : 500, corsHeaders);
+        const details: string[] = Array.isArray(err?.details) ? err.details : [];
+
+        // Distinguish the real causes so the overlay can say something useful
+        // instead of a blanket 500. 503 = transient (retry helps), 502 = the
+        // provider chain is genuinely down.
+        let userMsg: string;
+        let status: number;
+        if (isTimeout) {
+          userMsg = "Apologies, Boss. My reasoning engines are responding slowly. Do try again in a moment.";
+          status = 503;
+        } else if (err?.rateLimited) {
+          userMsg = "Apologies, Boss. Every free AI provider is rate-limited right now. Give it a minute.";
+          status = 503;
+        } else {
+          const firstDetail = details[0] ? ` (${details[0]})` : "";
+          userMsg = `Apologies, Boss. I couldn't reach any AI provider.${firstDetail}`;
+          status = 502;
+        }
+
+        console.error("[Proxy Promise Error]:", isTimeout ? "LLM 20s timeout" : err?.message, details.slice(0, 6));
+        const errorBody = JSON.stringify({ success: false, error: userMsg, details });
+        res.writeHead(status, corsHeaders);
         res.end(errorBody);
       });
   } catch (err: any) {
@@ -384,17 +416,43 @@ function handleJarvisOSRequest(ctx: any, bodyBuffer: Buffer): void {
   relayToNextJS();
 }
 
-let proxyInstance: any = null;
-let isProxyRunning = false;
+// HMR-safe singleton. Next.js dev re-evaluates this module on every edit, which
+// would orphan the running proxy: the old instance keeps holding port 8080
+// (serving the code from before the edit) while the fresh module believes
+// nothing is running — so stop() no-ops and the overlay keeps hitting stale
+// logic. Stashing the handle on globalThis survives the reload, so stop and
+// restart actually take effect.
+interface ProxyState {
+  instance: any;
+  running: boolean;
+  lastError?: string;
+}
 
-const PROXY_PORT = 8080;
+const globalForProxy = globalThis as unknown as { __jarvisProxyState?: ProxyState };
+const proxyState: ProxyState =
+  globalForProxy.__jarvisProxyState ??
+  (globalForProxy.__jarvisProxyState = { instance: null, running: false });
+
+const PROXY_PORT = Number(process.env.JARVIS_PROXY_PORT) || 8080;
 const CERT_DIR = path.join(process.cwd(), ".certificates");
+
+/** True when nothing is listening on the port yet. */
+function isPortAvailable(port: number, host = "0.0.0.0"): Promise<boolean> {
+  return new Promise((resolve) => {
+    const net = require("net");
+    const probe = net.createServer();
+    probe.once("error", () => resolve(false));
+    probe.once("listening", () => probe.close(() => resolve(true)));
+    probe.listen(port, host);
+  });
+}
 
 export function getProxyStatus() {
   return {
-    running: isProxyRunning,
+    running: proxyState.running,
     port: PROXY_PORT,
     caCertPath: path.join(CERT_DIR, "certs", "ca.pem"),
+    lastError: proxyState.lastError,
   };
 }
 
@@ -408,28 +466,71 @@ function getOverlayScript(): string {
   }
 }
 
-function decompressBuffer(buffer: Buffer, encoding: string): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    if (encoding === "gzip") {
-      zlib.gunzip(buffer, (err, result) => (err ? reject(err) : resolve(result)));
-    } else if (encoding === "deflate") {
-      zlib.inflate(buffer, (err, result) => (err ? reject(err) : resolve(result)));
-    } else if (encoding === "br") {
-      zlib.brotliDecompress(buffer, (err, result) => (err ? reject(err) : resolve(result)));
-    } else {
-      resolve(buffer);
-    }
-  });
+// Thrown when a body cannot be decoded. Callers MUST fall back to forwarding the
+// original bytes with the original header — never to a lossy UTF-8 round-trip.
+class UnsupportedEncodingError extends Error {}
+
+/**
+ * Decode a Content-Encoding chain, e.g. "gzip", "br", "gzip, br".
+ *
+ * Chrome 154 sends `accept-encoding: gzip, deflate, br, zstd`, so servers happily
+ * answer with zstd. Node's zstd support is newer than the rest, so it is looked
+ * up defensively and the whole call fails safe when it (or any other codec) is
+ * missing.
+ */
+function decodeContent(buffer: Buffer, encoding: string): Buffer {
+  const encodings = String(encoding || "")
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter((e) => e && e !== "identity");
+
+  const zstdSync = (zlib as any).zstdDecompressSync ?? (zlib as any).zstdDecompress;
+
+  let out = buffer;
+  // Content-Encoding lists outermost-last, so decode in reverse.
+  for (const enc of [...encodings].reverse()) {
+    if (enc === "gzip" || enc === "x-gzip") out = zlib.gunzipSync(out);
+    else if (enc === "deflate") out = zlib.inflateSync(out);
+    else if (enc === "br") out = zlib.brotliDecompressSync(out);
+    else if (enc === "zstd" && zstdSync) out = zstdSync(out);
+    else throw new UnsupportedEncodingError(`unsupported content-encoding: ${enc}`);
+  }
+  return out;
+}
+
+/**
+ * True when a body is already plain markup/JSON despite carrying a
+ * Content-Encoding header. Guards against double-decoding and against handing a
+ * still-compressed body to a browser that has been told it is plain text.
+ */
+function looksLikePlainText(buffer: Buffer): boolean {
+  if (buffer.length === 0) return true;
+  // gzip magic 1f 8b, zstd magic 28 b5 2f fd — definitely still compressed.
+  if (buffer[0] === 0x1f && buffer[1] === 0x8b) return false;
+  if (buffer[0] === 0x28 && buffer[1] === 0xb5 && buffer[2] === 0x2f && buffer[3] === 0xfd) return false;
+  const head = buffer.slice(0, 64).toString("utf8").trimStart();
+  return head.startsWith("<") || head.startsWith("{") || head.startsWith("[");
 }
 
 export async function startProxyServer(): Promise<boolean> {
-  if (isProxyRunning && proxyInstance) {
+  if (proxyState.running && proxyState.instance) {
     return true;
   }
 
   try {
+    // Refuse to pretend we started when another instance already owns the port.
+    // http-mitm-proxy reports EADDRINUSE asynchronously, which used to leave the
+    // UI showing ACTIVE while a stale proxy served old code.
+    if (!(await isPortAvailable(PROXY_PORT))) {
+      proxyState.running = false;
+      proxyState.lastError = `Port ${PROXY_PORT} is already in use by another proxy instance — restart the dev server to clear it.`;
+      console.error(`[Proxy] ${proxyState.lastError}`);
+      return false;
+    }
+
     const { Proxy } = require("http-mitm-proxy");
-    proxyInstance = new Proxy();
+    const proxyInstance = new Proxy();
+    proxyState.instance = proxyInstance;
 
     if (!fs.existsSync(CERT_DIR)) {
       fs.mkdirSync(CERT_DIR, { recursive: true });
@@ -514,12 +615,13 @@ export async function startProxyServer(): Promise<boolean> {
           return callback();
         }
 
-        // Remove CSP and encoding headers to allow injection on HTML pages
+        // Strip the headers that would block injection. NOTE: content-encoding
+        // is deliberately left in place here — it is removed only once the body
+        // has actually been decoded. See the fail-safe below.
         delete ctx.serverToProxyResponse.headers["content-security-policy"];
         delete ctx.serverToProxyResponse.headers["content-security-policy-report-only"];
         delete ctx.serverToProxyResponse.headers["x-frame-options"];
         const contentEncoding = ctx.serverToProxyResponse.headers["content-encoding"] || "";
-        delete ctx.serverToProxyResponse.headers["content-encoding"];
 
         const chunks: Buffer[] = [];
 
@@ -529,19 +631,36 @@ export async function startProxyServer(): Promise<boolean> {
         });
 
         ctx.onResponseEnd(async function (ctx: any, callback: any) {
-          try {
-            let rawBuffer = Buffer.concat(chunks);
+          const original = Buffer.concat(chunks);
+          const headers = ctx.serverToProxyResponse.headers;
 
-            // Decompress if needed
-            if (contentEncoding) {
-              try {
-                rawBuffer = await decompressBuffer(rawBuffer, contentEncoding);
-              } catch (decompErr) {
-                console.warn("[Proxy] Decompression failed, using raw:", decompErr?.message);
-              }
+          // Everything below hinges on decoding correctly. If we cannot, we MUST
+          // hand back the original bytes with the original header: forwarding
+          // still-compressed bytes after stripping content-encoding — or worse,
+          // running them through a UTF-8 string — is what turned entire pages
+          // into binary garbage (Chrome 154 → zstd, which had no decoder).
+          let decoded: Buffer | null = null;
+          if (!contentEncoding || looksLikePlainText(original)) {
+            decoded = original;
+          } else {
+            try {
+              decoded = decodeContent(original, contentEncoding);
+            } catch (decodeErr: any) {
+              console.warn(
+                `[Proxy] Cannot decode "${contentEncoding}" from ${req.headers.host || "?"} — passing the body through untouched: ${decodeErr?.message}`
+              );
             }
+          }
 
-            let html = rawBuffer.toString("utf8");
+          if (!decoded) {
+            headers["content-encoding"] = contentEncoding;
+            headers["content-length"] = String(original.length);
+            ctx.proxyToClientResponse.write(original);
+            return callback();
+          }
+
+          try {
+            let html = decoded.toString("utf8");
             const overlayScript = getOverlayScript();
 
             if (overlayScript) {
@@ -556,13 +675,20 @@ export async function startProxyServer(): Promise<boolean> {
             }
 
             const resultBuffer = Buffer.from(html, "utf8");
-            ctx.serverToProxyResponse.headers["content-length"] = String(resultBuffer.length);
+            // The body is genuinely plain text now, so the old encoding no
+            // longer applies.
+            delete headers["content-encoding"];
+            headers["content-length"] = String(resultBuffer.length);
 
             ctx.proxyToClientResponse.write(resultBuffer);
             return callback();
           } catch (err) {
-            console.error("[Proxy] Injection failed:", err);
-            ctx.proxyToClientResponse.write(Buffer.concat(chunks));
+            // Injection failed *after* a successful decode — forward the decoded
+            // text so the page still renders instead of showing garbage.
+            console.error("[Proxy] Injection failed, forwarding decoded body:", err);
+            delete headers["content-encoding"];
+            headers["content-length"] = String(decoded.length);
+            ctx.proxyToClientResponse.write(decoded);
             return callback();
           }
         });
@@ -573,53 +699,64 @@ export async function startProxyServer(): Promise<boolean> {
       return callback();
     });
 
-    // Fire-and-forget: start listening in background so the UI doesn't hang.
-    // http-mitm-proxy can take up to 15s on first run (SSL cert generation).
-    // We mark isProxyRunning = true optimistically and let it settle.
-    isProxyRunning = true;
+    // Listen and wait for the real outcome. The first run can take ~15s to
+    // generate the CA cert, so we cap the wait instead of hanging the UI — but
+    // we no longer report success before the socket has actually bound.
+    const started = await new Promise<boolean>((resolve) => {
+      let settled = false;
+      const settle = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        resolve(ok);
+      };
+      const timer = setTimeout(() => settle(true), 15000);
 
-    proxyInstance.listen(
-      {
-        port: PROXY_PORT,
-        host: "0.0.0.0",
-        sslCaDir: CERT_DIR,
-      },
-      (err: any) => {
-        if (err) {
-          console.error("[Proxy] Failed to start MITM proxy:", err);
-          isProxyRunning = false;
-          proxyInstance = null;
-        } else {
-          console.log(`[Proxy] Autonomous local proxy running on port ${PROXY_PORT}`);
+      proxyInstance.listen(
+        { port: PROXY_PORT, host: "0.0.0.0", sslCaDir: CERT_DIR },
+        (err: any) => {
+          clearTimeout(timer);
+          if (err) {
+            const reason = err?.code || err?.message || String(err);
+            console.error("[Proxy] Failed to start MITM proxy:", reason);
+            proxyState.running = false;
+            proxyState.instance = null;
+            proxyState.lastError = `Failed to bind port ${PROXY_PORT}: ${reason}`;
+            settle(false);
+          } else {
+            console.log(`[Proxy] Autonomous local proxy running on port ${PROXY_PORT}`);
+            proxyState.running = true;
+            proxyState.lastError = undefined;
+            settle(true);
+          }
         }
-      }
-    );
+      );
+    });
 
-    // Wait up to 1.5s for a quick-start (e.g. cert already exists), then return.
-    await new Promise<void>((resolve) => setTimeout(resolve, 1500));
-    return isProxyRunning;
-  } catch (error) {
+    return started;
+  } catch (error: any) {
     console.error("[Proxy] Critical error starting proxy:", error);
-    isProxyRunning = false;
-    proxyInstance = null;
+    proxyState.running = false;
+    proxyState.instance = null;
+    proxyState.lastError = error?.message || String(error);
     return false;
   }
 }
 
 export async function stopProxyServer(): Promise<boolean> {
-  if (!isProxyRunning && !proxyInstance) {
+  if (!proxyState.running && !proxyState.instance) {
     return true;
   }
 
   try {
-    if (proxyInstance) {
-      proxyInstance.close();
+    if (proxyState.instance) {
+      proxyState.instance.close();
     }
   } catch (closeErr: any) {
     console.warn("[Proxy] Error during close (non-fatal):", closeErr?.message);
   } finally {
-    proxyInstance = null;
-    isProxyRunning = false;
+    proxyState.instance = null;
+    proxyState.running = false;
+    proxyState.lastError = undefined;
     console.log("[Proxy] Autonomous proxy stopped.");
   }
   return true;

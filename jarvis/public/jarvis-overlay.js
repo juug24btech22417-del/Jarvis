@@ -19,86 +19,161 @@
   // 3. Inject CSS rules inside Shadow DOM
   const style = document.createElement("style");
   style.textContent = `
-    @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Inter:wght@300;400;600&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
 
-    :host {
-      all: initial;
-    }
+    :host { all: initial; }
 
-    * {
-      box-sizing: border-box;
-    }
+    * { box-sizing: border-box; }
 
-    /* Floating Bubble */
+    /* ── Glass command pill ──────────────────────────────────────── */
     .jarvis-bubble {
-      width: 60px;
-      height: 60px;
-      border-radius: 50%;
-      background: rgba(10, 15, 30, 0.85);
-      border: 2px solid rgba(6, 182, 212, 0.4);
+      position: relative;
       display: flex;
       align-items: center;
-      justify-content: center;
+      gap: 11px;
+      height: 52px;
+      padding: 0 17px 0 12px;
+      border-radius: 999px;
+      overflow: hidden;
       cursor: pointer;
-      box-shadow: 0 0 20px rgba(6, 182, 212, 0.3), inset 0 0 10px rgba(6, 182, 212, 0.2);
-      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-      backdrop-filter: blur(12px);
-      position: relative;
+      background: linear-gradient(180deg, rgba(20, 34, 56, .82), rgba(7, 14, 28, .88));
+      border: 1px solid rgba(56, 189, 248, .32);
+      box-shadow:
+        0 12px 34px rgba(0, 0, 0, .5),
+        0 0 24px rgba(6, 182, 212, .26),
+        inset 0 1px 0 rgba(186, 230, 253, .16);
+      backdrop-filter: blur(16px) saturate(150%);
+      transition: transform .26s cubic-bezier(.34,1.56,.64,1), box-shadow .26s ease, border-color .26s ease;
+    }
+
+    /* Slow sheen sweep — reads as "powered on" without being busy. */
+    .jarvis-bubble::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 42%;
+      left: -60%;
+      background: linear-gradient(100deg, transparent, rgba(125, 211, 252, .16), transparent);
+      animation: sheen 5.5s ease-in-out infinite;
+      pointer-events: none;
     }
 
     .jarvis-bubble:hover {
-      transform: scale(1.08) rotate(45deg);
-      border-color: rgba(6, 182, 212, 0.8);
-      box-shadow: 0 0 25px rgba(6, 182, 212, 0.6), inset 0 0 15px rgba(6, 182, 212, 0.3);
+      transform: translateY(-2px);
+      border-color: rgba(125, 211, 252, .8);
+      box-shadow:
+        0 16px 40px rgba(0, 0, 0, .55),
+        0 0 34px rgba(6, 182, 212, .5),
+        inset 0 1px 0 rgba(186, 230, 253, .22);
     }
 
-    /* Outer Core (Pulsing ring) */
+    /* Core glyph: rotating ring around a glowing centre */
+    .pill-core {
+      position: relative;
+      width: 28px;
+      height: 28px;
+      flex: none;
+      display: grid;
+      place-items: center;
+    }
+
     .reactor-ring {
       position: absolute;
-      width: 48px;
-      height: 48px;
+      inset: 0;
       border-radius: 50%;
-      border: 3px double rgba(6, 182, 212, 0.6);
-      animation: spin 8s linear infinite;
+      background: conic-gradient(from 0deg,
+        rgba(6,182,212,0) 0deg,
+        rgba(56,189,248,.95) 80deg,
+        rgba(147,197,253,.2) 150deg,
+        rgba(6,182,212,0) 230deg,
+        rgba(56,189,248,.8) 320deg,
+        rgba(6,182,212,0) 360deg);
+      -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+      mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+      animation: spin 5s linear infinite;
     }
 
-    /* Inner Core (Glowing center) */
     .reactor-core {
-      width: 24px;
-      height: 24px;
+      width: 13px;
+      height: 13px;
       border-radius: 50%;
-      background: #06b6d4;
-      box-shadow: 0 0 15px #06b6d4, 0 0 30px #06b6d4;
-      transition: background 0.3s;
+      background: radial-gradient(circle at 35% 30%, #e0f7ff 0%, #38bdf8 38%, #0891b2 70%, #083344 100%);
+      box-shadow: 0 0 10px rgba(56,189,248,.95), 0 0 22px rgba(6,182,212,.55);
+      transition: background .35s ease, box-shadow .35s ease;
     }
 
+    .pill-label {
+      font-family: 'Orbitron', sans-serif;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 2.6px;
+      text-transform: uppercase;
+      white-space: nowrap;
+      color: #cbe9ff;
+      text-shadow: 0 0 12px rgba(56,189,248,.4);
+    }
+
+    .jarvis-bubble .status-dot {
+      width: 8px;
+      height: 8px;
+      flex: none;
+      margin-left: 3px;
+      border-radius: 50%;
+      background: #22d3ee;
+      box-shadow: 0 0 10px rgba(34, 211, 238, .95);
+      transition: background .3s ease, box-shadow .3s ease;
+    }
+
+    /* ── Pill states ─────────────────────────────────────────────── */
+    .jarvis-bubble.listening { border-color: rgba(248, 113, 113, .6); }
     .jarvis-bubble.listening .reactor-core {
-      background: #ef4444;
-      box-shadow: 0 0 15px #ef4444, 0 0 30px #ef4444;
-      animation: pulse 1.2s ease-in-out infinite;
+      background: radial-gradient(circle at 35% 30%, #ffe4e6 0%, #f87171 40%, #dc2626 70%, #450a0a 100%);
+      box-shadow: 0 0 12px #ef4444, 0 0 26px rgba(239,68,68,.6);
+      animation: pulse 1.1s ease-in-out infinite;
     }
+    .jarvis-bubble.listening .status-dot { background: #f87171; box-shadow: 0 0 10px #ef4444; }
 
-    /* Command Window */
+    .jarvis-bubble.thinking .reactor-ring { animation-duration: 1.2s; }
+    .jarvis-bubble.thinking .reactor-core {
+      background: radial-gradient(circle at 35% 30%, #fef3c7 0%, #fbbf24 40%, #d97706 70%, #451a03 100%);
+      box-shadow: 0 0 12px #fbbf24, 0 0 26px rgba(251,191,36,.55);
+    }
+    .jarvis-bubble.thinking .status-dot { background: #fbbf24; box-shadow: 0 0 10px #f59e0b; }
+
+    .jarvis-bubble.speaking .reactor-core { animation: pulse .85s ease-in-out infinite; }
+    .jarvis-bubble.speaking .status-dot { background: #34d399; box-shadow: 0 0 10px #10b981; }
+
+    /* ── Command panel ──────────────────────────────────────────── */
     .jarvis-panel {
       position: absolute;
-      bottom: 80px;
+      bottom: 68px;
       right: 0;
-      width: 420px;
-      max-height: 520px;
-      background: rgba(10, 20, 38, 0.95);
-      border: 1px solid rgba(6, 182, 212, 0.3);
-      border-radius: 12px;
-      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5), 0 0 20px rgba(6, 182, 212, 0.15);
-      font-family: 'Inter', sans-serif;
-      color: #e2e8f0;
+      width: 404px;
+      max-height: 560px;
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      border-radius: 18px;
+      color: #e2e8f0;
+      font-family: 'Inter', system-ui, sans-serif;
+      background: linear-gradient(180deg, rgba(9,16,32,.97), rgba(5,10,22,.97));
+      border: 1px solid rgba(56,189,248,.22);
+      box-shadow: 0 24px 60px rgba(0,0,0,.6), inset 0 0 0 1px rgba(255,255,255,.03), 0 0 42px rgba(6,182,212,.14);
+      backdrop-filter: blur(18px) saturate(150%);
       opacity: 0;
-      transform: translateY(20px) scale(0.95);
+      transform: translateY(16px) scale(.97);
+      transform-origin: bottom right;
       pointer-events: none;
-      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-      backdrop-filter: blur(16px);
+      transition: opacity .3s ease, transform .32s cubic-bezier(.34,1.4,.64,1);
+    }
+
+    .jarvis-panel::before {
+      content: "";
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(125,211,252,.75), transparent);
     }
 
     .jarvis-panel.open {
@@ -107,127 +182,201 @@
       pointer-events: auto;
     }
 
-    /* Panel Header */
     .panel-header {
-      padding: 14px 18px;
-      background: rgba(15, 23, 42, 0.8);
-      border-b: 1px solid rgba(6, 182, 212, 0.2);
       display: flex;
-      justify-content: space-between;
       align-items: center;
+      gap: 10px;
+      padding: 13px 15px;
+      background: rgba(10, 18, 34, .75);
+      border-bottom: 1px solid rgba(56,189,248,.14);
     }
 
+    .panel-avatar {
+      width: 26px; height: 26px; flex: none;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 30%, #e0f7ff, #38bdf8 40%, #0e7490 100%);
+      box-shadow: 0 0 12px rgba(56,189,248,.8);
+      animation: pulse 3s ease-in-out infinite;
+    }
+
+    .panel-heading { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+
     .panel-title {
-      font-family: 'Orbitron', sans-serif;
-      font-size: 13px;
-      letter-spacing: 2px;
-      color: #06b6d4;
-      text-shadow: 0 0 10px rgba(6, 182, 212, 0.3);
       margin: 0;
+      font-family: 'Orbitron', sans-serif;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 2.4px;
+      color: #7dd3fc;
+      text-shadow: 0 0 12px rgba(56,189,248,.35);
+    }
+
+    .panel-status {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9.5px;
+      letter-spacing: 1.6px;
+      text-transform: uppercase;
+      color: #38bdf8;
+      opacity: .85;
     }
 
     .panel-close {
+      width: 26px; height: 26px;
+      display: grid; place-items: center;
+      border-radius: 8px;
       cursor: pointer;
       color: #94a3b8;
-      font-size: 14px;
-      transition: color 0.2s;
+      font-size: 13px;
+      transition: background .2s, color .2s;
     }
+    .panel-close:hover { background: rgba(239,68,68,.16); color: #fca5a5; }
 
-    .panel-close:hover {
-      color: #ef4444;
+    /* Voice-reply toggle — off by default, because the overlay rides on every
+       page and speaking every answer unprompted gets old fast. */
+    .panel-tts {
+      width: 26px; height: 26px;
+      display: grid; place-items: center;
+      border: 1px solid rgba(56,189,248,.2);
+      background: rgba(6,12,24,.6);
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 12px;
+      line-height: 1;
+      color: #7dd3fc;
+      transition: background .2s, border-color .2s, color .2s;
     }
+    .panel-tts:hover { background: rgba(56,189,248,.14); border-color: rgba(56,189,248,.55); }
+    .panel-tts.on { background: rgba(52,211,153,.16); border-color: rgba(52,211,153,.6); color: #6ee7b7; }
 
-    /* Output Display Area */
     .panel-display {
       flex: 1;
-      padding: 16px;
-      font-size: 13px;
-      line-height: 1.6;
+      min-height: 120px;
+      max-height: 340px;
+      padding: 16px 15px 6px;
       overflow-y: auto;
-      max-height: 320px;
-      border-bottom: 1px solid rgba(6, 182, 212, 0.15);
-      background: rgba(5, 10, 20, 0.4);
+      font-size: 13px;
+      line-height: 1.62;
+      scroll-behavior: smooth;
     }
+    .panel-display::-webkit-scrollbar { width: 6px; }
+    .panel-display::-webkit-scrollbar-thumb { background: rgba(56,189,248,.28); border-radius: 999px; }
+
+    .chat-bubble { margin-bottom: 15px; animation: rise .32s ease both; }
 
     .message-role {
-      font-family: 'Orbitron', sans-serif;
-      font-size: 10px;
-      letter-spacing: 1px;
-      margin-bottom: 4px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 5px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9.5px;
+      letter-spacing: 1.4px;
+      text-transform: uppercase;
     }
-
-    .role-jarvis { color: #06b6d4; }
-    .role-user { color: #38bdf8; }
-
-    .chat-bubble {
-      margin-bottom: 16px;
+    .role-jarvis { color: #38bdf8; }
+    .role-user { color: #94a3b8; }
+    .message-role::before {
+      content: "";
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 8px currentColor;
     }
 
     .chat-text {
-      background: rgba(15, 23, 42, 0.6);
       padding: 10px 12px;
-      border-radius: 8px;
-      border-left: 2px solid rgba(6, 182, 212, 0.5);
+      border-radius: 12px;
+      background: rgba(17, 27, 46, .72);
+      border: 1px solid rgba(56,189,248,.12);
+      border-left: 2px solid rgba(56,189,248,.6);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .chat-bubble.from-user .chat-text {
+      background: rgba(13, 20, 36, .6);
+      border-left-color: rgba(148,163,184,.5);
     }
 
-    /* Input Bar */
+    /* Animated typing dots */
+    .typing { display: inline-flex; align-items: center; gap: 4px; padding: 2px 0; }
+    .typing i {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: #38bdf8;
+      animation: blink 1.2s infinite ease-in-out;
+    }
+    .typing i:nth-child(2) { animation-delay: .18s; }
+    .typing i:nth-child(3) { animation-delay: .36s; }
+
     .panel-input-container {
-      padding: 12px;
       display: flex;
+      align-items: center;
       gap: 8px;
-      background: rgba(15, 23, 42, 0.9);
+      padding: 11px 12px;
+      background: rgba(10, 18, 34, .8);
+      border-top: 1px solid rgba(56,189,248,.14);
     }
 
     .panel-input {
       flex: 1;
-      background: rgba(10, 15, 30, 0.8);
-      border: 1px solid rgba(6, 182, 212, 0.25);
-      border-radius: 6px;
-      padding: 8px 12px;
+      min-width: 0;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: rgba(6, 12, 24, .8);
+      border: 1px solid rgba(56,189,248,.2);
       color: #f8fafc;
+      font-family: inherit;
       font-size: 13px;
       outline: none;
-      transition: border 0.2s;
+      transition: border-color .2s, box-shadow .2s;
     }
-
+    .panel-input::placeholder { color: #64748b; }
     .panel-input:focus {
-      border-color: rgba(6, 182, 212, 0.7);
-      box-shadow: 0 0 10px rgba(6, 182, 212, 0.2);
+      border-color: rgba(56,189,248,.75);
+      box-shadow: 0 0 0 3px rgba(56,189,248,.12);
     }
 
     .mic-btn, .send-btn {
-      width: 36px;
-      height: 36px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: rgba(10, 15, 30, 0.8);
-      border: 1px solid rgba(6, 182, 212, 0.25);
-      border-radius: 6px;
+      width: 36px; height: 36px;
+      flex: none;
+      display: grid; place-items: center;
+      border-radius: 10px;
+      background: rgba(6, 12, 24, .8);
+      border: 1px solid rgba(56,189,248,.2);
+      color: #7dd3fc;
+      font-size: 14px;
       cursor: pointer;
-      color: #06b6d4;
-      transition: all 0.2s;
+      transition: background .2s, border-color .2s, transform .15s;
+    }
+    .mic-btn:hover, .send-btn:hover { background: rgba(56,189,248,.14); border-color: rgba(56,189,248,.55); }
+    .mic-btn:active, .send-btn:active { transform: scale(.94); }
+    .mic-btn.active { background: rgba(239,68,68,.18); border-color: #ef4444; color: #fca5a5; }
+    .send-btn { background: linear-gradient(180deg, rgba(56,189,248,.22), rgba(6,182,212,.16)); color: #e0f7ff; }
+
+    .panel-hint {
+      padding: 0 12px 9px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      letter-spacing: 1px;
+      color: #64748b;
+      text-align: right;
     }
 
-    .mic-btn:hover, .send-btn:hover {
-      background: rgba(6, 182, 212, 0.15);
-      border-color: rgba(6, 182, 212, 0.6);
+    /* ── Animations ─────────────────────────────────────────────── */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .72; transform: scale(.9); } }
+    @keyframes sheen {
+      0% { left: -60%; }
+      55%, 100% { left: 130%; }
+    }
+    @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+    @keyframes blink {
+      0%, 80%, 100% { opacity: .25; transform: translateY(0); }
+      40% { opacity: 1; transform: translateY(-2px); }
     }
 
-    .mic-btn.active {
-      background: rgba(239, 68, 68, 0.15);
-      border-color: #ef4444;
-      color: #ef4444;
-    }
-
-    /* Animations */
-    @keyframes spin {
-      100% { transform: rotate(360deg); }
-    }
-
-    @keyframes pulse {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.75; transform: scale(0.9); }
+    @media (prefers-reduced-motion: reduce) {
+      .jarvis-bubble, .jarvis-bubble::before, .reactor-ring, .panel-avatar { animation: none !important; }
     }
   `;
   shadow.appendChild(style);
@@ -236,28 +385,38 @@
   const bubble = document.createElement("div");
   bubble.className = "jarvis-bubble";
   bubble.innerHTML = `
-    <div class="reactor-ring"></div>
-    <div class="reactor-core"></div>
+    <span class="pill-core">
+      <span class="reactor-ring"></span>
+      <span class="reactor-core"></span>
+    </span>
+    <span class="pill-label">Ask JARVIS</span>
+    <span class="status-dot"></span>
   `;
 
   const panel = document.createElement("div");
   panel.className = "jarvis-panel";
   panel.innerHTML = `
     <div class="panel-header">
-      <h3 class="panel-title">J.A.R.V.I.S. INTERFACE</h3>
-      <span class="panel-close">✕</span>
+      <div class="panel-avatar"></div>
+      <div class="panel-heading">
+        <h3 class="panel-title">J.A.R.V.I.S.</h3>
+        <span class="panel-status" id="jarvis-status">Online · ready</span>
+      </div>
+      <button class="panel-tts" id="jarvis-tts" title="Voice replies: off">🔇</button>
+      <div class="panel-close" title="Close">✕</div>
     </div>
     <div class="panel-display" id="jarvis-display">
       <div class="chat-bubble">
         <div class="message-role role-jarvis">J.A.R.V.I.S.</div>
-        <div class="chat-text">Awaiting your command, Boss. Ready to assist on this page.</div>
+        <div class="chat-text">At your service, Boss. I can read this page, answer questions, act on it, and control this machine — all from here.</div>
       </div>
     </div>
     <div class="panel-input-container">
-      <input type="text" class="panel-input" placeholder="Type command for JARVIS..." id="jarvis-input" />
-      <button class="mic-btn" title="Toggle Voice Command" id="jarvis-mic">🎙️</button>
-      <button class="send-btn" title="Send Command" id="jarvis-send">➡️</button>
+      <input type="text" class="panel-input" placeholder="Ask about this page, or give a command…" id="jarvis-input" />
+      <button class="mic-btn" title="Voice input" id="jarvis-mic">🎙</button>
+      <button class="send-btn" title="Send (Enter)" id="jarvis-send">➤</button>
     </div>
+    <div class="panel-hint">⏎ send · Ctrl+Shift+J toggle · Ctrl+Space polish</div>
   `;
 
   shadow.appendChild(bubble);
@@ -268,7 +427,32 @@
   const input = shadow.getElementById("jarvis-input");
   const micBtn = shadow.getElementById("jarvis-mic");
   const sendBtn = shadow.getElementById("jarvis-send");
+  const statusEl = shadow.getElementById("jarvis-status");
+  const ttsBtn = shadow.getElementById("jarvis-tts");
   const closeBtn = panel.querySelector(".panel-close");
+
+  // Voice REPLIES are off by default. The mic button controls voice INPUT;
+  // this controls whether JARVIS speaks its answers back. Injected into every
+  // page, an always-speaking assistant is a nuisance — the user turns it on.
+  let ttsEnabled = false;
+  function setTts(on) {
+    ttsEnabled = on;
+    if (!ttsBtn) return;
+    ttsBtn.classList.toggle("on", on);
+    ttsBtn.textContent = on ? "🔊" : "🔇";
+    ttsBtn.title = on ? "Voice replies: on" : "Voice replies: off";
+  }
+  setTts(false);
+  if (ttsBtn) ttsBtn.addEventListener("click", () => setTts(!ttsEnabled));
+
+  // Orb state machine — drives the colour/animation so the assistant visibly
+  // reflects what it is doing (idle · listening · thinking · speaking).
+  const ORB_STATES = ["listening", "thinking", "speaking"];
+  const IDLE_LABEL = "Online · ready";
+  function setOrbState(state, label) {
+    ORB_STATES.forEach((s) => bubble.classList.toggle(s, s === state));
+    if (statusEl) statusEl.textContent = label || IDLE_LABEL;
+  }
 
   let isSpeechActive = false;
   let recognition = null;
@@ -284,13 +468,13 @@
     recognition.onstart = () => {
       isSpeechActive = true;
       micBtn.classList.add("active");
-      bubble.classList.add("listening");
+      setOrbState("listening", "Listening…");
     };
 
     recognition.onend = () => {
       isSpeechActive = false;
       micBtn.classList.remove("active");
-      bubble.classList.remove("listening");
+      setOrbState(null);
     };
 
     recognition.onresult = (event) => {
@@ -303,7 +487,7 @@
       console.error("[Speech Recognition Error]:", err);
       isSpeechActive = false;
       micBtn.classList.remove("active");
-      bubble.classList.remove("listening");
+      setOrbState(null);
     };
   } else {
     micBtn.style.display = "none"; // Hide if speech recognition is unsupported
@@ -362,7 +546,8 @@
     input.value = "";
     addChatBubble("You", queryText, "role-user");
 
-    const typingBubble = addChatBubble("J.A.R.V.I.S.", "Synthesizing answer...", "role-jarvis");
+    const typingBubble = addChatBubble("J.A.R.V.I.S.", '<span class="typing"><i></i><i></i><i></i></span>', "role-jarvis");
+    setOrbState("thinking", "Working…");
     const lowerQuery = queryText.toLowerCase().trim();
 
     // ── Phase 4: Speech-to-OS Intent Detection ──────────────────────────────
@@ -383,7 +568,7 @@
         if (osData.success) {
           const msg = `✅ Done, Boss. ${osData.description}.`;
           typingBubble.querySelector(".chat-text").innerText = msg;
-          speakText(msg);
+          if (ttsEnabled) speakText(msg);
         } else {
           typingBubble.querySelector(".chat-text").innerText = `⚠️ OS command failed: ${osData.error}`;
         }
@@ -391,6 +576,7 @@
         typingBubble.querySelector(".chat-text").innerText = `⚠️ Could not reach OS bridge: ${e.message}`;
       }
       display.scrollTop = display.scrollHeight;
+      setOrbState(null);
       return; // Skip LLM entirely
     }
     // ── End Speech-to-OS ─────────────────────────────────────────────────────
@@ -425,14 +611,21 @@
         }),
       });
 
+      // Parse the body even on a non-2xx status: the proxy puts the real
+      // reason (which provider failed, rate limits, timeouts) in `error`, and
+      // showing that beats a bare status code.
+      const data = await res.json().catch(() => null);
+
       if (!res.ok) {
-        throw new Error(`Server returned error status ${res.status}`);
+        throw new Error(data?.error || `Server error ${res.status}`);
       }
 
-      const data = await res.json();
-      if (data.success) {
+      if (!data || data.success === false) {
+        typingBubble.querySelector(".chat-text").innerText =
+          `Apologies, Boss. ${data?.error || "I couldn't parse that response."}`;
+      } else {
         typingBubble.querySelector(".chat-text").innerText = data.response;
-        speakText(data.response);
+        if (ttsEnabled) speakText(data.response);
 
         // Execute browser action if LLM returned one
         if (data.action) {
@@ -441,15 +634,14 @@
             addChatBubble("J.A.R.V.I.S.", `⚙️ Action executed: ${actionResult}`, "role-jarvis");
           }
         }
-      } else {
-        typingBubble.querySelector(".chat-text").innerText = `Apologies, Boss. Error: ${data.error}`;
       }
     } catch (e) {
-      typingBubble.querySelector(".chat-text").innerText = `Apologies, Boss. Connection failed: ${e.message}`;
+      typingBubble.querySelector(".chat-text").innerText = `Apologies, Boss. ${e.message}`;
     }
     
     // Auto-scroll display to bottom
     display.scrollTop = display.scrollHeight;
+    setOrbState(null);
   }
 
   // ── OS Intent Detector ─────────────────────────────────────────────────────
@@ -501,7 +693,7 @@
 
   function addChatBubble(role, text, roleClass) {
     const chatBubble = document.createElement("div");
-    chatBubble.className = "chat-bubble";
+    chatBubble.className = "chat-bubble" + (roleClass === "role-user" ? " from-user" : "");
     chatBubble.innerHTML = `
       <div class="message-role ${roleClass}">${role}</div>
       <div class="chat-text">${text}</div>
@@ -578,6 +770,9 @@
     const cleanText = text.replace(/[*#_\-\`]/g, "");
 
     const utterance = new SpeechSynthesisUtterance(cleanText);
+    utterance.onstart = () => setOrbState("speaking", "Speaking…");
+    utterance.onend = () => setOrbState(null);
+    utterance.onerror = () => setOrbState(null);
     
     // Try to find a nice British English voice
     const voices = window.speechSynthesis.getVoices();

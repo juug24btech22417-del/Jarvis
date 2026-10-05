@@ -15,13 +15,197 @@ import fs from "fs";
 import { createAgentSession, type AgentSession, type PageElementRef } from "@/lib/browser/engine";
 import { agentLlm, parseJsonLoose } from "@/lib/agent/llm";
 import { saveArtifact } from "@/lib/agent/artifacts";
-import { isLiveViewEnabled, publishLiveFrame } from "@/lib/agent/liveView";
+import { isLiveViewEnabled, publishLiveFrame, setLiveViewEnabled, clearLiveView } from "@/lib/agent/liveView";
+import { feedScrollIntent, feedTargetForSite } from "@/lib/jarvis/commandRouting";
 import { evaluateLoginSignal, isAuthUrl, loginMessage, type CookieLike } from "@/lib/agent/loginSignals";
 import type { BrowserRecording } from "@/lib/agent/types";
 
 export type Logger = (message: string, data?: Record<string, unknown>) => void;
 
 const RECORDINGS_FILE = path.join(process.cwd(), ".jarvis-data", "recordings.json");
+
+/* ----------------------------- FEED SCROLLING ----------------------------- */
+//
+// "Open Instagram and scroll reels until I stop" — Shorts/Reels/TikTok are
+// snap-scroll feeds, and the only reliable way to drive them is a REAL browser
+// the user is already signed into: the bundled Chromium gets a bot wall before
+// the first video loads. This loop is deliberately NOT LLM-driven — a model
+// call per scroll would be slow and expensive for what is just "press the down
+// key, wait, repeat". It runs until stopped.
+
+export interface FeedSessionInput {
+  /** Natural-language request, e.g. "open instagram and scroll reels". */
+  goal?: string;
+  /** Explicit site key (youtube | instagram | tiktok | facebook | snapchat). */
+  site?: string;
+  /** ms between advances. Clamped: faster looks robotic, slower is dull. */
+  intervalMs?: number;
+  /** Mission job id when started from a mission (enables live frames). */
+  jobId?: string;
+}
+
+interface FeedSession {
+  id: string;
+  label: string;
+  url: string;
+  mode: string;
+  stopped: boolean;
+  advanced: number;
+  startedAt: number;
+  lastError?: string;
+  session_obj: AgentSession;
+}
+
+interface FeedGlobal {
+  __jarvisFeedSessions?: Map<string, FeedSession>;
+}
+const feedGlobal = globalThis as unknown as FeedGlobal;
+
+function feedSessions(): Map<string, FeedSession> {
+  if (!feedGlobal.__jarvisFeedSessions) feedGlobal.__jarvisFeedSessions = new Map();
+  return feedGlobal.__jarvisFeedSessions;
+}
+
+// A calm cadence: one advance every 10s by default, and it keeps going until
+// stopped. Faster reads as a bot and is unpleasant to watch.
+const FEED_DEFAULT_INTERVAL = 10_000;
+const FEED_MIN_INTERVAL = 2_000;
+const FEED_MAX_INTERVAL = 120_000;
+
+// A feed that bounces to a sign-in page is not a feed. Scrolling a login form
+// for ten minutes is worse than saying so, so detect it and stop.
+const LOGIN_WALL_RE = /(\/accounts\/login|\/login|\/signin|\/sign-in|\/checkpoint|\/auth\/)/i;
+
+/** Start scrolling a feed in the user's real browser. Runs until stopped. */
+export async function startFeedScroll(
+  input: FeedSessionInput
+): Promise<{ id: string; label: string; url: string; mode: string }> {
+  const target =
+    (input.site ? feedTargetForSite(input.site) : null) ??
+    feedScrollIntent(input.goal ?? "") ??
+    feedScrollIntent(input.site ?? "");
+  if (!target) {
+    throw new Error('I couldn\'t tell which feed to open. Try "open instagram and scroll reels".');
+  }
+
+  // Real browser on purpose — headless hits the bot wall on both YouTube and
+  // Instagram before a single video loads.
+  const session_obj = await createAgentSession({ realBrowser: true });
+  await session_obj.goto(target.url);
+
+  // Surface a sign-in wall immediately rather than "scrolling" a login form.
+  const landing = session_obj.url();
+  if (LOGIN_WALL_RE.test(landing)) {
+    await session_obj.close().catch(() => {});
+    throw new Error(
+      `${target.label} asked me to sign in (landed on ${landing}). Sign in once in that browser and ask again — the session is remembered.`
+    );
+  }
+
+  const id = `feed_${Date.now().toString(36)}`;
+  const rec: FeedSession = {
+    id,
+    label: target.label,
+    url: target.url,
+    mode: "real-browser",
+    stopped: false,
+    advanced: 0,
+    startedAt: Date.now(),
+    session_obj,
+  };
+  feedSessions().set(id, rec);
+
+  void runFeedLoop(rec, input.intervalMs, input.jobId);
+  return { id, label: rec.label, url: rec.url, mode: rec.mode };
+}
+
+async function runFeedLoop(rec: FeedSession, intervalMs = FEED_DEFAULT_INTERVAL, jobId?: string): Promise<void> {
+  const interval = Math.max(FEED_MIN_INTERVAL, Math.min(intervalMs, FEED_MAX_INTERVAL));
+  if (jobId) setLiveViewEnabled(jobId, true);
+
+  try {
+    while (!rec.stopped) {
+      try {
+        // Shorts / Reels / TikTok all advance on ArrowDown in the web player.
+        // Racing it against a short deadline matters: a CDP call into a busy
+        // real tab can otherwise stall for the page timeout and freeze the
+        // whole loop (which also made "stop" feel unresponsive).
+        await Promise.race([
+          rec.session_obj.pressKey("ArrowDown"),
+          new Promise((r) => setTimeout(r, 3000)),
+        ]);
+        rec.advanced++;
+
+        if (jobId && isLiveViewEnabled(jobId)) {
+          const frame = await rec.session_obj.screenshotJpeg().catch(() => "");
+          if (frame) {
+            publishLiveFrame({
+              jobId,
+              stepId: rec.id,
+              action: `scroll ${rec.advanced}`,
+              url: rec.session_obj.url(),
+              title: rec.label,
+              frame,
+            });
+          }
+        }
+        // Mid-scroll sign-in redirect (session expired) — stop instead of
+        // pressing the down key on a login form forever.
+        if (LOGIN_WALL_RE.test(rec.session_obj.url())) {
+          rec.lastError = "Sign-in expired — stopped scrolling.";
+          break;
+        }
+      } catch (e) {
+        rec.lastError = (e as Error)?.message?.split("\n")[0];
+        break; // a closed tab means the user ended it themselves
+      }
+      // Interruptible wait, so "stop" lands immediately instead of after the
+      // remainder of a full interval.
+      const until = Date.now() + interval;
+      while (!rec.stopped && Date.now() < until) {
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    }
+  } finally {
+    await rec.session_obj.close().catch(() => {});
+    if (jobId) clearLiveView(jobId);
+    feedSessions().delete(rec.id);
+  }
+}
+
+/** Stop one feed session (by id) or every running one. */
+export function stopFeedScroll(id?: string): { stopped: string[] } {
+  const stopped: string[] = [];
+  for (const rec of feedSessions().values()) {
+    if (id && rec.id !== id) continue;
+    rec.stopped = true;
+    stopped.push(rec.id);
+  }
+  return { stopped };
+}
+
+export function listFeedSessions() {
+  return [...feedSessions().values()].map((r) => ({
+    id: r.id,
+    label: r.label,
+    url: r.url,
+    currentUrl: (() => {
+      try {
+        return r.session_obj.url();
+      } catch {
+        return r.url;
+      }
+    })(),
+    mode: r.mode,
+    advanced: r.advanced,
+    startedAt: r.startedAt,
+    lastError: r.lastError,
+  }));
+}
+
+export function isFeedScrolling(): boolean {
+  return feedSessions().size > 0;
+}
 
 /* ----------------------------- RECORDING STORE ----------------------------- */
 

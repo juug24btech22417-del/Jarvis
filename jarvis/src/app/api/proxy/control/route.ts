@@ -22,7 +22,13 @@ export async function POST(req: NextRequest) {
     if (action === "start") {
       const started = await startProxyServer();
       const status = getProxyStatus();
-      return NextResponse.json({ success: started, status });
+      // Surface WHY it failed (e.g. the port is already held by a stale proxy)
+      // instead of a bare success:false the panel can't explain.
+      return NextResponse.json({
+        success: started,
+        status,
+        ...(started ? {} : { error: status.lastError || "Failed to start the proxy." }),
+      });
     } else if (action === "stop") {
       const stopped = await stopProxyServer();
       const status = getProxyStatus();

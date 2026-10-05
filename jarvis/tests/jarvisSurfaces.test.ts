@@ -64,6 +64,35 @@ section("instant planner (no LLM)");
   check("youtube open+play", p?.steps[0].kind === "youtube_open");
 }
 {
+  const p = heuristicPlan("open youtube and play any song");
+  check("\"open youtube and play <x>\" → youtube_open", p?.steps[0].kind === "youtube_open", JSON.stringify(p?.steps.map((s) => s.kind)));
+}
+{
+  const p = heuristicPlan("open youtube and scroll shorts");
+  check(
+    "shorts scroll → browser_act on the shorts feed",
+    p?.steps.map((s) => s.kind).join(",") === "browser_act" && String(p?.steps[0].params.url).includes("youtube.com/shorts"),
+    JSON.stringify(p?.steps[0])
+  );
+}
+{
+  const p = heuristicPlan("open instagram and scroll reels");
+  check(
+    "reels scroll → browser_act on the reels feed",
+    p?.steps.map((s) => s.kind).join(",") === "browser_act" && String(p?.steps[0].params.url).includes("instagram.com/reels"),
+    JSON.stringify(p?.steps[0])
+  );
+}
+{
+  const p = heuristicPlan("scroll reels");
+  check("bare \"scroll reels\" defaults to Instagram", String(p?.steps[0].params.url).includes("instagram.com/reels"));
+}
+{
+  // Guard against the feed rule swallowing ordinary playback / open goals.
+  check("plain \"open youtube\" is not a feed scroll", heuristicPlan("open youtube")?.steps.some((s) => s.kind === "browser_act") !== true);
+  check("playback is not a feed scroll", heuristicPlan("open youtube and play any song")?.steps[0].kind === "youtube_open");
+}
+{
   const p = heuristicPlan("find the best free react course and open the best one");
   check(
     "find + open → search → decide → open",

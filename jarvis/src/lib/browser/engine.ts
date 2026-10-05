@@ -14,6 +14,9 @@ import { chromium, Browser, BrowserContext, Page } from "playwright";
 import { chromium as chromiumExtra } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { mkdir } from "fs/promises";
+import fs from "fs";
+import os from "os";
+import { spawn } from "child_process";
 import path from "path";
 
 chromiumExtra.use(StealthPlugin());
@@ -89,6 +92,13 @@ export async function getBrowser(headed = false): Promise<Browser> {
 export interface SessionOptions {
   sessionName?: string; // use a persistent profile (stays logged in)
   headed?: boolean;
+  /**
+   * Drive the user's REAL Chrome (attached or freshly launched) instead of the
+   * bundled Chromium. No amount of stealth patching fixes the bundled binary:
+   * YouTube/Instagram/Amazon wall it on the executable fingerprint alone, and
+   * the user is not signed in there anyway. A real Chrome has their session.
+   */
+  realBrowser?: boolean;
 }
 
 export async function newContext(browser: Browser, opts: SessionOptions = {}): Promise<BrowserContext> {
@@ -174,6 +184,126 @@ export async function closePage(page: Page): Promise<void> {
   } catch {
     // ignore
   }
+}
+
+// ─── Real browser (the user's own Chrome) ───────────────────────────
+//
+// Resolution order:
+//   1. ATTACH to a Chrome already listening on the debug port — that is the
+//      browser launch-jarvis-browser.bat opens (it also carries the proxy).
+//   2. LAUNCH real chrome.exe with the debug port on a persistent profile.
+//
+// We deliberately never pass the DEFAULT Chrome user-data-dir: Chrome ≥136
+// ignores --remote-debugging-port there for security, and a second instance
+// pointed at a profile Chrome is already using just exits. A dedicated profile
+// is used instead — sign in ONCE there and the session persists.
+
+const DEBUG_PORT = Number(process.env.JARVIS_CHROME_DEBUG_PORT) || 9222;
+const DEBUG_ENDPOINT = `http://127.0.0.1:${DEBUG_PORT}`;
+
+export function realBrowserExecutable(): string | null {
+  const env = process.env;
+  const candidates = [
+    path.join(env["PROGRAMFILES"] || "C:\\Program Files", "Google", "Chrome", "Application", "chrome.exe"),
+    path.join(env["PROGRAMFILES(X86)"] || "C:\\Program Files (x86)", "Google", "Chrome", "Application", "chrome.exe"),
+    path.join(env.LOCALAPPDATA || "", "Google", "Chrome", "Application", "chrome.exe"),
+    path.join(env["PROGRAMFILES(X86)"] || "C:\\Program Files (x86)", "Microsoft", "Edge", "Application", "msedge.exe"),
+    path.join(env["PROGRAMFILES"] || "C:\\Program Files", "Microsoft", "Edge", "Application", "msedge.exe"),
+  ];
+  return candidates.find((p) => p && fs.existsSync(p)) ?? null;
+}
+
+/** Where the debug browser keeps its logins (override with JARVIS_CHROME_PROFILE). */
+export function realBrowserProfileDir(): string {
+  return process.env.JARVIS_CHROME_PROFILE || path.join(os.tmpdir(), "jarvis-chrome-profile");
+}
+
+async function debugPortUp(): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1500);
+    const res = await fetch(`${DEBUG_ENDPOINT}/json/version`, { signal: controller.signal });
+    clearTimeout(timer);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+function spawnChrome(executable: string, profileDir: string): void {
+  fs.mkdirSync(profileDir, { recursive: true });
+  const child = spawn(
+    executable,
+    [
+      `--remote-debugging-port=${DEBUG_PORT}`,
+      `--user-data-dir=${profileDir}`,
+      // Never ride the JARVIS MITM proxy from here. These pages are real
+      // browsing sessions, not overlay targets: routing them through the proxy
+      // only adds latency and another thing that can corrupt a response.
+      "--no-proxy-server",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-blink-features=AutomationControlled",
+    ],
+    { detached: true, stdio: "ignore" }
+  );
+  child.unref();
+}
+
+/** The user's existing browsing context — keeps their cookies and logins. */
+function existingContext(browser: Browser): BrowserContext {
+  return browser.contexts()[0] ?? browser.newContext({ ignoreHTTPSErrors: true });
+}
+
+export interface RealBrowserConnection {
+  browser: Browser;
+  context: BrowserContext;
+  mode: "attached" | "launched";
+  profileDir: string;
+}
+
+/**
+ * Connect to a real Chrome: attach if one is already debugging, else launch it
+ * and wait for the debug port to accept connections.
+ */
+export async function connectRealBrowser(): Promise<RealBrowserConnection> {
+  const profileDir = realBrowserProfileDir();
+
+  if (await debugPortUp()) {
+    try {
+      // A busy Chrome can accept the websocket and then never answer a single
+      // command, so the default 30s handshake is far too patient here.
+      const browser = await chromium.connectOverCDP(DEBUG_ENDPOINT, { timeout: 8000 });
+      return { browser, context: existingContext(browser), mode: "attached", profileDir };
+    } catch {
+      // Launching a second Chrome on the same profile would just hit the profile
+      // lock, so report the real situation instead of failing obscurely.
+      throw new Error(
+        `Chrome is running on port ${DEBUG_PORT} but isn't responding to DevTools. Close that browser window, then ask again.`
+      );
+    }
+  }
+
+  const executable = realBrowserExecutable();
+  if (!executable) {
+    throw new Error("No Chrome or Edge was found to drive. Install Chrome, or point JARVIS_CHROME_PROFILE at a profile.");
+  }
+
+  spawnChrome(executable, profileDir);
+
+  // Cold start takes a few seconds (profile load + extension init).
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    if (await debugPortUp()) {
+      const browser = await chromium.connectOverCDP(DEBUG_ENDPOINT);
+      return { browser, context: existingContext(browser), mode: "launched", profileDir };
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+
+  throw new Error(
+    `Chrome did not open its debug port on ${DEBUG_PORT}. Your normal Chrome may already be running — quit it fully (it refuses a second instance) and try again.`
+  );
 }
 
 // ─── Captcha / bot-wall detection ───────────────────────────────────
@@ -548,6 +678,8 @@ const SNAPSHOT_SCRIPT = `
 `;
 
 export async function createAgentSession(opts: SessionOptions = {}): Promise<AgentSession> {
+  // Real browser first: no stealth patch beats being genuinely signed in.
+  if (opts.realBrowser) return createRealBrowserSession(opts);
   const browser = await getBrowser(opts.headed);
   // let (not const): freshen() swaps these when a bot wall appears.
   let context = await newContext(browser, opts);
@@ -610,6 +742,87 @@ export async function createAgentSession(opts: SessionOptions = {}): Promise<Age
     },
     async close() {
       await closePage(page);
+    },
+  };
+
+  return session;
+}
+
+/**
+ * An agent session bound to the user's REAL browser.
+ *
+ * Differences from the bundled-Chromium session, and why:
+ *  - The page opens as a NEW TAB in the user's own context, so every cookie /
+ *    login they already have applies. That is what defeats the bot walls.
+ *  - The tab is left visible; the user watches the run happen.
+ *  - freshen() is a no-op: tearing down the context to dodge a bot wall would
+ *    throw away the very logins that made the session work.
+ *  - close() closes only OUR tab, never their browser.
+ */
+async function createRealBrowserSession(opts: SessionOptions): Promise<AgentSession> {
+  const { context, mode, profileDir } = await connectRealBrowser();
+  console.log(`[BrowserEngine] real browser ${mode} (profile: ${profileDir})`);
+
+  const page = await context.newPage();
+  page.setDefaultTimeout(20_000);
+  // Chrome throttles background tabs hard: timers, network and even CDP input
+  // crawl, which made navigation time out and scrolling advance once every
+  // ~7s. Bringing our tab to the front fixes both.
+  await page.bringToFront().catch(() => {});
+
+  const session: AgentSession = {
+    page,
+    async goto(url) {
+      await page.bringToFront().catch(() => {});
+      // "commit" resolves as soon as the navigation starts, which is all we need
+      // before poking at the page. Heavy SPAs (YouTube Shorts) can take far
+      // longer than a sane timeout to reach domcontentloaded.
+      await page.goto(url, { waitUntil: "commit", timeout: 30_000 }).catch(async (e) => {
+        console.warn("[BrowserEngine] real goto fell back:", e.message.split("\n")[0]);
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => {});
+      });
+      await page.waitForTimeout(1200);
+    },
+    async snapshot() {
+      const raw = await page.evaluate((s) => eval(s), SNAPSHOT_SCRIPT);
+      return JSON.parse(raw as string) as { url: string; title: string; text: string; els: PageElementRef[] };
+    },
+    url() {
+      try {
+        return page.url();
+      } catch {
+        return "";
+      }
+    },
+    // Nothing to freshen — see the note above.
+    async freshen() {
+      /* no-op on a real browser */
+    },
+    async clickRef(i) {
+      await page.click(`[data-jv="${i}"]`, { timeout: 10_000 });
+      await page.waitForTimeout(300);
+    },
+    async fillRef(i, value) {
+      await page.fill(`[data-jv="${i}"]`, value, { timeout: 10_000 });
+    },
+    async pressKey(key) {
+      await page.keyboard.press(key);
+      await page.waitForTimeout(300);
+    },
+    async screenshotJpeg() {
+      const shot = await page.screenshot({ type: "jpeg", quality: 70 });
+      return `data:image/jpeg;base64,${shot.toString("base64")}`;
+    },
+    async captcha() {
+      return detectCaptcha(page);
+    },
+    async close() {
+      // Close only the tab we opened — never the user's browser.
+      try {
+        await page.close();
+      } catch {
+        /* already gone */
+      }
     },
   };
 

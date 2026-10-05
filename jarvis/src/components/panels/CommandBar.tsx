@@ -15,6 +15,7 @@ import PersonaSwitcher from "@/components/ui/PersonaSwitcher";
 import type { Macro } from "@/lib/ghost/macroTypes";
 import { startAssemble } from "@/lib/cinematic/assembleStore";
 import { isMissionFollowup } from "@/lib/agent/followupRefs";
+import { allowsSpotifyTransport, feedScrollIntent } from "@/lib/jarvis/commandRouting";
 
 /**
  * Code Forge: route code that JARVIS wrote into the panel instead of the chat.
@@ -125,6 +126,7 @@ function matchMissionCommand(text: string): string | null {
   )
     return t;
 
+
   // 6. Multi-source price hunts / comparisons.
   if (
     /\bcompare\b[\s\S]{0,90}\b(?:and|with|vs\.?|versus|against)\b/i.test(t) ||
@@ -219,9 +221,10 @@ interface CommandBarProps {
   // Direct API Automations
   onOpenAutomation?: () => void;
   onOpenFirecrawl?: () => void;
+  onOpenMcpHub?: () => void;
 }
 
-export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRemote, onOpenTelegram, onOpenCommHub, onOpenSecurity, onOpenVault, onOpenDungeon, onOpenHabits, onOpenVoiceNotes, onOpenWeather, onOpenSpotify, onOpenNews, onOpenCalendar, onOpenAutomation }: CommandBarProps = {}) {
+export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRemote, onOpenTelegram, onOpenCommHub, onOpenSecurity, onOpenVault, onOpenDungeon, onOpenHabits, onOpenVoiceNotes, onOpenWeather, onOpenSpotify, onOpenNews, onOpenCalendar, onOpenAutomation, onOpenMcpHub }: CommandBarProps = {}) {
   const [input, setInput] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const voiceBtnRef = useRef<HTMLButtonElement>(null);
@@ -482,6 +485,46 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
       return "Opening your Second Brain. Every memory is a star — click one to see how it connects.";
     }
 
+    // ── Feed scrolling (Shorts / Reels) ───────────────────────────────────
+    // Drives the user's REAL Chrome because Shorts and Reels both bot-wall the
+    // bundled headless browser before a single video loads. Deliberately not an
+    // LLM loop — "press down, wait, repeat" needs no tokens — and it runs until
+    // stopped. The stop branch is checked FIRST so "stop scrolling reels" can
+    // never be read as a request to start.
+    if (/\b(stop|end|quit|halt|pause)\b[\s\S]{0,20}\b(scroll\w*|swip\w*|reels?|shorts?|feed)\b/i.test(text)) {
+      try {
+        const res = await fetch("/api/browser/feed", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "stop" }),
+        });
+        const data = await res.json();
+        const n = data?.stopped?.length ?? 0;
+        return n > 0 ? "Stopped scrolling, Boss." : "Nothing was scrolling, Boss.";
+      } catch {
+        return "Nothing was scrolling, Boss.";
+      }
+    }
+    {
+      const feed = feedScrollIntent(text);
+      if (feed) {
+        try {
+          const res = await fetch("/api/browser/feed", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "start", goal: text }),
+          });
+          const data = await res.json();
+          if (data.success) {
+            return `Opening ${feed.label} in your browser and scrolling, Boss — say "stop scrolling" when you're done.`;
+          }
+          return `I couldn't start scrolling ${feed.label}: ${data.error}, Boss.`;
+        } catch (e: any) {
+          return `I couldn't reach the browser, Boss. ${e?.message ?? ""}`.trim();
+        }
+      }
+    }
+
     const missionGoal = matchMissionCommand(text);
     if (missionGoal) {
       setPendingMissionGoal(missionGoal);
@@ -497,20 +540,17 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
     const spotifyOpenPlayPattern = /open\s+spotify\s+and\s+play\s+(.+)/i;
     const spotifyDesktopMatch = text.match(spotifyDesktopPattern) || text.match(spotifyOpenPlayPattern);
     if (spotifyDesktopMatch) {
-      try {
-        const response = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            messages: [{ role: "user", content: text }],
-            systemPrompt: "You are JARVIS.",
-          }),
-        });
-        const data = await response.json();
-        if (data.content) return data.content;
-      } catch (e) {
-        console.error("Spotify PyAutoGUI trigger failed:", e);
-      }
+      // Fire the server-side PyAutoGUI automation in the BACKGROUND and answer
+      // instantly. Awaiting this round-trip (and parsing an SSE body as JSON)
+      // used to add tens of seconds before the user saw anything.
+      fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: text }],
+          systemPrompt: "You are JARVIS.",
+        }),
+      }).catch((e) => console.error("Spotify PyAutoGUI trigger failed:", e));
       return `Launching Spotify and playing "${spotifyDesktopMatch[1].trim()}", Boss.`;
     }
     // ─────────────────────────────────────────────────────────────────────────
@@ -1093,8 +1133,17 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
     }
 
     // SPOTIFY CONTROLS
+    // ── Media-target guard ──────────────────────────────────────────────
+    // The transport shortcuts below act on the LOCAL Spotify client. When the
+    // user names a different destination (YouTube, Instagram, a browser, …)
+    // they must not fire — otherwise "play back-to-back songs on youtube" gets
+    // hijacked into a Spotify "previous" call that fails with the nonsense
+    // "time travel" error. One guard, applied to every transport action, so a
+    // different site or phrasing cannot regress it later.
+    const allowSpotifyTransport = allowsSpotifyTransport(lower);
+
     // Play - matches: play music, play the music, play spotify, play songs, resume music, etc.
-    if (lower.match(/\b(play( the| some)?\s+(music|song|songs|spotify|track|audio)|resume( the)?\s+(music|playback)?)\b/)) {
+    if (allowSpotifyTransport && lower.match(/\b(play( the| some)?\s+(music|song|songs|spotify|track|audio)|resume( the)?\s+(music|playback)?)\b/)) {
       try {
         const response = await fetch("/api/spotify", {
           method: "POST",
@@ -1129,7 +1178,7 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
     }
 
     // Pause - matches: pause music, pause the music, pause spotify, stop music, stop the song, etc.
-    if (lower.match(/\b(pause( the)?\s+(music|song|songs|spotify|track|playback|audio)|stop( the)?\s+(music|song|songs|spotify|track|playback|audio))\b/)) {
+    if (allowSpotifyTransport && lower.match(/\b(pause( the)?\s+(music|song|songs|spotify|track|playback|audio)|stop( the)?\s+(music|song|songs|spotify|track|playback|audio))\b/)) {
       try {
         // First check what's currently playing
         const currentResponse = await fetch("/api/spotify?action=currentTrack");
@@ -1162,7 +1211,7 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
     }
 
     // Next track - matches: next song, next track, skip song, skip track, forward, etc.
-    if (lower.match(/\b(next|skip)\s+(song|track|music|this|to the next)|(play next)\b/)) {
+    if (allowSpotifyTransport && lower.match(/\b(next|skip)\s+(song|track|music|this|to the next)|(play next)\b/)) {
       try {
         const response = await fetch("/api/spotify", {
           method: "POST",
@@ -1177,8 +1226,11 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
       return "I couldn't skip to the next track. The music has you trapped, Boss.";
     }
 
-    // Previous track - matches: previous song, previous track, go back, back, last song, etc.
-    if (lower.match(/\b(previous|last)\s+(song|track|music)|(go\s+back|play\s+back)\b/)) {
+    // Previous track - matches: previous song, previous track, go back, last song, etc.
+    // NOTE: bare "play back ..." is deliberately NOT matched — it almost always
+    // means "play this", not "previous track", so matching it hijacked ordinary
+    // playback requests ("play back-to-back songs").
+    if (allowSpotifyTransport && lower.match(/\b(previous|last)\s+(song|track|music)|\b(?:go|skip)\s+back\b/)) {
       try {
         const response = await fetch("/api/spotify", {
           method: "POST",
@@ -1420,50 +1472,143 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
       return "I couldn't calculate that, Boss.";
     }
 
-    // WHATSAPP COMMANDS
-    if (lower.includes("whatsapp") || lower.includes("whats app")) {
-      // Open WhatsApp - try desktop app first, then web
-      if (lower.includes("open") || lower.includes("show") || lower.includes("check") || lower.includes("launch")) {
-        const result = await openDesktopApp("whatsapp");
-        if (result.success) {
-          onOpenWhatsapp?.();
-          return result.method === "desktop"
-            ? "Opening WhatsApp desktop app, Boss."
-            : "Opening WhatsApp Web in browser, Boss.";
+    // WHATSAPP / MESSAGING COMMANDS
+    const isExplicitWhatsapp = lower.includes("whatsapp") || lower.includes("whats app");
+
+    // Open WhatsApp - try desktop app first, then web
+    if (isExplicitWhatsapp && (lower.includes("open") || lower.includes("show") || lower.includes("check") || lower.includes("launch"))) {
+      const result = await openDesktopApp("whatsapp");
+      if (result.success) {
+        onOpenWhatsapp?.();
+        return result.method === "desktop"
+          ? "Opening WhatsApp desktop app, Boss."
+          : "Opening WhatsApp Web in browser, Boss.";
+      }
+    }
+
+    // Natural Language WhatsApp / Messaging:
+    // Works without opening the panel. Supports phone numbers (e.g. 9606571200) or names (Mom, Rahul).
+    // Automatically composes short polite messages when context is given.
+    const isExcludedFromMessaging =
+      lower.includes("email") ||
+      lower.includes("@") ||
+      lower.includes("mail to") ||
+      lower.includes("telegram") ||
+      lower.includes("slack") ||
+      lower.startsWith("play ") ||
+      lower.startsWith("calculate ") ||
+      lower.startsWith("what is ");
+
+    const hasMessagingKeyword =
+      isExplicitWhatsapp ||
+      /^(?:hey\s+jarvis[,:]?\s*)?(?:please\s+)?(?:send|msg|message|text|tell)\b/i.test(text.trim()) ||
+      /\b(?:send\s+(?:hi|hello|hey|msg|message|text)|msg\s+to|message\s+to|text\s+to)\b/i.test(lower);
+
+    if (hasMessagingKeyword && !isExcludedFromMessaging) {
+      let parsedRecipient: string | null = null;
+      let parsedMessage: string | null = null;
+      let wasComposed = false;
+
+      // Fast Pattern 1: "send hi msg to 9606571200", "send hello to mom", "send congrats to Rahul"
+      const quickHiMatch = text.match(/^(?:hey\s+jarvis[,:]?\s*)?(?:please\s+)?(?:send|msg|message|text)\s+(hi|hello|hey|congrats|congratulations|good\s+morning|good\s+night)(?:\s+(?:msg|message))?\s+to\s+([+\d]{7,15}|[a-zA-Z\s]{2,25})\s*$/i);
+      if (quickHiMatch) {
+        parsedMessage = quickHiMatch[1].trim();
+        parsedRecipient = quickHiMatch[2].trim();
+      }
+
+      // Fast Pattern 2: "send whatsapp to 9606571200: hello" or "whatsapp mom: on my way"
+      if (!parsedRecipient && isExplicitWhatsapp) {
+        const directMatch = text.match(/(?:send\s+)?(?:whatsapp\s+)?(?:to\s+)?([+:]?\d{7,15}|[a-zA-Z\s]{2,25})[:\s]+\s*(.+)/i);
+        if (directMatch) {
+          parsedRecipient = directMatch[1].replace(/^:/, "").trim();
+          parsedMessage = directMatch[2].trim();
         }
       }
 
-      // Send WhatsApp message - matches: "send whatsapp to +1234567890: hello" or "whatsapp mom: running late"
-      const sendMatch = lower.match(/(?:send|message|msg)\s+(?:whatsapp\s+)?(?:to\s+)?([+:]?\d+|[a-z]+)[:\s]+\s*(.+)/i);
-      if (sendMatch && onOpenWhatsapp) {
-        const [, recipient, message] = sendMatch;
-
-        // If recipient is a name (not number), we need to look it up first
-        if (!/^\+?\d+$/.test(recipient)) {
-          // For now, just open WhatsApp and let user select
-          onOpenWhatsapp();
-          return `Opening WhatsApp to message ${recipient}. Please select the contact, Boss.`;
-        }
-
-        // Send to number directly
+      // High-Intelligence NLP Fallback (/api/whatsapp/nlp)
+      // Handles natural language, message composition from context, inverted syntax, etc.
+      if (!parsedRecipient || !parsedMessage) {
         try {
-          const response = await fetch("/api/whatsapp/send", {
+          const nlpRes = await fetch("/api/whatsapp/nlp", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ number: recipient, message }),
+            body: JSON.stringify({ text }),
+          });
+          const nlp = await nlpRes.json();
+          if (
+            nlp.success &&
+            (nlp.intent === "send_message" || nlp.intent === "compose_message") &&
+            nlp.recipient &&
+            nlp.message &&
+            (nlp.confidence ?? 1) >= 0.6
+          ) {
+            parsedRecipient = nlp.recipient;
+            parsedMessage = nlp.message;
+            wasComposed = nlp.intent === "compose_message";
+          }
+        } catch (e) {
+          console.error("[WhatsApp NLP] Parse error:", e);
+        }
+      }
+
+      // Dispatch if recognized
+      if (parsedRecipient && parsedMessage) {
+        const isNumber = /^[\+]?[\d\s\-()]{7,}$/.test(parsedRecipient);
+        try {
+          const response = await fetch("/api/mcp", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              mcp: "whatsapp",
+              action: "send_message",
+              params: isNumber
+                ? { recipient: parsedRecipient.replace(/[\s\-()]/g, ""), message: parsedMessage }
+                : { contact: parsedRecipient, message: parsedMessage },
+            }),
           });
           const data = await response.json();
 
           if (data.success) {
-            return `Message sent to ${recipient}, Boss.`;
+            const dest = data.data?.recipient || parsedRecipient;
+            return wasComposed
+              ? `Composed and sent to ${dest}: "${parsedMessage}", Boss.`
+              : `Message sent to ${dest}: "${parsedMessage}", Boss.`;
           } else {
-            return `Failed to send: ${data.error}, Boss.`;
+            return `Failed to send to ${parsedRecipient}: ${data.error || "WhatsApp daemon error"}, Boss.`;
           }
         } catch (e) {
           console.error("WhatsApp send failed:", e);
-          return "Couldn't send WhatsApp message, Boss.";
+          return "Couldn't send WhatsApp message, Boss. Ensure the WhatsApp daemon is running.";
         }
       }
+    }
+
+    // PROJECT DIPLOMAT VOICE CALL COMMANDS
+    // Hand the number to the MCP hub so Diplomat opens prefilled. We do NOT
+    // claim a call was placed — the user still confirms and dials.
+    const diplomatCallMatch = lower.match(/\b(?:call|phone|dial|make\s+(?:a\s+)?call\s+to|diplomat\s+call)\s+([+\d][\d\s-]{6,18}|[a-zA-Z\s]{2,20})\b/i);
+    if (diplomatCallMatch && !lower.includes("cancel") && !lower.includes("video") && !lower.includes("whatsapp")) {
+      const target = diplomatCallMatch[1].trim();
+      useJarvisStore.getState().setPendingDiplomatNumber(target);
+      setActivePanel("mcp-hub");
+      onOpenMcpHub?.();
+      return /[+\d]/.test(target)
+        ? `Opening Project Diplomat with ${target} ready, Boss. Press Start AI Call, then dial it on a phone on speaker (or share the WebRTC room) and I'll handle the talking.`
+        : "Opening Project Diplomat, Boss. I need a phone number with its country code to dial.";
+    }
+
+    // rPPG VITALS SCAN COMMANDS
+    if (lower.match(/\b(vitals|heart\s+rate|pulse\s+check|check\s+(?:my\s+)?pulse|measure\s+stress|rppg)\b/i)) {
+      setActivePanel("mcp-hub");
+      onOpenMcpHub?.();
+      return "Engaging rPPG Optical Vitals Sentinel, Boss. Align your face with the targeting reticle.";
+    }
+
+    // MARK PROTOTYPE 3D CAD COMMANDS
+    if (lower.match(/\b(mark\s+prototype|text\s+to\s+cad|3d\s+print|prototype\s+3d|design\s+3d|cad\s+model)\b/i)) {
+      setActivePanel("mcp-hub");
+      onOpenMcpHub?.();
+      return "Opening Mark Prototype CAD Engine, Boss. Ready to synthesize parametric 3D geometry.";
     }
 
     // PHONE REMOTE COMMANDS (replaces Instagram commands)
@@ -2228,12 +2373,15 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
     // Pattern 1: "search youtube for [query]", "play youtube video [query]", "find on youtube [query]"
     // Pattern 2: "play [query] on youtube"
     let youtubeQuery: string | null = null;
-
     const pattern1 = lower.match(/\b(?:search\s+youtube\s+(?:for\s+)?|play\s+(?:youtube\s+)?video\s+(?:of\s+)?|find\s+(?:on\s+)?youtube)[:\s]*(.+)/i);
     const pattern2 = lower.match(/\bplay\s+(.+?)\s+on\s+youtube/i);
-
+    // "open youtube and play <x>" / "youtube <x>" — the phrasing people actually
+    // use. The capture is optional so a bare "open youtube" (already handled by
+    // the app-open branch above) does not produce an empty search here.
+    const pattern3 = lower.match(/\b(?:open|go to|launch)\s+(?:youtube|yt)\b(?:\s*(?:and|then)\s*(?:play|watch|search(?:\s+for)?|find|show)\s*(?:me\s*)?(.+))?/i);
     if (pattern1) youtubeQuery = pattern1[1];
     else if (pattern2) youtubeQuery = pattern2[1];
+    else if (pattern3 && pattern3[1]) youtubeQuery = pattern3[1];
 
     if (youtubeQuery) {
       try {
@@ -3144,14 +3292,30 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
         }
 
         case "whatsapp_send": {
-          const { contact, message } = parsed.params;
-          if (contact) {
-            fetch("/api/playwright", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ action: "whatsapp", contact, message: message || "Hey!" }),
-            }).catch(e => console.error("WhatsApp failed:", e));
-            return `Opening WhatsApp to message "${contact}", Boss.`;
+          const rawTarget = parsed.params.recipient || parsed.params.contact || parsed.params.number || parsed.params.to;
+          const { message } = parsed.params;
+          if (rawTarget) {
+            const isNumber = /^[\+]?[\d\s\-()]{7,}$/.test(rawTarget);
+            try {
+              const res = await fetch("/api/mcp", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  mcp: "whatsapp",
+                  action: "send_message",
+                  params: isNumber
+                    ? { recipient: rawTarget.replace(/[\s\-()]/g, ""), message: message || "Hey!" }
+                    : { contact: rawTarget, message: message || "Hey!" },
+                }),
+              });
+              const json = await res.json();
+              if (json.success) {
+                return `Sent to ${json.data?.recipient || rawTarget}: "${message || "Hey!"}", Boss. Delivered via the background daemon.`;
+              }
+              return `I couldn't send that, Boss. ${json.error || "The WhatsApp daemon may be offline — start it with npm run whatsapp:server."}`;
+            } catch {
+              return "The WhatsApp daemon isn't reachable, Boss. Start it with npm run whatsapp:server.";
+            }
           }
           return "Who should I message on WhatsApp, Boss?";
         }
@@ -3185,12 +3349,22 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
         case "get_directions": {
           const { from, to } = parsed.params;
           if (from && to) {
-            fetch("/api/playwright", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ action: "directions", from, to }),
-            }).catch(e => console.error("Directions failed:", e));
-            return `Getting directions from ${from} to ${to}, Boss. Navigating now.`;
+            try {
+              const res = await fetch("/api/mcp", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ mcp: "googlemaps", action: "get_directions", params: { origin: from, destination: to } }),
+              });
+              const json = await res.json();
+              if (json.success) {
+                const d = json.data;
+                if (d.mapsUrl) window.open(d.mapsUrl, "_blank");
+                return `Route from ${d.origin} to ${d.destination}: ${d.distanceKm} km, about ${d.durationMin} min by car, Boss. Opening the map.`;
+              }
+              return `I couldn't work out that route, Boss. ${json.error || ""}`;
+            } catch {
+              return "I couldn't reach the maps service, Boss.";
+            }
           }
           return "I need a start and end location for directions, Boss.";
         }
@@ -3846,7 +4020,13 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
   }, [userName, memories, tasks, messages]);
 
   // Send message to Claude API
-  const sendToClaude = async (userMessage: string, signal?: AbortSignal, attempt = 0) => {
+  const sendToClaude = async (userMessage: string, signal?: AbortSignal) => {
+    // Client-side ceiling on the whole turn. The server already bounds itself
+    // with a 5s provider budget, but a wedged dev-server compile or a dropped
+    // socket would otherwise leave the UI in "Thinking" forever. When this
+    // fires we surface a real error instead of hanging.
+    const clientCtrl = new AbortController();
+    const clientTimer = setTimeout(() => clientCtrl.abort(), 20000);
     try {
       setState("thinking");
       setStreamingContent("");
@@ -3854,15 +4034,35 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
       const context = buildContext();
       const systemPrompt = buildSystemPrompt(context);
 
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: [...messages, { role: "user", content: userMessage }],
-          systemPrompt,
-        }),
-        signal,
-      });
+      // Fetch with one automatic retry on transient network errors (e.g. the rare
+      // browser connection-pool hiccup that produces 'Failed to fetch' before
+      // the stream even starts).  Explicit AbortErrors are NOT retried.
+      let response: Response;
+      try {
+        response = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            messages: [...messages, { role: "user", content: userMessage }],
+            systemPrompt,
+          }),
+          signal: signal ?? clientCtrl.signal,
+        });
+      } catch (fetchErr: any) {
+        if (fetchErr?.name === "AbortError") throw fetchErr; // user abort or ceiling
+        // One retry after 400ms — a brief gap to let the socket pool drain.
+        console.warn("[CommandBar] First fetch failed, retrying in 400ms:", fetchErr?.message);
+        await new Promise(r => setTimeout(r, 400));
+        response = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            messages: [...messages, { role: "user", content: userMessage }],
+            systemPrompt,
+          }),
+          signal: signal ?? clientCtrl.signal,
+        });
+      }
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
@@ -3918,6 +4118,7 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
 
       if (reader) {
         let streamError: string | null = null;
+        try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
@@ -3963,6 +4164,12 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
           }
           if (streamError) break;
         }
+        } finally {
+          // Always release the upstream socket to prevent browser connection pool exhaustion.
+          // Without this, each streaming reply holds a socket open and after 6 messages
+          // subsequent fetch calls throw 'Failed to fetch' until sockets drain.
+          reader.cancel().catch(() => {});
+        }
         if (streamError) {
           console.warn("[CommandBar] Upstream stream error:", streamError);
         }
@@ -4007,24 +4214,37 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
       const err = error as Error & { name?: string };
       // A user barge-in / panel close aborts the request — that is not a
       // failure, so stay quiet (the old generic error fired on these too).
+      // An abort raised by our own ceiling is a failure, and is reported.
       if (err?.name === "AbortError") {
+        if (!clientCtrl.signal.aborted || signal?.aborted) {
+          setState("idle");
+          return;
+        }
+        addMessage({
+          role: "assistant",
+          content:
+            "That one took too long, Boss — my providers stalled out. Give it another go and I'll route around it.",
+        });
         setState("idle");
         return;
       }
       console.error("Error sending to Claude:", error);
-      // One silent retry: dev-server compiles, a provider switching lanes, and
-      // transient network blips all used to surface as a hard failure.
-      if (attempt === 0) {
-        setTimeout(() => {
-          void sendToClaude(userMessage, signal, 1);
-        }, 800);
-        return;
-      }
+      // No silent retry. Retrying doubled a slow failure into the 30-55s
+      // "then it says it didn't go through" the user reported; the server
+      // already descends its own provider chain, so a second round trip only
+      // adds latency and burns another connection.
+      // Detect overload/rate-limit errors and show a friendlier message
+      const rawMsg = err?.message || "";
+      const isOverload = /overloaded|rate.?limit|too many requests|service temporarily/i.test(rawMsg);
       addMessage({
         role: "assistant",
-        content: `That didn't go through, Boss — ${err?.message || "the AI service looks unreachable"}. Give it a moment and try again.`,
+        content: isOverload
+          ? "My AI providers are a bit overloaded right now, Boss — give it 15–30 seconds and try again."
+          : `That didn't go through, Boss — ${rawMsg || "the AI service looks unreachable"}. Give it a moment and try again.`,
       });
       setState("idle");
+    } finally {
+      clearTimeout(clientTimer);
     }
   };
 
@@ -4395,3 +4615,4 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
     </motion.div>
   );
 }
+
