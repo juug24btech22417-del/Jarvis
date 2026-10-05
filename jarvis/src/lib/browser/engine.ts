@@ -255,6 +255,32 @@ function existingContext(browser: Browser): BrowserContext {
   return browser.contexts()[0] ?? browser.newContext({ ignoreHTTPSErrors: true });
 }
 
+/**
+ * Restore and raise the OS window owning this tab.
+ *
+ * page.bringToFront() only activates the TAB. If Chrome is minimised the user
+ * sees nothing happen at all — which is indistinguishable from "JARVIS didn't
+ * open a browser". Best-effort: window handling is never worth failing a run.
+ */
+export async function raiseBrowserWindow(page: Page): Promise<void> {
+  try {
+    const cdp = await page.context().newCDPSession(page);
+    try {
+      const { windowId } = (await cdp.send("Browser.getWindowForTarget")) as { windowId: number };
+      const info = (await cdp.send("Browser.getWindowBounds", { windowId })) as {
+        bounds?: { windowState?: string };
+      };
+      if (info?.bounds?.windowState === "minimized") {
+        await cdp.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } });
+      }
+    } finally {
+      await cdp.detach().catch(() => {});
+    }
+  } catch {
+    /* not every context allows window management */
+  }
+}
+
 export interface RealBrowserConnection {
   browser: Browser;
   context: BrowserContext;
@@ -270,18 +296,25 @@ export async function connectRealBrowser(): Promise<RealBrowserConnection> {
   const profileDir = realBrowserProfileDir();
 
   if (await debugPortUp()) {
-    try {
-      // A busy Chrome can accept the websocket and then never answer a single
-      // command, so the default 30s handshake is far too patient here.
-      const browser = await chromium.connectOverCDP(DEBUG_ENDPOINT, { timeout: 8000 });
-      return { browser, context: existingContext(browser), mode: "attached", profileDir };
-    } catch {
-      // Launching a second Chrome on the same profile would just hit the profile
-      // lock, so report the real situation instead of failing obscurely.
-      throw new Error(
-        `Chrome is running on port ${DEBUG_PORT} but isn't responding to DevTools. Close that browser window, then ask again.`
-      );
+    // A busy Chrome can accept the websocket and then never answer a single
+    // command, so the per-attempt timeout stays short — but it is retried. A
+    // single miss used to abort the whole feature with "isn't responding to
+    // DevTools" while the browser was merely mid-navigation.
+    let lastErr: unknown = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const browser = await chromium.connectOverCDP(DEBUG_ENDPOINT, { timeout: 8000 });
+        return { browser, context: existingContext(browser), mode: "attached", profileDir };
+      } catch (err) {
+        lastErr = err;
+        if (attempt < 3) await new Promise((r) => setTimeout(r, 700 * attempt));
+      }
     }
+    // Launching a second Chrome on the same profile would just hit the profile
+    // lock, so report the real situation instead of failing obscurely.
+    throw new Error(
+      `Chrome is running on port ${DEBUG_PORT} but isn't responding to DevTools (${(lastErr as Error)?.message?.split("\n")[0] ?? "timed out"}). Close that browser window, then ask again.`
+    );
   }
 
   const executable = realBrowserExecutable();
@@ -295,7 +328,7 @@ export async function connectRealBrowser(): Promise<RealBrowserConnection> {
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
     if (await debugPortUp()) {
-      const browser = await chromium.connectOverCDP(DEBUG_ENDPOINT);
+      const browser = await chromium.connectOverCDP(DEBUG_ENDPOINT, { timeout: 12_000 });
       return { browser, context: existingContext(browser), mode: "launched", profileDir };
     }
     await new Promise((r) => setTimeout(r, 500));
@@ -308,6 +341,14 @@ export async function connectRealBrowser(): Promise<RealBrowserConnection> {
 
 // ─── Captcha / bot-wall detection ───────────────────────────────────
 
+/**
+ * Bot-wall phrases, matched against what is VISIBLY on the page.
+ *
+ * Matching the raw markup used to report a wall on pages that were working
+ * perfectly: YouTube's own bundles contain the word "captcha", so every Shorts
+ * page "hit a bot wall" and the agent kept declaring one. Only rendered text
+ * counts as a wall.
+ */
 const CAPTCHA_SIGNS = [
   "enter the characters you see below",
   "type the characters you see in this image",
@@ -320,15 +361,29 @@ const CAPTCHA_SIGNS = [
   "pardon our interruption",
   "access denied",
   "you are not allowed to access",
-  "apex__", // flipkart's bot-protection cookie names appear in the wall page
   "sorry, something went wrong on our end",
   "validate your request",
+  // YouTube's logged-out interstitial — the "bot wall" Shorts actually hits. It
+  // renders on the normal /shorts URL, so a URL check alone would miss it.
+  "sign in to confirm you're not a bot",
+  "confirm you're not a bot",
 ];
+
+/**
+ * Markers that never render as text, so they can only be found in the markup
+ * (flipkart's bot-protection cookie names show up in its wall page's scripts).
+ */
+const CAPTCHA_MARKUP_SIGNS = ["apex__"];
 
 export async function detectCaptcha(page: Page): Promise<boolean> {
   try {
-    const content = (await page.content()).toLowerCase();
-    return CAPTCHA_SIGNS.some((s) => content.includes(s));
+    const visible = ((await page.evaluate(
+      () => document.body?.innerText || ""
+    )) as string).toLowerCase();
+    if (CAPTCHA_SIGNS.some((s) => visible.includes(s))) return true;
+
+    const html = (await page.content()).toLowerCase();
+    return CAPTCHA_MARKUP_SIGNS.some((s) => html.includes(s));
   } catch {
     return false;
   }
@@ -760,20 +815,23 @@ export async function createAgentSession(opts: SessionOptions = {}): Promise<Age
  *  - close() closes only OUR tab, never their browser.
  */
 async function createRealBrowserSession(opts: SessionOptions): Promise<AgentSession> {
-  const { context, mode, profileDir } = await connectRealBrowser();
+  const { browser, context, mode, profileDir } = await connectRealBrowser();
   console.log(`[BrowserEngine] real browser ${mode} (profile: ${profileDir})`);
 
   const page = await context.newPage();
   page.setDefaultTimeout(20_000);
   // Chrome throttles background tabs hard: timers, network and even CDP input
   // crawl, which made navigation time out and scrolling advance once every
-  // ~7s. Bringing our tab to the front fixes both.
+  // ~7s. Bringing our tab to the front fixes both. The window itself is
+  // restored too — a minimised Chrome looks exactly like nothing happened.
   await page.bringToFront().catch(() => {});
+  await raiseBrowserWindow(page);
 
   const session: AgentSession = {
     page,
     async goto(url) {
       await page.bringToFront().catch(() => {});
+      await raiseBrowserWindow(page);
       // "commit" resolves as soon as the navigation starts, which is all we need
       // before poking at the page. Heavy SPAs (YouTube Shorts) can take far
       // longer than a sane timeout to reach domcontentloaded.
@@ -822,6 +880,16 @@ async function createRealBrowserSession(opts: SessionOptions): Promise<AgentSess
         await page.close();
       } catch {
         /* already gone */
+      }
+      // Then drop OUR DevTools connection. Without this every run leaked a CDP
+      // socket; after a few, Chrome stopped answering new handshakes and the
+      // whole feature died with "isn't responding to DevTools". For a browser
+      // that was connected to (never launched by us) close() only disconnects,
+      // so Chrome and the user's other tabs stay exactly as they were.
+      try {
+        await browser.close();
+      } catch {
+        /* already disconnected */
       }
     },
   };

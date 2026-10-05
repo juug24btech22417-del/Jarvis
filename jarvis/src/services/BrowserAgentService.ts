@@ -76,6 +76,32 @@ const FEED_MAX_INTERVAL = 120_000;
 // for ten minutes is worse than saying so, so detect it and stop.
 const LOGIN_WALL_RE = /(\/accounts\/login|\/login|\/signin|\/sign-in|\/checkpoint|\/auth\/)/i;
 
+// YouTube hands a logged-out visitor off to Google sign-in (or /sorry/) instead
+// of playing Shorts, so the URL gives it away before the page even renders.
+const BOT_WALL_RE = /(?:accounts\.google\.com|\/sorry\/|\/recaptcha|\/challenge)/i;
+
+/**
+ * A page that is really a sign-in form or a bot check is not a feed.
+ *
+ * Returns a message to show the user, or null when the page looks scrollable.
+ * The tab is deliberately left open — the sign-in has to happen in the very
+ * window JARVIS just raised, so closing it (as this used to) made the wall
+ * impossible to clear.
+ */
+async function feedWall(session_obj: AgentSession, label: string): Promise<string | null> {
+  const url = session_obj.url();
+  if (LOGIN_WALL_RE.test(url)) {
+    return `${label} asked me to sign in. I left that page open in your browser (${url}) — sign in once there and ask me again; the login is remembered.`;
+  }
+  if (BOT_WALL_RE.test(url)) {
+    return `${label} bounced to a bot check (${url}). That page is open in your browser — clear it once and ask me again.`;
+  }
+  if (await session_obj.captcha().catch(() => false)) {
+    return `${label} is showing a bot check instead of the feed. It is open in your browser — clear it once (or sign in) and ask me again.`;
+  }
+  return null;
+}
+
 /** Start scrolling a feed in the user's real browser. Runs until stopped. */
 export async function startFeedScroll(
   input: FeedSessionInput
@@ -93,14 +119,10 @@ export async function startFeedScroll(
   const session_obj = await createAgentSession({ realBrowser: true });
   await session_obj.goto(target.url);
 
-  // Surface a sign-in wall immediately rather than "scrolling" a login form.
-  const landing = session_obj.url();
-  if (LOGIN_WALL_RE.test(landing)) {
-    await session_obj.close().catch(() => {});
-    throw new Error(
-      `${target.label} asked me to sign in (landed on ${landing}). Sign in once in that browser and ask again — the session is remembered.`
-    );
-  }
+  // Surface a wall immediately rather than "scrolling" a sign-in form. The tab
+  // stays open and in front so the user can actually clear the wall.
+  const wall = await feedWall(session_obj, target.label);
+  if (wall) throw new Error(wall);
 
   const id = `feed_${Date.now().toString(36)}`;
   const rec: FeedSession = {
@@ -149,10 +171,20 @@ async function runFeedLoop(rec: FeedSession, intervalMs = FEED_DEFAULT_INTERVAL,
             });
           }
         }
-        // Mid-scroll sign-in redirect (session expired) — stop instead of
-        // pressing the down key on a login form forever.
-        if (LOGIN_WALL_RE.test(rec.session_obj.url())) {
-          rec.lastError = "Sign-in expired — stopped scrolling.";
+        // Mid-scroll redirect (session expired, or the bot check finally
+        // served) — stop instead of pressing the down key on a login form
+        // forever. The URL checks are free; the content check walks the DOM, so
+        // it runs every third advance rather than on every 10s tick.
+        const liveUrl = rec.session_obj.url();
+        if (LOGIN_WALL_RE.test(liveUrl)) {
+          rec.lastError = "Sign-in expired — stopped scrolling. Sign in again and ask me.";
+          break;
+        }
+        if (
+          BOT_WALL_RE.test(liveUrl) ||
+          (rec.advanced % 3 === 0 && (await rec.session_obj.captcha().catch(() => false)))
+        ) {
+          rec.lastError = "A bot check appeared — stopped scrolling. Clear it once and ask me again.";
           break;
         }
       } catch (e) {

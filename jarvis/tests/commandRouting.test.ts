@@ -8,7 +8,7 @@
 //
 // Run with:  npx tsx tests/commandRouting.test.ts
 
-import { allowsSpotifyTransport } from "../src/lib/jarvis/commandRouting";
+import { allowsSpotifyTransport, isMissionControlOpen } from "../src/lib/jarvis/commandRouting";
 
 let passed = 0;
 let failed = 0;
@@ -66,6 +66,40 @@ check(
 section("allowsSpotifyTransport — empty input is safe");
 
 check('"" → false', allowsSpotifyTransport("") === false);
+
+// Regression: "open mission control" opened nothing — the phrase carries no
+// goal, so the mission matcher skipped it and no panel handler claimed it.
+section("isMissionControlOpen — opening the deck");
+
+for (const cmd of [
+  "open mission control",
+  "Open Mission Control",
+  "hey jarvis, open mission control",
+  "show me mission control",
+  "launch mission control",
+  "bring up mission control",
+  "pull up the mission control panel",
+  "go to mission control",
+  "mission control",
+]) {
+  check(`"${cmd}" → true`, isMissionControlOpen(cmd) === true);
+}
+
+section("isMissionControlOpen — real missions and other commands are untouched");
+
+for (const cmd of [
+  "mission control: find the best free react course and open the best one",
+  "open youtube and scroll shorts",
+  "open instagram and scroll reels",
+  "find the best free react course and open the best one",
+  "open the proxy panel",
+  "open the agent panel",
+  "play some music",
+  "scroll reels on instagram until I say stop",
+  "",
+]) {
+  check(`"${cmd}" → false`, isMissionControlOpen(cmd) === false);
+}
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

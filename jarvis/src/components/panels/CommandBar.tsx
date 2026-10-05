@@ -15,7 +15,7 @@ import PersonaSwitcher from "@/components/ui/PersonaSwitcher";
 import type { Macro } from "@/lib/ghost/macroTypes";
 import { startAssemble } from "@/lib/cinematic/assembleStore";
 import { isMissionFollowup } from "@/lib/agent/followupRefs";
-import { allowsSpotifyTransport, feedScrollIntent } from "@/lib/jarvis/commandRouting";
+import { allowsSpotifyTransport, feedScrollIntent, isMissionControlOpen } from "@/lib/jarvis/commandRouting";
 
 /**
  * Code Forge: route code that JARVIS wrote into the panel instead of the chat.
@@ -485,6 +485,15 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
       return "Opening your Second Brain. Every memory is a star — click one to see how it connects.";
     }
 
+    // ── Open Mission Control (the deck, not a mission) ─────────────────────
+    // Checked before the mission matcher: "open mission control" carries no
+    // goal, so it used to fall through every handler and land in chat.
+    if (isMissionControlOpen(text)) {
+      setPendingMissionGoal(null);
+      setActivePanel("mission");
+      return "Opening Mission Control, Boss.";
+    }
+
     // ── Feed scrolling (Shorts / Reels) ───────────────────────────────────
     // Drives the user's REAL Chrome because Shorts and Reels both bot-wall the
     // bundled headless browser before a single video loads. Deliberately not an
@@ -518,7 +527,9 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
           if (data.success) {
             return `Opening ${feed.label} in your browser and scrolling, Boss — say "stop scrolling" when you're done.`;
           }
-          return `I couldn't start scrolling ${feed.label}: ${data.error}, Boss.`;
+          // The API's wall messages are already full sentences aimed at the
+          // user ("sign in on the page I left open…"), so pass them straight on.
+          return data.error ? String(data.error) : `I couldn't start ${feed.label}, Boss.`;
         } catch (e: any) {
           return `I couldn't reach the browser, Boss. ${e?.message ?? ""}`.trim();
         }

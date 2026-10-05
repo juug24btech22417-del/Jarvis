@@ -478,13 +478,18 @@ class UnsupportedEncodingError extends Error {}
  * up defensively and the whole call fails safe when it (or any other codec) is
  * missing.
  */
-function decodeContent(buffer: Buffer, encoding: string): Buffer {
-  const encodings = String(encoding || "")
+/** Split a Content-Encoding header into the codec chain it describes. */
+function parseEncodings(encoding: string): string[] {
+  return String(encoding || "")
     .split(",")
     .map((e) => e.trim().toLowerCase())
     .filter((e) => e && e !== "identity");
+}
 
-  const zstdSync = (zlib as any).zstdDecompressSync ?? (zlib as any).zstdDecompress;
+function decodeContent(buffer: Buffer, encoding: string): Buffer {
+  const encodings = parseEncodings(encoding);
+
+  const zstdSync = (zlib as any).zstdDecompressSync;
 
   let out = buffer;
   // Content-Encoding lists outermost-last, so decode in reverse.
@@ -496,6 +501,21 @@ function decodeContent(buffer: Buffer, encoding: string): Buffer {
     else throw new UnsupportedEncodingError(`unsupported content-encoding: ${enc}`);
   }
   return out;
+}
+
+/**
+ * True when every codec in the chain has a decoder available locally.
+ *
+ * The response headers are flushed to the browser the moment the onResponse
+ * handler returns, so this has to be knowable *before* the body arrives. If we
+ * cannot decode, we must not claim we did.
+ */
+function canDecode(encodings: string[]): boolean {
+  return encodings.every((enc) => {
+    if (enc === "gzip" || enc === "x-gzip" || enc === "deflate" || enc === "br") return true;
+    if (enc === "zstd") return typeof (zlib as any).zstdDecompressSync === "function";
+    return false;
+  });
 }
 
 /**
@@ -604,7 +624,17 @@ export async function startProxyServer(): Promise<boolean> {
         return callback();
       }
 
-      // Disable compression so we can read/modify the raw HTML
+      // Disable compression so we can read/modify the raw HTML.
+      //
+      // This has to happen on proxyToServerRequestOptions: http-mitm-proxy
+      // snapshots the outgoing headers *before* it runs the onRequest handlers,
+      // so deleting from clientToProxyRequest here never reached the server and
+      // every page still arrived gzipped.
+      const upstreamHeaders = ctx.proxyToServerRequestOptions?.headers;
+      if (upstreamHeaders) {
+        delete upstreamHeaders["accept-encoding"];
+        delete upstreamHeaders["Accept-Encoding"];
+      }
       delete ctx.clientToProxyRequest.headers["accept-encoding"];
 
       ctx.onResponse(function (ctx: any, callback: any) {
@@ -615,13 +645,29 @@ export async function startProxyServer(): Promise<boolean> {
           return callback();
         }
 
-        // Strip the headers that would block injection. NOTE: content-encoding
-        // is deliberately left in place here — it is removed only once the body
-        // has actually been decoded. See the fail-safe below.
+        // Strip the headers that would block injection.
         delete ctx.serverToProxyResponse.headers["content-security-policy"];
         delete ctx.serverToProxyResponse.headers["content-security-policy-report-only"];
         delete ctx.serverToProxyResponse.headers["x-frame-options"];
         const contentEncoding = ctx.serverToProxyResponse.headers["content-encoding"] || "";
+        const encodings = parseEncodings(contentEncoding);
+
+        // This is the last moment the response headers can be changed: the
+        // library flushes them with writeHead() as soon as this handler calls
+        // back. Declaring the body plain text therefore has to be decided here,
+        // not in onResponseEnd — mutating content-encoding after that point is
+        // silently discarded and leaves the browser waiting on gzip bytes that
+        // will never arrive (the page just hangs).
+        if (!canDecode(encodings)) {
+          console.warn(
+            `[Proxy] Not injecting the overlay: unsupported content-encoding "${contentEncoding}" from ${host}. The page is passed through untouched.`
+          );
+          return callback();
+        }
+
+        // From here on we are replacing the body with decoded plain text, so the
+        // old encoding no longer describes what we send.
+        delete ctx.serverToProxyResponse.headers["content-encoding"];
 
         const chunks: Buffer[] = [];
 
@@ -630,37 +676,34 @@ export async function startProxyServer(): Promise<boolean> {
           return callback(null, null); // suppress direct forwarding for HTML
         });
 
-        ctx.onResponseEnd(async function (ctx: any, callback: any) {
+        ctx.onResponseEnd(function (ctx: any, callback: any) {
           const original = Buffer.concat(chunks);
-          const headers = ctx.serverToProxyResponse.headers;
 
-          // Everything below hinges on decoding correctly. If we cannot, we MUST
-          // hand back the original bytes with the original header: forwarding
-          // still-compressed bytes after stripping content-encoding — or worse,
-          // running them through a UTF-8 string — is what turned entire pages
-          // into binary garbage (Chrome 154 → zstd, which had no decoder).
-          let decoded: Buffer | null = null;
-          if (!contentEncoding || looksLikePlainText(original)) {
-            decoded = original;
-          } else {
-            try {
-              decoded = decodeContent(original, contentEncoding);
-            } catch (decodeErr: any) {
-              console.warn(
-                `[Proxy] Cannot decode "${contentEncoding}" from ${req.headers.host || "?"} — passing the body through untouched: ${decodeErr?.message}`
-              );
-            }
-          }
-
-          if (!decoded) {
-            headers["content-encoding"] = contentEncoding;
-            headers["content-length"] = String(original.length);
-            ctx.proxyToClientResponse.write(original);
+          // onResponse already stripped content-encoding, so plain UTF-8 has to
+          // come out of here no matter what happens below.
+          let html: string;
+          try {
+            html =
+              encodings.length > 0 && !looksLikePlainText(original)
+                ? decodeContent(original, contentEncoding).toString("utf8")
+                : original.toString("utf8");
+          } catch (decodeErr: any) {
+            console.error(
+              `[Proxy] Could not decode "${contentEncoding}" from ${host}: ${decodeErr?.message}`
+            );
+            ctx.proxyToClientResponse.write(
+              Buffer.from(
+                `<html><body style="font-family:system-ui,sans-serif;padding:2rem">` +
+                  `<h3>JARVIS proxy could not read this page</h3>` +
+                  `<p>The server sent <code>${contentEncoding}</code> in an unexpected format.</p>` +
+                  `<p>Reload to try again.</p></body></html>`,
+                "utf8"
+              )
+            );
             return callback();
           }
 
           try {
-            let html = decoded.toString("utf8");
             const overlayScript = getOverlayScript();
 
             if (overlayScript) {
@@ -673,24 +716,15 @@ export async function startProxyServer(): Promise<boolean> {
                 html += inlineScript;
               }
             }
-
-            const resultBuffer = Buffer.from(html, "utf8");
-            // The body is genuinely plain text now, so the old encoding no
-            // longer applies.
-            delete headers["content-encoding"];
-            headers["content-length"] = String(resultBuffer.length);
-
-            ctx.proxyToClientResponse.write(resultBuffer);
-            return callback();
           } catch (err) {
-            // Injection failed *after* a successful decode — forward the decoded
-            // text so the page still renders instead of showing garbage.
-            console.error("[Proxy] Injection failed, forwarding decoded body:", err);
-            delete headers["content-encoding"];
-            headers["content-length"] = String(decoded.length);
-            ctx.proxyToClientResponse.write(decoded);
-            return callback();
+            // A failed injection must never take the page down with it.
+            console.error("[Proxy] Overlay injection failed, serving the page without it:", err);
           }
+
+          // The body is plain UTF-8 now. http-mitm-proxy has already switched
+          // the response to chunked transfer, so Node frames it for us.
+          ctx.proxyToClientResponse.write(Buffer.from(html, "utf8"));
+          return callback();
         });
 
         return callback();

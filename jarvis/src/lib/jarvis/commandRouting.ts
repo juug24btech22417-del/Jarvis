@@ -66,6 +66,25 @@ export function feedScrollIntent(goal: string): { site: string; url: string; lab
   return { site, url, label };
 }
 
+/**
+ * "Open mission control" → bring the deck up WITHOUT starting a run.
+ *
+ * The mission matcher only fires when the sentence carries an actual goal, so a
+ * bare panel request used to fall through every handler and end up in chat.
+ * A goal attached after a colon is still a mission, not a panel open.
+ */
+export function isMissionControlOpen(command: string): boolean {
+  const t = (command || "")
+    .trim()
+    .replace(/^(?:hey\s+)?jarvis[,:]?\s*/i, "")
+    .trim();
+  if (!/\bmission\s*control\b/i.test(t)) return false;
+  // "mission control: find the best react course" is a mission.
+  if (/^mission\s*control\s*[:\u2014-]\s*\S/i.test(t)) return false;
+  if (/^(?:the\s+)?mission\s*control$/i.test(t)) return true;
+  return /^(?:please\s+)?(?:open|show|launch|bring\s+up|pull\s+up|view|display|go\s+to|take\s+me\s+to|start)\b/i.test(t);
+}
+
 /** The feed URL for an explicitly named site, or null when we have none. */
 export function feedTargetForSite(site: string): { site: string; url: string; label: string } | null {
   const key = (site || "").toLowerCase().trim();
