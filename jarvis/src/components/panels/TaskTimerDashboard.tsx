@@ -104,6 +104,14 @@ export default function TaskTimerDashboard({ isOpen, onClose, onNudge }: TaskTim
 
   const knownIds = useRef<Set<string>>(new Set());
   const primed = useRef(false);
+  // Keep onNudge in a ref so it is NOT an effect dependency. Callers pass an
+  // inline arrow (onNudge={() => setX(true)}), which gets a fresh identity on
+  // every parent render; depending on it re-subscribed this effect on each
+  // render and fired poll() repeatedly — flooding /api/tasks + /api/timer and
+  // exhausting the browser's ~6-connection-per-host pool. That is what made
+  // /api/chat fail with "Failed to fetch".
+  const onNudgeRef = useRef(onNudge);
+  useEffect(() => { onNudgeRef.current = onNudge; }, [onNudge]);
 
   // One polling loop drives both data and "new item" detection.
   useEffect(() => {
@@ -146,19 +154,21 @@ export default function TaskTimerDashboard({ isOpen, onClose, onNudge }: TaskTim
             }
           }
           knownIds.current = freshIds;
-          if (hasNew) onNudge?.();
+          if (hasNew) onNudgeRef.current?.();
         }
       } catch {
         // ignore transient errors
       }
     };
     void poll();
-    const interval = setInterval(poll, isOpen ? 1500 : 4000);
+    // Modest cadence: 5s open / 10s closed. The old 1.5s/4s (multiplied by the
+    // re-subscribe bug) was a constant multi-request-per-second flood.
+    const interval = setInterval(poll, isOpen ? 5000 : 10000);
     return () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [isOpen, onNudge]);
+  }, [isOpen]);
 
   // Fast local tick for the countdown without refetching.
   useEffect(() => {

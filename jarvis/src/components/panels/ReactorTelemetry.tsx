@@ -7,10 +7,11 @@
  * conversation "in the air".
  *
  * Replaces the Memory Bank panel:
- *   - JARVIS ↔ user messages type themselves into empty space on the LEFT,
- *     hugging the reactor's curve (floaty drift, typewriter reveal)
- *   - Conversation is scrollable (hidden scrollbar) with a floating
- *     "↓ LATEST" pill that appears when you scroll up
+ *   - JARVIS ↔ user messages render into empty space on the LEFT, hugging
+ *     the reactor's curve (only the newest reply typewrites in; older
+ *     bubbles are static so text selection stays stable)
+ *   - Conversation is natively scrollable (thin cyan scrollbar) with a
+ *     floating "↓ LATEST" pill that appears when you scroll up
  *   - Right cluster: weather, CPU/RAM, uptime — positioned against the ring
  *   - Bottom-left: session block (time, date, active, boss)
  *
@@ -65,11 +66,34 @@ function useWeather(city: string) {
 
 /* ─── Typewriter text (fast — feels like live transcription) ──────────── */
 
-function Typewriter({ text, speed = 8, className = "" }: { text: string; speed?: number; className?: string }) {
+function Typewriter({
+  text,
+  speed = 8,
+  className = "",
+  paused = false,
+}: {
+  text: string;
+  speed?: number;
+  className?: string;
+  paused?: boolean;
+}) {
   const [shown, setShown] = useState(0);
 
+  // New reply -> start the reveal again.
   useEffect(() => {
     setShown(0);
+  }, [text]);
+
+  // While the user is selecting text we INSTANTLY reveal the whole reply and
+  // stop mutating the DOM. Crucially the element itself never changes type, so
+  // React never swaps the node under the cursor - the old version replaced the
+  // typewriter with a plain <span> the moment a drag began, which dropped the
+  // selection anchor and made the browser select the entire column.
+  useEffect(() => {
+    if (paused) {
+      setShown(text.length);
+      return;
+    }
     if (!text) return;
     const t = setInterval(() => {
       setShown((n) => {
@@ -81,24 +105,39 @@ function Typewriter({ text, speed = 8, className = "" }: { text: string; speed?:
       });
     }, speed);
     return () => clearInterval(t);
-  }, [text, speed]);
+  }, [text, speed, paused]);
 
+  const visible = Math.min(shown, text.length);
   return (
     <span className={className}>
-      {text.slice(0, shown)}
-      {shown < text.length && (
-        <span className="inline-block w-[7px] animate-pulse text-cyan-300">▍</span>
+      {text.slice(0, visible)}
+      {!paused && visible < text.length && (
+        <span aria-hidden="true" className="inline-block w-[7px] animate-pulse text-cyan-300 select-none">
+          ▍
+        </span>
       )}
     </span>
   );
 }
 
-/* ─── Conversation-in-the-air (scrollable, invisible scrollbar) ───────── */
+/* ─── Conversation-in-the-air (natively scrollable + selectable) ──────── */
 
 function FloatingConversation({ isMobile = false }: { isMobile?: boolean }) {
   const messages = useJarvisStore((s) => s.messages);
   const visible = useMemo(() => messages.slice(isMobile ? -8 : -30), [messages, isMobile]);
+  // Only the newest assistant bubble types itself in. Older bubbles render as
+  // plain static text so a text selection stays stable while you drag across
+  // them — a constantly re-rendering typewriter used to invalidate the
+  // browser's selection mid-copy and dump unrelated lines onto the clipboard.
+  const lastId = visible.length ? visible[visible.length - 1].id : null;
   const [collapsed, setCollapsed] = useState(false);
+  // Freeze the newest bubble's typewriter the instant the user starts a drag.
+  // The typewriter re-renders many times a second; if one of those renders
+  // lands mid-drag, the browser drops the selection anchor and selects the
+  // WHOLE column instead of the line under the cursor. Freezing the DOM while
+  // a selection is in progress is what makes a word stay a word. We also watch
+  // `selectionchange` so keyboard selections and double-clicks freeze too.
+  const [frozen, setFrozen] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
@@ -115,16 +154,48 @@ function FloatingConversation({ isMobile = false }: { isMobile?: boolean }) {
     el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
   }, []);
 
-  // Stick to bottom on new messages (unless the user scrolled up to read).
+  // Stick to bottom ONLY when a new message arrives and the user is already
+  // at the bottom. The old version also ran whenever `atBottom` flipped and
+  // smooth-scrolled back down — so scrolling up to read an older message was
+  // instantly undone, which read as "this list can't scroll".
   useEffect(() => {
     if (atBottom) scrollToBottom(false);
-    else scrollToBottom(true);
-  }, [messages.length, atBottom, scrollToBottom]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages.length]);
 
   // Jump to bottom once mounted with history.
   useEffect(() => {
     scrollToBottom(false);
   }, [scrollToBottom]);
+
+  // A brand-new reply re-arms typing (the previous freeze was for the old one).
+  useEffect(() => {
+    setFrozen(false);
+  }, [messages.length]);
+
+  // Track any selection living inside the conversation, however it started.
+  useEffect(() => {
+    const onSelectionChange = () => {
+      const el = scrollRef.current;
+      if (!el) return;
+      const sel = window.getSelection();
+      const hasSel =
+        !!sel && sel.rangeCount > 0 && !sel.isCollapsed && sel.toString().trim().length > 0;
+      if (!hasSel) {
+        setFrozen(false);
+        return;
+      }
+      try {
+        const node = sel.getRangeAt(0).commonAncestorContainer;
+        const holder = node.nodeType === 1 ? node : node.parentNode;
+        if (holder && el.contains(holder)) setFrozen(true);
+      } catch {
+        // detached range - ignore
+      }
+    };
+    document.addEventListener("selectionchange", onSelectionChange);
+    return () => document.removeEventListener("selectionchange", onSelectionChange);
+  }, []);
 
   if (visible.length === 0) return null;
 
@@ -159,11 +230,12 @@ function FloatingConversation({ isMobile = false }: { isMobile?: boolean }) {
           <div
             ref={scrollRef}
             onScroll={measure}
-            className="no-scrollbar overflow-y-auto overscroll-contain max-h-[18vh] space-y-2 pr-1"
+            onMouseDown={() => setFrozen(true)}
+            className="custom-scrollbar overflow-y-auto overscroll-contain max-h-[18vh] space-y-2 pr-2 pointer-events-auto select-text cursor-text"
           >
             {visible.map((m) => (
-              <div key={m.id} className="text-left">
-                <div className="flex items-center gap-1.5 mb-0.5">
+              <div key={m.id} className="text-left select-text">
+                <div className="flex items-center gap-1.5 mb-0.5 select-none">
                   <span
                     className={`font-orbitron text-[8px] font-semibold tracking-wider ${
                       m.role === "assistant" ? "text-cyan-400" : "text-emerald-400"
@@ -180,14 +252,14 @@ function FloatingConversation({ isMobile = false }: { isMobile?: boolean }) {
                   </span>
                 </div>
                 <div
-                  className={`font-rajdhani text-xs leading-snug ${
+                  className={`select-text whitespace-pre-wrap break-words font-rajdhani text-xs leading-snug ${
                     m.role === "assistant"
                       ? "text-cyan-50/95"
                       : "text-emerald-50/90"
                   }`}
                 >
-                  {m.role === "assistant" ? (
-                    <Typewriter text={m.content} />
+                  {m.role === "assistant" && m.id === lastId ? (
+                    <Typewriter text={m.content} paused={frozen} />
                   ) : (
                     <span>{m.content}</span>
                   )}
@@ -201,59 +273,48 @@ function FloatingConversation({ isMobile = false }: { isMobile?: boolean }) {
   }
 
   return (
-    <div className="relative w-full">
+    <div className="relative w-full pointer-events-auto">
       <div
         ref={scrollRef}
+        data-testid="jarvis-conversation"
         onScroll={measure}
-        className="no-scrollbar overflow-y-auto overscroll-contain pointer-events-auto pr-2"
-        style={{ maxHeight: "52vh", maskImage: "linear-gradient(to bottom, transparent, black 7%, black 90%, transparent)", WebkitMaskImage: "linear-gradient(to bottom, transparent, black 7%, black 90%, transparent)" }}
+        onMouseDown={() => setFrozen(true)}
+        className="custom-scrollbar max-h-[52vh] overflow-y-auto overscroll-contain pointer-events-auto pr-3 select-text cursor-text"
       >
-        <div className="pointer-events-none">
-          <AnimatePresence initial={false} mode="popLayout">
-            {visible.map((m) => (
-              <motion.div
-                key={m.id}
-                layout="position"
-                initial={{ opacity: 0, y: 14, filter: "blur(4px)" }}
-                animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-                exit={{ opacity: 0, y: -10, filter: "blur(4px)" }}
-                transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
-                className="mb-5"
+        {visible.map((m) => (
+          <div key={m.id} className="mb-5 select-text">
+            <div className="flex items-center gap-2 mb-1 select-none">
+              <span
+                className={`font-orbitron text-[9px] tracking-[0.25em] ${
+                  m.role === "assistant" ? "text-cyan-300/80" : "text-emerald-300/70"
+                }`}
               >
-                <div className="flex items-center gap-2 mb-1">
-                  <span
-                    className={`font-orbitron text-[9px] tracking-[0.25em] ${
-                      m.role === "assistant" ? "text-cyan-300/80" : "text-emerald-300/70"
-                    }`}
-                  >
-                    {m.role === "assistant" ? "J.A.R.V.I.S" : "YOU"}
-                  </span>
-                  {/* floating timestamp — quiet, offset to the right */}
-                  <span className="font-rajdhani text-[9px] tracking-wider text-cyan-200/35 tabular-nums">
-                    {new Date(m.timestamp).toLocaleTimeString([], {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                      hour12: false,
-                    })}
-                  </span>
-                </div>
-                <div
-                  className={`font-rajdhani text-[13px] leading-relaxed ${
-                    m.role === "assistant"
-                      ? "text-cyan-50/95 drop-shadow-[0_0_12px_rgba(0,212,255,0.35)]"
-                      : "text-emerald-50/85 drop-shadow-[0_0_10px_rgba(0,255,157,0.2)]"
-                  }`}
-                >
-                  {m.role === "assistant" ? (
-                    <Typewriter text={m.content} />
-                  ) : (
-                    <span className="opacity-90">{m.content}</span>
-                  )}
-                </div>
-              </motion.div>
-            ))}
-          </AnimatePresence>
-        </div>
+                {m.role === "assistant" ? "J.A.R.V.I.S" : "YOU"}
+              </span>
+              {/* floating timestamp — quiet, offset to the right */}
+              <span className="font-rajdhani text-[9px] tracking-wider text-cyan-200/35 tabular-nums">
+                {new Date(m.timestamp).toLocaleTimeString([], {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                  hour12: false,
+                })}
+              </span>
+            </div>
+            <div
+              className={`select-text whitespace-pre-wrap break-words font-rajdhani text-[13px] leading-relaxed ${
+                m.role === "assistant"
+                  ? "text-cyan-50/95 drop-shadow-[0_0_12px_rgba(0,212,255,0.35)]"
+                  : "text-emerald-50/85 drop-shadow-[0_0_10px_rgba(0,255,157,0.2)]"
+              }`}
+            >
+              {m.role === "assistant" && m.id === lastId ? (
+                <Typewriter text={m.content} paused={frozen} />
+              ) : (
+                <span className="opacity-90">{m.content}</span>
+              )}
+            </div>
+          </div>
+        ))}
       </div>
 
       {/* Floating "latest" pill — only when scrolled away from the bottom */}
@@ -365,19 +426,22 @@ export default function ReactorTelemetry() {
   ];
 
   return (
+    // z-[35] keeps the conversation column ABOVE the fixed Widget Rail (z-30)
+    // that shares the left band. At z-20 the rail sat on top of the text, so
+    // clicks/drags/wheel never reached it and a drag selected the whole UI
+    // instead of the word under the cursor.
     <div
-      className={`fixed inset-0 z-20 pointer-events-none transition-opacity duration-1000 ${
+      className={`fixed inset-0 z-[35] pointer-events-none transition-opacity duration-1000 ${
         bootComplete ? "opacity-100" : "opacity-0"
       }`}
     >
       {/* ── Conversation pinned to the extreme left edge on desktop ── */}
-      <div className="absolute left-6 top-1/2 -translate-y-1/2 hidden lg:flex w-[15rem] flex-col">
-        <motion.div
-          animate={{ y: [0, -6, 0] }}
-          transition={{ duration: 9, repeat: Infinity, ease: "easeInOut" }}
-        >
-          <FloatingConversation isMobile={false} />
-        </motion.div>
+      {/* pointer-events-auto so the wheel scrolls this column even in the gaps
+          between bubbles. The old floating `animate` wrapper is gone: a
+          continuously-moving ancestor made text selection collapse to the
+          whole column mid-drag. */}
+      <div className="absolute left-6 top-1/2 -translate-y-1/2 hidden lg:flex w-[15rem] flex-col pointer-events-auto">
+        <FloatingConversation isMobile={false} />
       </div>
 
       {/* Mobile fallback: compact card docked neatly above CommandBar, never overlapping center ArcReactor */}

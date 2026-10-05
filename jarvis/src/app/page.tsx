@@ -2,11 +2,16 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { QrCode, Radio, Clapperboard, Scan, FileText, Brain, ListTodo } from "lucide-react";
+import { QrCode, Radio, Clapperboard, Scan, FileText, Brain, ListTodo, Ear, UserCheck, Bot, Sparkles, Layers } from "lucide-react";
 import ArcReactor from "@/components/reactor/ArcReactor";
 import AvengersAssemble from "@/components/cinematic/AvengersAssemble";
 import StatusHUD from "@/components/panels/StatusHUD";
 import DiagnosticsPanel from "@/components/panels/DiagnosticsPanel";
+import MeetingShadowPanel from "@/components/panels/MeetingShadowPanel";
+import FaceCrmPanel from "@/components/panels/FaceCrmPanel";
+import AutonomousTaskAgentPanel from "@/components/panels/AutonomousTaskAgentPanel";
+import McpHubPanel from "@/components/panels/McpHubPanel";
+import ExplainOverlay from "@/components/ui/ExplainOverlay";
 import { useWeatherAmbient } from "@/hooks/useWeatherAmbient";
 import ReactorTelemetry from "@/components/panels/ReactorTelemetry";
 import CommandBar from "@/components/panels/CommandBar";
@@ -74,42 +79,62 @@ import { useTextToSpeech } from "@/hooks/useVoice";
 
 // Boot sequence — power gate. Pure black screen; one press starts the
 // reactor assembly, the soundtrack, and the greeting in a single gesture.
-function BootSequence() {
+function BootSequence({ greeting }: { greeting?: string | null } = {}) {
   const bootComplete = useJarvisStore((s) => s.bootComplete);
   const setUserInteracted = useJarvisStore((s) => s.setUserInteracted);
   const [powered, setPowered] = useState(false);
   const [bootFinished, setBootFinished] = useState(false);
 
+  // Safety watchdog: ensure boot never hangs or stays blank
   useEffect(() => {
-    if (bootComplete && powered) {
-      const timer = setTimeout(() => setBootFinished(true), 3600);
-      return () => clearTimeout(timer);
+    if (powered && !bootFinished) {
+      const watchdog = setTimeout(() => {
+        useJarvisStore.getState().setBootComplete(true);
+        setBootFinished(true);
+      }, 5500);
+      return () => clearTimeout(watchdog);
     }
-  }, [bootComplete, powered]);
+  }, [powered, bootFinished]);
 
   const pressPower = useCallback(() => {
     if (powered) return;
     setPowered(true);
     setUserInteracted(true);
-    // Prime the speech engine inside the same gesture (autoplay policy).
     try {
       if (typeof window !== "undefined" && window.speechSynthesis) {
         window.speechSynthesis.speak(new SpeechSynthesisUtterance(""));
       }
     } catch {}
-    // Pre-warm the vision engines while the boot animation plays: both wasm
-    // runtimes + models compile in the background, so toggling air-mouse or
-    // eye control afterwards attaches to a hot engine instead of freezing
-    // mid-bootload ("air mouse took 15 minutes to load").
     import("@/hooks/useHandControl").then((m) => m.warmHandEngine()).catch(() => {});
     import("@/hooks/useEyeControl").then((m) => m.warmEyeEngine()).catch(() => {});
-    // Unlock + warm the cinematic score context in this same gesture, so the
-    // first "Avengers Assemble" can detonate instantly (autoplay policy).
     primeScore();
-    // The reactor listens for this — starts assembly + soundtrack.
     useJarvisStore.getState().startAssembly();
     window.dispatchEvent(new Event("jarvis:power-gate"));
   }, [powered, setUserInteracted]);
+
+  // Allow pressing Enter or Space anywhere to power on or Esc to skip
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+        pressPower();
+      } else if (e.key === "Escape") {
+        setPowered(true);
+        setUserInteracted(true);
+        useJarvisStore.getState().setBootComplete(true);
+        setBootFinished(true);
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [pressPower, setUserInteracted]);
+
+  const skipBoot = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setPowered(true);
+    setUserInteracted(true);
+    useJarvisStore.getState().setBootComplete(true);
+    setBootFinished(true);
+  };
 
   return (
     <AnimatePresence>
@@ -145,7 +170,7 @@ function BootSequence() {
               transition={{ delay: 1 }}
               className="mt-8 text-text-secondary/50 font-rajdhani text-sm"
             >
-              Systems online. Good {getGreeting()}, Boss.
+              {greeting || "Systems online, Boss."}
             </motion.div>
           </div>
         </motion.div>
@@ -187,8 +212,14 @@ function BootSequence() {
               transition={{ duration: 2.2, repeat: Infinity, ease: "easeInOut" }}
               className="mt-14 font-rajdhani text-xs text-white/60 tracking-[0.4em] pl-[0.4em]"
             >
-              PRESS TO POWER ON
+              PRESS OR CLICK ANYWHERE TO POWER ON
             </motion.p>
+            <button
+              onClick={skipBoot}
+              className="mt-8 px-4 py-1.5 rounded-full border border-cyan-500/30 bg-cyan-950/20 text-cyan-400/70 hover:text-cyan-300 hover:border-cyan-400 font-rajdhani text-xs tracking-widest transition-all z-20 cursor-pointer"
+            >
+              SKIP INTRO [ESC]
+            </button>
           </motion.div>
         ) : (
           /* Black flash after the press — lifts immediately so the core
@@ -236,65 +267,23 @@ async function fetchCompanionGreeting(): Promise<CompanionGreeting | null> {
   }
 }
 
-function fallbackGreeting(): string {
-  // Delegates to the legacy greeting pool so it stays as a graceful
-  // fallback when the companion API is unreachable.
-  return resolveGreeting();
-}
+function fallbackGreeting(tasks?: any[]): string {
+  // No canned pool: when the companion API is unreachable, build a real line
+  // from the current time, day, and what is actually open on the user's list.
+  const band = getGreeting();
+  const now = new Date();
+  const day = now.toLocaleDateString(undefined, { weekday: "long" });
+  const pending = (tasks || []).filter((t) => t && !t.completed).length;
 
-const GREETING_POOL = [
-  "Welcome back, Boss. Systems are operational and the core is stable.",
-  "Good {timeOfDay}, Boss. I've been refining the protocols while you were away.",
-  "At your service, Boss. All panels are online and ready for your command.",
-  "Back so soon? I was just starting to enjoy the quiet. Just kidding, Boss.",
-  "The arc reactor is at peak efficiency. Good {timeOfDay}, Boss.",
-  "I've optimized your memory buffers and cleared the cache. Welcome back, Boss.",
-  "The world hasn't ended yet, Boss. I checked while you were gone.",
-  "Protocols engaged. Everything is ready for your next project, Boss.",
-  "Good {timeOfDay}. I've prepared your dashboard with the latest data, Boss.",
-  "Systems initialized. It's good to see you, Boss. How can I assist you?",
-  "Welcome back, Boss. The Bangalore weather is currently {weather}.",
-  "Good {timeOfDay}, Boss. I've synchronized the systems with Bangalore standard time.",
-  "Systems online. It's a fine {timeOfDay} in Bangalore, wouldn't you agree, Boss?",
-  "Greetings, Boss. I see some new activity in the tech sector: {news}.",
-  "Ready for work, Boss? I've calibrated the sensors for the {weather} climate in Bangalore.",
-  "Greetings. The latest headlines are reporting that {news}. I can give you a full briefing whenever you're ready, Boss.",
-  "Still at it, Boss? It's a bit {timeOfDay}, but the systems are ready whenever you are.",
-  "Working hard, or hardly working? It's {timeOfDay} in Bangalore, Boss. I've dimmed the holographic displays for your comfort.",
-  "The city of Bangalore is quiet, but the core is humming. Good {timeOfDay}, Boss."
-];
-
-function resolveGreeting(context?: any, tasks?: any[]) {
-  const timeOfDay = getGreeting();
-  const template = GREETING_POOL[Math.floor(Math.random() * GREETING_POOL.length)];
-  
-  let greeting = template
-    .replace(/{timeOfDay}/g, timeOfDay);
-
-  if (context) {
-    greeting = greeting
-      .replace(/{weather}/g, context.weather || "clear")
-      .replace(/{news}/g, context.topNews || "the tech world is evolving");
-
-    const healthMsg = ` CPU is running at ${context.cpuTemp} degrees with ${context.memoryUsed} gigabytes of memory active. Systems are ${context.status}.`;
-    
-    // Add task info if available
-    let taskMsg = "";
-    if (tasks && tasks.length > 0) {
-      const criticalTasks = tasks.filter(t => t.priority === "critical" && !t.completed);
-      const highTasks = tasks.filter(t => t.priority === "high" && !t.completed);
-      
-      if (criticalTasks.length > 0) {
-        taskMsg = ` You have ${criticalTasks.length} critical ${criticalTasks.length === 1 ? 'task' : 'tasks'} pending, Boss. We should probably start there.`;
-      } else if (highTasks.length > 0) {
-        taskMsg = ` You have ${highTasks.length} high priority tasks to address today.`;
-      }
-    }
-
-    return greeting + healthMsg + taskMsg;
+  let line =
+    band === "late night"
+      ? `It's the middle of the night, Boss. It's ${day}.`
+      : `${band.charAt(0).toUpperCase() + band.slice(1)}, Boss. It's ${day}.`;
+  line += " Systems are online and the reactor is stable.";
+  if (pending > 0) {
+    line += ` ${pending} thing${pending === 1 ? "" : "s"} still open on your list.`;
   }
-
-  return greeting;
+  return line;
 }
 
 import { useJarvisVoice } from "@/hooks/useVoice";
@@ -371,6 +360,12 @@ export default function Home() {
   const addMessage = useJarvisStore((s) => s.addMessage);
   const { speak } = useJarvisVoice();
   const hasGreetedRef = useRef(false);
+  // The real, context-built greeting, surfaced on the boot card too so the
+  // welcome line is never a single hardcoded sentence. Fetched once when the
+  // power gate is pressed (cached in a ref) so we never ask the companion API
+  // twice for the same boot.
+  const [bootGreeting, setBootGreeting] = useState<string | null>(null);
+  const companionGreetingRef = useRef<CompanionGreeting | null>(null);
 
   // Companion: first-boot onboarding + weekly reflection state.
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
@@ -401,6 +396,20 @@ export default function Home() {
     }
   }, [bootComplete, userInteracted]);
 
+  // Power pressed -> fetch the real greeting right away so the welcome card
+  // can show it while the reactor assembles.
+  useEffect(() => {
+    if (!userInteracted || companionGreetingRef.current) return;
+    fetchCompanionGreeting()
+      .then((c) => {
+        if (c) {
+          companionGreetingRef.current = c;
+          setBootGreeting(c.greeting);
+        }
+      })
+      .catch(() => {});
+  }, [userInteracted]);
+
   useEffect(() => {
     if (bootComplete && userInteracted && !hasGreetedRef.current) {
       hasGreetedRef.current = true;
@@ -409,8 +418,9 @@ export default function Home() {
         // Personal companion greeting — built from real context: how long
         // you were away, your recent mood, open follow-up threads, and
         // late-night awareness. Falls back to the legacy pool on failure.
-        const companion = await fetchCompanionGreeting();
-        let greeting = companion?.greeting || fallbackGreeting();
+        const companion = companionGreetingRef.current ?? (await fetchCompanionGreeting());
+        let greeting = companion?.greeting || fallbackGreeting(tasks);
+        setBootGreeting((prev) => prev ?? greeting);
 
         // Keep the old critical-task awareness — JARVIS still notices
         // what's urgent, he just leads with warmth now.
@@ -549,6 +559,19 @@ export default function Home() {
     const connect = () => {
       if (cancelled) return;
       es = new EventSource("/api/events/stream");
+      // OS-wide clipboard assistant — the watcher analysed a copy made
+      // elsewhere on the laptop. Store it so the overlay can offer it. This
+      // runs before the Notification guard: the offer must not depend on
+      // notification permission.
+      es.addEventListener("jarvis:clipboard", (e: MessageEvent<string>) => {
+        try {
+          const data = JSON.parse(e.data);
+          useJarvisStore.getState().setClipboardAssist(data);
+        } catch {
+          // malformed event — skip
+        }
+      });
+
       es.addEventListener("jarvis:event", (e: MessageEvent<string>) => {
         if (Notification.permission !== "granted") return;
         try {
@@ -675,6 +698,11 @@ export default function Home() {
   const [videoDirectorOpen, setVideoDirectorOpen] = useState(false);
   const [roomScannerOpen, setRoomScannerOpen] = useState(false);
   const [whiteboardOpen, setWhiteboardOpen] = useState(false);
+  // Tier 5: Flex-Worthy & MCP Features
+  const [meetingShadowOpen, setMeetingShadowOpen] = useState(false);
+  const [faceCrmOpen, setFaceCrmOpen] = useState(false);
+  const [taskAgentOpen, setTaskAgentOpen] = useState(false);
+  const [mcpHubOpen, setMcpHubOpen] = useState(false);
 
   // Handle timer completion - speak notification
   const handleTimerComplete = useCallback((label: string) => {
@@ -717,6 +745,10 @@ export default function Home() {
     setVideoDirectorOpen(false);
     setRoomScannerOpen(false);
     setWhiteboardOpen(false);
+    setMeetingShadowOpen(false);
+    setFaceCrmOpen(false);
+    setTaskAgentOpen(false);
+    setMcpHubOpen(false);
 
     // Open the requested panel
     switch (activePanel) {
@@ -828,6 +860,22 @@ export default function Home() {
         setWhiteboardOpen(true);
         recordPanelOpen("whiteboard-ocr");
         break;
+      case "meeting-shadow":
+        setMeetingShadowOpen(true);
+        recordPanelOpen("meeting-shadow");
+        break;
+      case "face-crm":
+        setFaceCrmOpen(true);
+        recordPanelOpen("face-crm");
+        break;
+      case "task-agent":
+        setTaskAgentOpen(true);
+        recordPanelOpen("task-agent");
+        break;
+      case "mcp-hub":
+        setMcpHubOpen(true);
+        recordPanelOpen("mcp-hub");
+        break;
       case "tasks":
         // Tasks + timers share one command deck.
         setTaskDeckOpen(true);
@@ -880,7 +928,7 @@ export default function Home() {
     automationOpen, priceTrackerOpen, transcriptionOpen, playwrightOpen, proxyOpen,
     agentOpen, missionOpen, widgetsOpen, secondBrainOpen, taskDeckOpen, macroOpen, analyticsOpen,
     teleportOpen, proximityOpen, videoDirectorOpen, roomScannerOpen, whiteboardOpen,
-    firecrawlOpen,
+    firecrawlOpen, meetingShadowOpen, faceCrmOpen, taskAgentOpen, mcpHubOpen,
   ].some(Boolean);
 
   return (
@@ -889,7 +937,7 @@ export default function Home() {
       <WeatherParticles />
 
       {/* Boot sequence */}
-      <BootSequence />
+      <BootSequence greeting={bootGreeting} />
 
       {/* 3D Arc Reactor */}
       <ArcReactor />
@@ -953,6 +1001,7 @@ export default function Home() {
             onOpenVision={() => { recordPanelOpen("vision"); setVisionOpen(true); }}
             onOpenAutomation={() => { recordPanelOpen("automation"); setAutomationOpen(true); }}
             onOpenFirecrawl={() => { recordPanelOpen("firecrawl"); setFirecrawlOpen(true); }}
+            onOpenMcpHub={() => { recordPanelOpen("mcp-hub"); setMcpHubOpen(true); }}
           />
           <GestureDetector />
           <VideoPlayer />
@@ -1191,6 +1240,66 @@ export default function Home() {
               className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240] shrink-0"
             >
               <FileText className="w-5 h-5 text-purple-400 group-hover:text-purple-200 transition-colors drop-shadow-[0_0_8px_rgba(168,85,247,0.7)]" />
+            </motion.button>
+
+            {/* Real-Time Meeting Shadow launcher */}
+            <motion.button
+              whileHover={{ scale: 1.08, y: -1 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => {
+                recordPanelOpen("meeting-shadow");
+                setMeetingShadowOpen(true);
+              }}
+              title="Real-Time Meeting Shadow (Private Earpiece AI)"
+              aria-label="Meeting Shadow"
+              className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240] shrink-0 shadow-[0_0_12px_rgba(6,182,212,0.3)]"
+            >
+              <Ear className="w-5 h-5 text-cyan-400 group-hover:text-cyan-200 transition-colors drop-shadow-[0_0_8px_rgba(0,243,255,0.7)]" />
+            </motion.button>
+
+            {/* Face-to-CRM launcher */}
+            <motion.button
+              whileHover={{ scale: 1.08, y: -1 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => {
+                recordPanelOpen("face-crm");
+                setFaceCrmOpen(true);
+              }}
+              title="Face-to-CRM Secret Dossier"
+              aria-label="Face-to-CRM"
+              className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240] shrink-0 shadow-[0_0_12px_rgba(6,182,212,0.3)]"
+            >
+              <UserCheck className="w-5 h-5 text-emerald-400 group-hover:text-emerald-200 transition-colors drop-shadow-[0_0_8px_rgba(16,185,129,0.7)]" />
+            </motion.button>
+
+            {/* Autonomous Task Agent launcher */}
+            <motion.button
+              whileHover={{ scale: 1.08, y: -1 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => {
+                recordPanelOpen("task-agent");
+                setTaskAgentOpen(true);
+              }}
+              title="Autonomous Task Agent ('Just Handle It')"
+              aria-label="Autonomous Task Agent"
+              className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240] shrink-0 shadow-[0_0_12px_rgba(6,182,212,0.3)]"
+            >
+              <Bot className="w-5 h-5 text-amber-400 group-hover:text-amber-200 transition-colors drop-shadow-[0_0_8px_rgba(245,158,11,0.7)]" />
+            </motion.button>
+
+            {/* MCP Hub launcher */}
+            <motion.button
+              whileHover={{ scale: 1.08, y: -1 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => {
+                recordPanelOpen("mcp-hub");
+                setMcpHubOpen(true);
+              }}
+              title="Model Context Protocol (MCP) Hub - GitHub, Filesystem, Maps, WhatsApp"
+              aria-label="MCP Hub"
+              className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240] shrink-0 shadow-[0_0_12px_rgba(6,182,212,0.3)]"
+            >
+              <Layers className="w-5 h-5 text-purple-400 group-hover:text-purple-200 transition-colors drop-shadow-[0_0_8px_rgba(168,85,247,0.7)]" />
             </motion.button>
           </div>
           )}
@@ -1685,6 +1794,121 @@ export default function Home() {
               <WhiteboardOCRPanel onClose={() => setWhiteboardOpen(false)} />
             )}
           </AnimatePresence>
+
+          {/* Real-Time Meeting Shadow (Feature 1) */}
+          <AnimatePresence>
+            {meetingShadowOpen && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                onClick={(e) => {
+                  if (e.target === e.currentTarget) setMeetingShadowOpen(false);
+                }}
+                className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md cursor-pointer"
+              >
+                <div 
+                  onClick={(e) => e.stopPropagation()}
+                  className="w-full max-w-5xl max-h-[92vh] overflow-y-auto bg-zinc-950 rounded-2xl border border-cyan-500/40 relative custom-scrollbar cursor-default"
+                >
+                  <button
+                    onClick={() => setMeetingShadowOpen(false)}
+                    className="absolute top-4 right-4 z-20 px-3 py-1 bg-zinc-900/90 hover:bg-zinc-800 text-zinc-300 rounded-lg text-xs font-mono border border-zinc-700 hover:text-white transition-colors cursor-pointer"
+                  >
+                    CLOSE [ESC]
+                  </button>
+                  <MeetingShadowPanel />
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Face-to-CRM (Feature 2) */}
+          <AnimatePresence>
+            {faceCrmOpen && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                onClick={(e) => {
+                  if (e.target === e.currentTarget) setFaceCrmOpen(false);
+                }}
+                className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md cursor-pointer"
+              >
+                <div 
+                  onClick={(e) => e.stopPropagation()}
+                  className="w-full max-w-6xl max-h-[92vh] overflow-y-auto bg-zinc-950 rounded-2xl border border-cyan-500/40 relative custom-scrollbar cursor-default"
+                >
+                  <button
+                    onClick={() => setFaceCrmOpen(false)}
+                    className="absolute top-4 right-4 z-20 px-3 py-1 bg-zinc-900/90 hover:bg-zinc-800 text-zinc-300 rounded-lg text-xs font-mono border border-zinc-700 hover:text-white transition-colors cursor-pointer"
+                  >
+                    CLOSE [ESC]
+                  </button>
+                  <FaceCrmPanel />
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Autonomous Task Agent (Feature 5) */}
+          <AnimatePresence>
+            {taskAgentOpen && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                onClick={(e) => {
+                  if (e.target === e.currentTarget) setTaskAgentOpen(false);
+                }}
+                className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md cursor-pointer"
+              >
+                <div 
+                  onClick={(e) => e.stopPropagation()}
+                  className="w-full max-w-5xl max-h-[92vh] overflow-y-auto bg-zinc-950 rounded-2xl border border-cyan-500/40 relative custom-scrollbar cursor-default"
+                >
+                  <button
+                    onClick={() => setTaskAgentOpen(false)}
+                    className="absolute top-4 right-4 z-20 px-3 py-1 bg-zinc-900/90 hover:bg-zinc-800 text-zinc-300 rounded-lg text-xs font-mono border border-zinc-700 hover:text-white transition-colors cursor-pointer"
+                  >
+                    CLOSE [ESC]
+                  </button>
+                  <AutonomousTaskAgentPanel />
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* MCP Hub (GitHub, Filesystem, Maps, WhatsApp) */}
+          <AnimatePresence>
+            {mcpHubOpen && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                onClick={(e) => {
+                  if (e.target === e.currentTarget) setMcpHubOpen(false);
+                }}
+                className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md cursor-pointer"
+              >
+                <div 
+                  onClick={(e) => e.stopPropagation()}
+                  className="w-full max-w-5xl max-h-[92vh] overflow-y-auto bg-zinc-950 rounded-2xl border border-cyan-500/40 relative custom-scrollbar cursor-default"
+                >
+                  <button
+                    onClick={() => setMcpHubOpen(false)}
+                    className="absolute top-4 right-4 z-20 px-3 py-1 bg-zinc-900/90 hover:bg-zinc-800 text-zinc-300 rounded-lg text-xs font-mono border border-zinc-700 hover:text-white transition-colors cursor-pointer"
+                  >
+                    CLOSE [ESC]
+                  </button>
+                  <McpHubPanel />
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Instant Explain Overlay (Feature 8 - Global Hotkey & Selection) */}
+          <ExplainOverlay />
 
           {/* Sentinel Proactive Suggestion Widget */}
           <SentinelSuggestionWidget />

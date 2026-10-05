@@ -45,12 +45,12 @@ export default function WidgetRail() {
       animate={{ opacity: 1, x: 0 }}
       transition={{ duration: 0.4, delay: 0.4 }}
       data-testid="widget-rail"
-      className="hidden lg:flex fixed left-4 top-[8.5rem] bottom-28 z-30 flex-col gap-2 w-56 pointer-events-auto"
+      className="hidden lg:flex fixed left-4 top-[8.5rem] bottom-28 z-30 flex-col gap-2 w-56 pointer-events-none"
     >
       {/* The label opens the widgets panel; the chevron only folds the rail.
           This is the desktop's Widgets button — the panel itself holds every
           editor, so there is no separate launcher near the app dock. */}
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-1 pointer-events-auto">
         <button
           onClick={() => setActivePanel("widgets")}
           className="flex-1 flex items-center gap-1.5 px-2 py-1 rounded-lg border border-white/[0.07] bg-black/30 backdrop-blur-md text-[9px] font-orbitron uppercase tracking-widest text-text-secondary/70 hover:text-reactor-core hover:border-reactor-core/35 transition-colors outline-none focus-visible:!outline-none"
@@ -76,7 +76,7 @@ export default function WidgetRail() {
             animate={{ opacity: 1, height: "auto" }}
             exit={{ opacity: 0, height: 0 }}
             transition={{ duration: 0.25 }}
-            className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-2"
+            className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-2 pointer-events-none"
           >
             {widgets.length === 0 && (
               <p className="text-[9px] font-rajdhani text-text-secondary/45 px-2 leading-relaxed">
@@ -84,14 +84,14 @@ export default function WidgetRail() {
               </p>
             )}
             {widgets.slice(0, 6).map((w) => (
-              <div key={w.id} onClick={() => setActivePanel("widgets")} className="cursor-pointer" title="Open widgets">
+              <div key={w.id} onClick={() => setActivePanel("widgets")} className="cursor-pointer pointer-events-auto" title="Open widgets">
                 <WidgetCard widget={w} size="rail" />
               </div>
             ))}
             {widgets.length > 6 && (
               <button
                 onClick={() => setActivePanel("widgets")}
-                className="w-full text-[9px] font-rajdhani uppercase tracking-widest text-text-secondary/50 hover:text-reactor-core py-1"
+                className="w-full text-[9px] font-rajdhani uppercase tracking-widest text-text-secondary/50 hover:text-reactor-core py-1 pointer-events-auto"
               >
                 +{widgets.length - 6} more
               </button>

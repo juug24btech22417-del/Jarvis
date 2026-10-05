@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-const WHATSAPP_SERVER = 'http://localhost:3001';
+const WHATSAPP_SERVER = process.env.WHATSAPP_SERVER_URL || 'http://localhost:3100';
 
 // POST /api/whatsapp/reconnect - Force reconnect when stuck
 export async function POST(req: NextRequest) {

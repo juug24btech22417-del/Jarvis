@@ -21,8 +21,39 @@ import {
   maybeAutoMilestone,
 } from "@/lib/companion/journey";
 
+// Node runtime + an explicit duration ceiling. Without these, the streaming
+// reply could outlive the platform's default function budget (or, in dev, the
+// underlying socket) and the client's read loop would see a truncated stream —
+// the "failed to fetch" the user reported after a few messages.
+export const runtime = "nodejs";
+export const maxDuration = 60;
+
 // Use environment variable or default to port 3000 for the API base URL
 const API_BASE = process.env.INTERNAL_API_URL || 'http://localhost:3000';
+
+// ─── Overall reply budget ──────────────────────────────────────────
+// The whole point of this route is a fast first token. Every lane below has
+// its own (short) cap, but a dead provider chain can still add them up; this
+// shared deadline is the backstop so the user is never left waiting more than
+// a few seconds for a reply. A lane that starts inside the budget still gets
+// to finish streaming — only NEW lanes are blocked once it expires.
+// Groq takes ~250ms TTFB, Gemini ~1.5s — a 9s budget covers the full
+// context-gather + provider chain comfortably, with headroom for slow days.
+const REPLY_BUDGET_MS = 9000;
+
+/**
+ * Attach `Connection: close` to a streamed Response.
+ *
+ * Every provider stream we hand back is a live upstream socket. With the
+ * default keep-alive the browser holds that connection open after the reply
+ * finishes, and because each reply can fan out to 3-4 upstream calls the
+ * pool is exhausted after a couple of messages — subsequent `fetch`es then
+ * fail outright ("Failed to fetch") while the previous streams drain. Asking
+ * the browser to close after each reply keeps the pool clean.
+ */
+function asStreamResponse(body: ReadableStream<Uint8Array> | null): Response {
+  return new Response(body, { headers: { ...SSE_HEADERS, Connection: "close" } });
+}
 
 // Fallback persona when the client omits systemPrompt. Critically, providers
 // (notably NVIDIA NIM) reject any message whose `content` field is missing —
@@ -47,31 +78,35 @@ function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: number =
   return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
 }
 
-// Two-Stage Response Pipeline: Transform factual responses into Sassy Butler persona
-// Uses a SHORT 1.5-second timeout so offline responses are never delayed
-async function applyPersonalityWrapper(factualResponse: string, apiKey: string): Promise<string> {
-  // Skip wrapper entirely if no API key
-  if (!apiKey || apiKey.trim() === "" || apiKey === "your-api-key-here") {
+// Hard cap on a single provider lane's time-to-first-token. Anything slower
+// than this would blow the 5s reply budget on its own, so we stop waiting and
+// move down the chain instead.
+const LANE_PEEK_MS = 2000;
+
+// Two-Stage Response Pipeline: Transform factual responses into JARVIS persona
+// Uses Groq qwen3.8-27b (fastest available: ~200ms) with a SHORT timeout.
+async function applyPersonalityWrapper(factualResponse: string, _apiKey?: string): Promise<string> {
+  const groqKey = process.env.GROQ_API_KEY;
+  if (!groqKey || groqKey.trim() === "" || groqKey === "your-api-key-here") {
     return factualResponse;
   }
   try {
-    const response = await fetchWithTimeout("https://integrate.api.nvidia.com/v1/chat/completions", {
+    const response = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`,
+        "Authorization": `Bearer ${groqKey}`,
       },
       body: JSON.stringify({
-        model: process.env.NVIDIA_MODEL || "nvidia/nemotron-3-super-120b-a12b",
+        model: "qwen/qwen3.8-27b",
         messages: [
           { role: "system", content: PERSONALITY_WRAPPER_PROMPT },
           { role: "user", content: factualResponse },
         ],
         temperature: 0.75,
         max_tokens: 512,
-        chat_template_kwargs: { thinking: false },
       }),
-    }, 1500); // 1.5-second timeout — wrapper is decorative polish, must never dominate latency
+    }, 1500); // 1.5-second cap — wrapper is decorative polish, must never dominate latency
 
     if (response.ok) {
       const data = await response.json();
@@ -96,9 +131,11 @@ async function applyPersonalityWrapper(factualResponse: string, apiKey: string):
 // (thinkingBudget: 0) which kills thinking latency entirely, then transform
 // its SSE into OpenAI chat.completion chunks — the exact wire format the
 // CommandBar's stream parser already consumes.
+// gemini-3.6-flash and gemini-flash-latest removed: returned HTTP 503 and
+// consistently exceeded the 3s peek cap causing Gemini breaker to trip after
+// just 2 messages. gemini-2.5-flash verified live Oct 2026: ~1.4s TTFB.
 const GEMINI_FAST_MODELS = [
-  "gemini-3.6-flash",       // live-verified on this key: ~0.9-2.8s TTFB, thinking off
-  "gemini-flash-latest",    // alias — rotates as Google ships new versions
+  "gemini-2.5-flash",       // verified Oct 2026: ~1.4s TTFB, HTTP 200
 ];
 
 const GEMINI_BREAKER_COOLDOWN_MS = 60_000;
@@ -192,10 +229,10 @@ async function tryGeminiStream(
 
   for (const model of GEMINI_FAST_MODELS) {
     const controller = new AbortController();
-    // 6s fetch cap: Google's first byte routinely lands at 2.8-4s (and the
-    // peek below adds its own 3s deadline). The old 2.5s cap aborted
-    // healthy streams before their first token ever arrived.
-    const timeout = setTimeout(() => controller.abort(), 6000);
+    // 5s cap on time-to-headers; gemini-2.5-flash typically takes ~1.4s TTFB
+    // but can run up to 3s on busy days. The old 3s cap was tripping the
+    // circuit breaker after just 2 messages.
+    const timeout = setTimeout(() => controller.abort(), 5000);
     const t0 = Date.now();
     try {
       const r = await fetch(
@@ -224,11 +261,14 @@ async function tryGeminiStream(
         continue; // try the next model in the lane
       }
       // Disarm the fetch abort BEFORE awaiting the peek: once headers have
-      // arrived the 2.5s request cap must not kill a healthy mid-reply
-      // stream. The peek itself keeps a 2.5s deadline for the first event.
+      // arrived the request cap must not kill a healthy mid-reply stream.
+      // The peek keeps its own deadline for the first event.
       clearTimeout(timeout);
-      const peek = await peekNvidiaStream(r, 3000, controller.signal);
+      const peek = await peekNvidiaStream(r, LANE_PEEK_MS, controller.signal);
       if (!peek.ok) {
+        // Release the upstream connection — leaving this stream open while we
+        // try the next lane is what slowly exhausted the connection pool.
+        await r.body?.cancel().catch(() => {});
         console.warn(`[Chat] Gemini ${model} dead stream:`, peek.error);
         continue;
       }
@@ -236,13 +276,7 @@ async function tryGeminiStream(
       console.log(`[Chat] Gemini lane serving via ${model} (peek ${Date.now() - t0}ms)`);
       // Transform: prepend the already-consumed prefix through the converter.
       const transformed = geminiToOpenAIStream(replayableStream(peek.reader, peek.prefix));
-      return new Response(transformed, {
-        headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
-        },
-      });
+      return asStreamResponse(transformed);
     } catch (e: any) {
       clearTimeout(timeout);
       console.warn(`[Chat] Gemini ${model} failed:`, e?.name === "AbortError" ? `timeout ${Date.now() - t0}ms` : e?.message);
@@ -378,8 +412,8 @@ async function tryOneOpenRouterModel(
 ): Promise<Response> {
   // Throws on failure so Promise.any() can skip to the next winner.
   const c = new AbortController();
-  // 6s cap on time-to-headers only (cleared once the response resolves).
-  const t = setTimeout(() => c.abort(), 6000);
+  // 4s cap on time-to-headers only (cleared once the response resolves).
+  const t = setTimeout(() => c.abort(), 4000);
   let response: Response;
   try {
     response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -393,7 +427,7 @@ async function tryOneOpenRouterModel(
       // max_tokens raised (was 768): Code Forge replies embed a complete
       // single-file web app; a tight cap truncated them mid-artifact.
       // Non-code replies still stop at EOS, so this costs nothing normally.
-      body: JSON.stringify({ model, messages: orMessages, max_tokens: 4096, temperature: 0.75, stream: true }),
+      body: JSON.stringify({ model, messages: orMessages, max_tokens: 2048, temperature: 0.75, stream: true }),
       signal: c.signal,
     });
   } finally {
@@ -404,7 +438,7 @@ async function tryOneOpenRouterModel(
     throw new Error(`HTTP ${response.status}: ${errText.slice(0, 80)}`);
   }
   // Return whatever model answered first as a live SSE stream.
-  return new Response(response.body, { headers: SSE_HEADERS });
+  return asStreamResponse(response.body);
 }
 
 async function tryOpenRouterFallback(
@@ -425,13 +459,24 @@ async function tryOpenRouterFallback(
 
   try {
     // Race all models in parallel — first to return stream headers wins.
-    const winner = await Promise.any(
-      OPENROUTER_FALLBACK_MODELS.map(model =>
-        tryOneOpenRouterModel(model, orMessages, apiKey)
-          .then(r => { console.log(`[OpenRouter fallback] Won race via ${model}`); return r; })
-          .catch(e => { console.warn(`[OpenRouter fallback] ${model} failed:`, e?.message); throw e; })
-      )
+    // Keep a handle on every promise so the losers can be cancelled: a losing
+    // model has already opened a live upstream stream by the time the race is
+    // decided, and leaving those open is what exhausted the browser's
+    // connection pool after a few messages.
+    const attempts = OPENROUTER_FALLBACK_MODELS.map(model =>
+      tryOneOpenRouterModel(model, orMessages, apiKey)
+        .then(r => { console.log(`[OpenRouter fallback] Won race via ${model}`); return r; })
+        .catch(e => { console.warn(`[OpenRouter fallback] ${model} failed:`, e?.message); throw e; })
     );
+    const winner = await Promise.any(attempts);
+    // Abort the request side of the losers (their `fetch` promises reject) and
+    // release any stream that resolved after the race was decided.
+    for (const p of attempts) {
+      p.then(
+        (r) => { if (r !== winner) r.body?.cancel().catch(() => {}); },
+        () => {}
+      );
+    }
     return winner;
   } catch {
     // AggregateError — all models failed.
@@ -440,65 +485,19 @@ async function tryOpenRouterFallback(
   }
 }
 
-// Run BOTH fallback providers at once and take whichever answers first.
-// The old sequential Groq → OpenRouter chain added each hop's latency
-// (10s timeout × 4 Groq models before OpenRouter was even tried) — the
-// dev log shows the resulting 8-26 second replies. Racing them caps the
-// fallback phase at ~the slowest single provider instead of the sum.
-async function tryFallbacksInParallel(
-  messages: any[],
-  systemPrompt: string,
-  lastMessage: string,
-  stats: any
-): Promise<Response> {
-  const mapped = messages.map((m: { role: string; content: string }) => ({ role: m.role, content: m.content }));
-
-  // Hard 10s deadline for the entire fallback phase — a dead provider
-  // chain must never hold the request open past that.
-  let deadlineTimer: NodeJS.Timeout | undefined;
-  const deadline = new Promise<null>((resolve) => {
-    deadlineTimer = setTimeout(() => resolve(null), 10_000);
-  });
-
-  try {
-    const [groqRes, orRes] = await Promise.allSettled([
-      Promise.race([tryGroqFallback(mapped, systemPrompt, process.env.GROQ_API_KEY), deadline]),
-      Promise.race([tryOpenRouterFallback(mapped, systemPrompt, process.env.OPENROUTER_API_KEY), deadline]),
-    ]);
-
-    const groqVal = groqRes.status === "fulfilled" ? groqRes.value : null;
-    const orVal = orRes.status === "fulfilled" ? orRes.value : null;
-    const winner = groqVal ?? orVal;
-    if (winner) {
-      // Cancel the losing stream so we don't hold an upstream connection open
-      // for the whole reply after the race is decided.
-      if (winner !== groqVal && groqVal?.body) groqVal.body.cancel().catch(() => {});
-      if (winner !== orVal && orVal?.body) orVal.body.cancel().catch(() => {});
-      return winner;
-    }
-
-    console.warn("[Chat] All fallback providers failed — switching to offline mode");
-    const offlineResponse = generateOfflineResponse(lastMessage, "rate_limited", stats);
-    return NextResponse.json({
-      content: offlineResponse,
-      offline: true,
-    });
-  } finally {
-    if (deadlineTimer) clearTimeout(deadlineTimer);
-  }
-}
-
-// Try Groq as a third fallback after NVIDIA and OpenRouter.
+// Try Groq as a fallback after Gemini and OpenRouter.
 // Groq is fast, has a generous free tier, and uses an OpenAI-compatible API.
 // Models rotate — keep a small chain so a single rate-limit doesn't kill us.
 // https://console.groq.com — free API key, no credit card.
 // Verified live Sep 2026 (re-probed after `groq/compound-mini` began
 // returning 404 "model does not exist" — as the FIRST entry that 404
 // bailed the whole Groq chain, leaving only OpenRouter to answer).
+// Updated Oct 2026: verified live models. qwen3.8-27b is the fastest (~250ms);
+// gpt-oss models are reasoners with ~500-800ms TTFB. groq/compound removed (404).
 const GROQ_FALLBACK_MODELS = [
-  "openai/gpt-oss-20b",      // small reasoner, fast
-  "openai/gpt-oss-120b",     // bigger reasoner
-  "groq/compound",           // agentic fallback
+  "qwen/qwen3.8-27b",        // fastest: ~250ms TTFB, HTTP 200 verified Oct 2026
+  "openai/gpt-oss-120b",     // stronger reasoner: ~600ms TTFB
+  "openai/gpt-oss-20b",      // smaller reasoner: ~500ms TTFB
 ];
 
 async function tryGroqFallback(
@@ -512,7 +511,8 @@ async function tryGroqFallback(
   for (const model of GROQ_FALLBACK_MODELS) {
     try {
       const c = new AbortController();
-      const t = setTimeout(() => c.abort(), 10000);
+      // 5s cap on time-to-first-token for Groq (qwen3.8-27b typically takes <300ms)
+      const t = setTimeout(() => c.abort(), 5000);
       // Groq rejects messages with role:system when content is empty —
       // its validator complains "messages.0.content: property is
       // missing" even though OpenAI accepts the same payload. Build
@@ -541,11 +541,10 @@ async function tryGroqFallback(
           // Code Forge needs headroom for a full single-file app (see note above).
           max_tokens: 4096,
           temperature: 0.75,
-          // gpt-oss models are reasoners — keep their monologue out of the
-          // reply and stop it from eating the token budget.
+          // gpt-oss models are reasoners — keep monologue out of the reply.
+          // qwen3.8-27b is not a reasoner so reasoning_effort is harmlessly ignored.
           reasoning_effort: "low",
-          // Stream: the user sees the first tokens immediately instead of
-          // staring at a bubble until the whole answer is generated.
+          // Stream: user sees first tokens immediately.
           stream: true,
         }),
         signal: c.signal,
@@ -555,16 +554,16 @@ async function tryGroqFallback(
       if (!response.ok) {
         const errText = await response.text().catch(() => "");
         console.warn(`[Groq fallback] ${model} → HTTP ${response.status}: ${errText.slice(0, 120)}`);
-        if (response.status === 429) {
-          // Rate-limited — try the next model in our chain.
+        if (response.status === 429 || response.status === 404) {
+          // Rate-limited or model not found — try the next model.
           continue;
         }
-        // Bad model, auth error, or server issue — bail out, the chain is broken.
+        // Auth error or server issue — bail out, the chain is broken.
         return null;
       }
 
       console.log(`[Groq fallback] Streaming via ${model}`);
-      return new Response(response.body, { headers: SSE_HEADERS });
+      return asStreamResponse(response.body);
     } catch (e: any) {
       console.warn(`[Groq fallback] ${model} fetch failed:`, e?.name || e?.message);
       continue;
@@ -2256,7 +2255,17 @@ const emailProgrammaticMatch =
       }
     }
 
-    const shouldSearch = hasSerperApi && generalKnowledgePatterns.some(pattern => pattern.test(lastMessage));
+    // Search is an EXPLICIT action, not a default for every question. The old
+    // rule fired on any "what is / how do / who is" phrasing and answered from
+    // whatever Google returned — so "what is 2+2" got a random snippet instead
+    // of a real reply, and every general question skipped the LLM entirely.
+    // Now only genuine search / current-events requests hit Serper; everything
+    // else falls through to the (fast) LLM lanes.
+    const explicitSearchRequest =
+      /\b(search(?:\s+for|\s+the\s+web)?|look\s*up|google|find\s+(?:me\s+)?(?:info|information)|latest\s+news|top\s+news|news\s+(?:about|on|in|today)|what'?s\s+(?:happening|new)|current\s+events?|stock\s+price|weather\s+forecast)\b/i.test(
+        lastMessage
+      );
+    const shouldSearch = hasSerperApi && explicitSearchRequest;
 
     if (shouldSearch) {
       try {
@@ -2305,46 +2314,40 @@ const emailProgrammaticMatch =
       }
     }
 
+    // Only intercept truly simple queries that don't need an LLM (time, date, coin, dice).
+    // Removed: 'open/launch/start', 'status/how are you', 'volume', 'brightness', 'who are you', etc.
+    // — these were sending JARVIS offline responses for queries the LLM handles better.
     const offlinePatterns = [
       /what'?s?\s*time|current\s*time|time\s*is\s*it|tell\s*me\s*the\s*time|what\s*time/,
       /^(what'?s?\s*)?(today'?s?\s*)?date|what\s*day\s+is\s+it|current\s*date$/,
-      /joke|funny|make me laugh|tell.*joke/,
-      /quote|motivate|inspiration|inspire/,
       /flip a coin|coin flip|heads or tails/,
-      /roll a dice?|roll die|random number/,
-      /open|launch|start/,
-      /play music|pause|resume|stop music/,
-      /volume|mute|unmute/,
-      /brightness|screen/,
-      /add task|remind me to|remember that/,
-      /calculate|compute/,
-      /status|how are you/,
+      /roll a dice?|roll die/,
       /^help$/,
-      /who are you|what are you/,
-      /bye|goodbye/,
-      /timer|countdown/,
     ];
 
     const shouldUseOffline = offlinePatterns.some(pattern => pattern.test(lastMessage));
 
     if (shouldUseOffline) {
       const rawOfflineResponse = generateOfflineResponse(lastMessage, "no_llm", stats);
-      const wrappedResponse = await applyPersonalityWrapper(rawOfflineResponse, nvidiaApiKey || "");
+      const wrappedResponse = await applyPersonalityWrapper(rawOfflineResponse);
       return NextResponse.json({
         content: wrappedResponse,
         offline: true,
       });
     }
 
-    if (!useNvidia && !useAnthropic) {
-      // LLM is dead — before falling back to a canned offline response,
-      // try the live Gmail inbox shortcut so "summarise my inbox" still
-      // works even when every provider is down.
+    // Gate: only bail to offline mode if NONE of Groq, Gemini, or Anthropic are available.
+    // Previously this gate checked !useNvidia && !useAnthropic, which skipped the
+    // Groq and Gemini lanes entirely when the NVIDIA key was empty/invalid.
+    const hasGroq = !!process.env.GROQ_API_KEY && process.env.GROQ_API_KEY !== "your-api-key-here";
+    const hasGemini = !!process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== "your-api-key-here";
+    if (!hasGroq && !hasGemini && !useAnthropic) {
+      // All LLM providers unavailable — try Gmail shortcut then serve offline.
       const inboxResp = await tryLiveInboxShortcut(lastMessage);
       if (inboxResp) return inboxResp;
 
       const rawResponse = generateOfflineResponse(lastMessage, "no_llm", stats);
-      const wrappedResponse = await applyPersonalityWrapper(rawResponse, nvidiaApiKey || "");
+      const wrappedResponse = await applyPersonalityWrapper(rawResponse);
       return NextResponse.json({
         content: wrappedResponse,
         offline: true,
@@ -2403,21 +2406,46 @@ const emailProgrammaticMatch =
       }
     }
 
-    // Gemini is fallback #2 — called ONLY when NVIDIA fails (hang/rate
-    // limit/dead stream). Strict order: NVIDIA → Gemini → Groq+OpenRouter
-    // race. No racing between the first two lanes.
+    // ── Provider order ────────────────────────────────────────────
+    // NEW ORDER (Oct 2026): Groq → Gemini → NVIDIA (disabled) → offline.
+    //
+    // Why:
+    //   1. Groq qwen/qwen3.8-27b: ~250ms TTFB — the absolute fastest option.
+    //   2. Gemini 2.5 Flash: ~1.4s TTFB — reliable second lane.
+    //   3. OpenRouter free tier: ALL models are 429 rate-limited (daily cap hit).
+    //   4. NVIDIA nemotron-3-super-120b-a12b: HTTP 410 Gone (EOL 2026-10-03).
+    //
+    // A 9s shared budget covers Groq+Gemini gracefully even on slow days.
     const geminiMaxTokens = isCodeForgeRequest ? 8192 : 2048;
+    const replyDeadline = Date.now() + REPLY_BUDGET_MS;
+    const withinBudget = () => Date.now() < replyDeadline;
+    const budgetLeft = () => Math.max(0, replyDeadline - Date.now());
 
-    if (useNvidia) {
-      // Circuit breaker: after repeated failures don't even knock on
-      // NVIDIA's door — go straight to the parallel fallbacks. This is
-      // what turns a 10s silence into a sub-2s reply during an outage.
-      if (!isNvidiaOpen()) {
-        console.warn("[Chat] NVIDIA breaker open — trying Gemini, then fallback race");
-        const geminiResp = await tryGeminiStream(messages, enhancedSystemPrompt, geminiMaxTokens);
-        if (geminiResp) return geminiResp;
-        return await tryFallbacksInParallel(messages, enhancedSystemPrompt, lastMessage, stats);
-      }
+    // 1) Groq — LIGHTNING fast primary (qwen3.8-27b: ~250ms TTFB verified).
+    if (withinBudget() && process.env.GROQ_API_KEY) {
+      const groqResp = await tryGroqFallback(messages, enhancedSystemPrompt, process.env.GROQ_API_KEY);
+      if (groqResp) return groqResp;
+    }
+
+    // 2) Gemini 2.5 Flash — reliable secondary (~1.4s TTFB verified).
+    if (withinBudget()) {
+      const geminiResp = await tryGeminiStream(messages, enhancedSystemPrompt, geminiMaxTokens);
+      if (geminiResp) return geminiResp;
+    } else {
+      console.warn("[Chat] Reply budget spent before Gemini — serving offline reply");
+    }
+
+    // 3) OpenRouter — last-chance (all free models are 429 rate-limited as of
+    //    Oct 2026 daily cap; keeping for when it resets or paid credits added).
+    if (withinBudget() && process.env.OPENROUTER_API_KEY) {
+      const orResp = await tryOpenRouterFallback(messages, enhancedSystemPrompt, process.env.OPENROUTER_API_KEY);
+      if (orResp) return orResp;
+    }
+
+    // 4) NVIDIA NIM — last resort. The circuit breaker skips it entirely while
+    //    it is known-bad, so a dead NVIDIA never adds latency to a reply that
+    //    the lanes above can already serve.
+    if (withinBudget() && useNvidia && isNvidiaOpen()) {
       try {
         const response = await fetchWithTimeout("https://integrate.api.nvidia.com/v1/chat/completions", {
           method: "POST",
@@ -2448,47 +2476,32 @@ const emailProgrammaticMatch =
             // thinking phase doubles latency. Thinking off ≈ 1s first token.
             chat_template_kwargs: { thinking: false },
           }),
-        }, 3000); // 3s cap on time-to-headers — with thinking off, first token lands in ~1s.
+        }, Math.min(3000, budgetLeft() || 1)); // never outlive the reply budget
 
-        if (!response.ok) {
-          const errorText = await response.text();
+        if (response.ok) {
+          // Peek the first SSE event before committing. A 200 can still carry
+          // an in-band error ("Service temporarily overloaded") — without this
+          // check the user waits ~10s then sees nothing.
+          const peek = await peekNvidiaStream(response, LANE_PEEK_MS);
+          if (peek.ok) {
+            recordNvidiaSuccess();
+            return asStreamResponse(replayableStream(peek.reader, peek.prefix));
+          }
+          // Release the dead upstream stream before moving on.
+          await response.body?.cancel().catch(() => {});
           recordNvidiaFailure();
-          console.error("NVIDIA API error:", response.status, errorText.slice(0, 120), "- trying Gemini, then fallback race");
-          const geminiResp = await tryGeminiStream(messages, enhancedSystemPrompt, geminiMaxTokens);
-          if (geminiResp) return geminiResp;
-          return await tryFallbacksInParallel(messages, enhancedSystemPrompt, lastMessage, stats);
-        }
-
-        // Peek the first SSE event before committing. A 200 can still carry
-        // an in-band error ("Service temporarily overloaded") — without this
-        // check the user waits ~10s then sees nothing.
-        const peek = await peekNvidiaStream(response);
-        if (!peek.ok) {
+          console.warn("[Chat] NVIDIA stream dead on arrival:", peek.error);
+        } else {
+          const errorText = await response.text().catch(() => "");
           recordNvidiaFailure();
-          console.warn("[Chat] NVIDIA stream dead on arrival:", peek.error, "- trying Gemini, then fallback race");
-          const geminiResp = await tryGeminiStream(messages, enhancedSystemPrompt, geminiMaxTokens);
-          if (geminiResp) return geminiResp;
-          return await tryFallbacksInParallel(messages, enhancedSystemPrompt, lastMessage, stats);
+          console.error("NVIDIA API error:", response.status, errorText.slice(0, 120));
         }
-        recordNvidiaSuccess();
-
-        return new Response(replayableStream(peek.reader, peek.prefix), {
-          headers: {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            Connection: "keep-alive",
-          },
-        });
       } catch (fetchError: any) {
         recordNvidiaFailure();
-        if (fetchError?.name === 'AbortError') {
-          console.error("NVIDIA API timed out (3s) — trying Gemini, then fallback race");
-        } else {
-          console.error("Network error calling NVIDIA API:", fetchError, "- trying Gemini, then fallback race");
-        }
-        const geminiResp = await tryGeminiStream(messages, enhancedSystemPrompt, geminiMaxTokens);
-        if (geminiResp) return geminiResp;
-        return await tryFallbacksInParallel(messages, enhancedSystemPrompt, lastMessage, stats);
+        console.error(
+          "[Chat] NVIDIA lane failed:",
+          fetchError?.name === "AbortError" ? "timeout" : fetchError?.message
+        );
       }
     }
 
@@ -2522,17 +2535,12 @@ const emailProgrammaticMatch =
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error("Claude API error:", response.status, errorText, "- Trying OpenRouter → Groq fallback");
-        return await tryFallbacksInParallel(messages, enhancedSystemPrompt, lastMessage, stats);
+        console.error("Claude API error:", response.status, errorText, "- serving offline reply");
+        const offlineResponse = generateOfflineResponse(lastMessage, "rate_limited", stats);
+        return NextResponse.json({ content: offlineResponse, offline: true });
       }
 
-      return new Response(response.body, {
-        headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
-        },
-      });
+      return asStreamResponse(response.body);
     } catch (fetchError: any) {
       if (fetchError?.name === 'AbortError') {
         console.error("Claude API timed out (8s) — falling back to offline mode");

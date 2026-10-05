@@ -62,3 +62,30 @@ export function subscribeEvents(
   bus().addEventListener("jarvis:event", listener);
   return () => bus().removeEventListener("jarvis:event", listener);
 }
+
+/* ─── Clipboard assistant channel ─────────────────────────────────────────
+ * The OS-wide clipboard watcher POSTs each new copy; the route analyses it
+ * and publishes here, the SSE endpoint forwards it as `jarvis:clipboard`,
+ * and the browser turns it into the floating "answer ready" offer. */
+export interface ClipboardAssistEvent {
+  id: string;
+  /** Raw text that was copied. */
+  text: string;
+  /** Foreground app/window the copy came from (best effort, may be empty). */
+  source?: string;
+  /** Result of analyzeSnippet — kept loose to avoid a type-import cycle. */
+  analysis: Record<string, any>;
+  at: number;
+}
+
+export function publishClipboardEvent(event: ClipboardAssistEvent): void {
+  bus().dispatchEvent(new CustomEvent("jarvis:clipboard", { detail: event }));
+}
+
+export function subscribeClipboardEvents(
+  handler: (event: ClipboardAssistEvent) => void
+): () => void {
+  const listener = (e: Event) => handler((e as CustomEvent<ClipboardAssistEvent>).detail);
+  bus().addEventListener("jarvis:clipboard", listener);
+  return () => bus().removeEventListener("jarvis:clipboard", listener);
+}

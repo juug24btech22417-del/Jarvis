@@ -59,6 +59,13 @@ h1, h2, h3, h4, h5, h6, p, span, div {
   color: var(--text-primary);
 }
 
+button, [role="button"], input[type="button"], input[type="submit"] {
+  cursor: pointer;
+}
+button:disabled, [role="button"]:disabled {
+  cursor: not-allowed;
+}
+
 .text-secondary {
   color: var(--text-secondary) !important;
 }

@@ -52,6 +52,16 @@ export interface Memory {
   source: string;
 }
 
+/** Result of an OS-wide clipboard capture, handed to the in-browser overlay. */
+export interface ClipboardAssist {
+  id: string;
+  text: string;
+  /** Foreground app/window the copy came from (best effort, may be empty). */
+  source?: string;
+  analysis: Record<string, any>;
+  at: number;
+}
+
 interface JarvisStore {
   // Core state
   state: JarvisState;
@@ -146,7 +156,7 @@ interface JarvisStore {
   pulseReactor: () => void;
 
   // UI
-  activePanel: "chat" | "tasks" | "memory" | "notes" | "code" | "skill-trainer" | "image-generator" | "summarizer" | "web-scraper" | "firecrawl" | "playwright" | "whatsapp" | "phone-remote" | "telegram" | "security" | "vault" | "dungeon" | "habits" | "time-capsule" | "voice-notes" | "nasa" | "huggingface" | "ifttt" | "browser" | "local-llm" | "vision" | "automation" | "price-tracker" | "transcription" | "proxy" | "agent" | "mission" | "analytics" | "macros" | "qr-teleporter" | "proximity-scanner" | "video-director" | "room-scanner" | "whiteboard-ocr" | "widgets" | "second-brain" | null;
+  activePanel: "chat" | "tasks" | "memory" | "notes" | "code" | "skill-trainer" | "image-generator" | "summarizer" | "web-scraper" | "firecrawl" | "playwright" | "whatsapp" | "phone-remote" | "telegram" | "security" | "vault" | "dungeon" | "habits" | "time-capsule" | "voice-notes" | "nasa" | "huggingface" | "ifttt" | "browser" | "local-llm" | "vision" | "automation" | "price-tracker" | "transcription" | "proxy" | "agent" | "mission" | "analytics" | "macros" | "qr-teleporter" | "proximity-scanner" | "video-director" | "room-scanner" | "whiteboard-ocr" | "widgets" | "second-brain" | "meeting-shadow" | "face-crm" | "task-agent" | "explain-overlay" | "mcp-hub" | null;
   setActivePanel: (panel: JarvisStore["activePanel"]) => void;
   /** Goal typed/voiced elsewhere that Mission Control should run on open. */
   pendingMissionGoal: string | null;
@@ -154,6 +164,9 @@ interface JarvisStore {
   /** Natural-language widget request typed elsewhere; the Widgets panel builds it on open. */
   pendingWidgetPrompt: string | null;
   setPendingWidgetPrompt: (prompt: string | null) => void;
+  /** Phone number a voice/text command asked Diplomat to dial on open. */
+  pendingDiplomatNumber: string | null;
+  setPendingDiplomatNumber: (number: string | null) => void;
   showBriefing: boolean;
   setShowBriefing: (show: boolean) => void;
 
@@ -193,6 +206,10 @@ interface JarvisStore {
   activeSuggestion: SentinelSuggestion | null;
   setActiveSuggestion: (suggestion: SentinelSuggestion | null) => void;
   clearActiveSuggestion: () => void;
+
+  // OS-wide clipboard assistant — latest captured clip + its smart analysis.
+  clipboardAssist: ClipboardAssist | null;
+  setClipboardAssist: (assist: ClipboardAssist | null) => void;
 }
 
 export const useJarvisStore = create<JarvisStore>((set) => ({
@@ -237,7 +254,7 @@ export const useJarvisStore = create<JarvisStore>((set) => ({
   setIsListening: (isListening) => set({ isListening }),
   alwaysListening: true,
   setAlwaysListening: (alwaysListening) => set({ alwaysListening }),
-  sentinelActive: true, // "Sentinel Eyes" passive vision
+  sentinelActive: false, // "Sentinel Eyes" passive vision - OFF until armed
   setSentinelActive: (sentinelActive) => set({ sentinelActive }),
   biometricActive: false, // "Biometric" face recognition
   setBiometricActive: (biometricActive) => set({ biometricActive }),
@@ -327,6 +344,8 @@ export const useJarvisStore = create<JarvisStore>((set) => ({
   setPendingMissionGoal: (pendingMissionGoal) => set({ pendingMissionGoal }),
   pendingWidgetPrompt: null,
   setPendingWidgetPrompt: (pendingWidgetPrompt) => set({ pendingWidgetPrompt }),
+  pendingDiplomatNumber: null,
+  setPendingDiplomatNumber: (pendingDiplomatNumber) => set({ pendingDiplomatNumber }),
   showBriefing: false,
   setShowBriefing: (showBriefing) => set({ showBriefing }),
 
@@ -370,4 +389,8 @@ export const useJarvisStore = create<JarvisStore>((set) => ({
   activeSuggestion: null,
   setActiveSuggestion: (activeSuggestion) => set({ activeSuggestion }),
   clearActiveSuggestion: () => set({ activeSuggestion: null }),
+
+  // OS-wide clipboard assistant
+  clipboardAssist: null,
+  setClipboardAssist: (clipboardAssist) => set({ clipboardAssist }),
 }));

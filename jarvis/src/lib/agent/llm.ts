@@ -1,7 +1,7 @@
 // Shared multi-provider LLM helper for the agent subsystems (browser agent,
 // follow-up chat, video brief). Mirrors the provider strategy in
-// AgentService.llmRace — Gemini → Groq → OpenRouter → NVIDIA, launched with
-// a stagger so a dead first provider never blocks the whole call.
+// AgentService.llmRace — Gemini → OpenRouter → Groq → NVIDIA NIM (last),
+// launched with a stagger so a dead first provider never blocks the whole call.
 
 import {
   GEMINI_PLANNER_MODEL,
@@ -112,7 +112,7 @@ export async function agentLlm(opts: AgentLlmOptions): Promise<string> {
   }
   if (nimKey) byProvider.nvidia.push(() => attempt("nvidia", NIM_URL, nimKey, NIM_MODEL));
 
-  const defaultOrder: LlmProviderName[] = ["gemini", "groq", "openrouter", "nvidia"];
+  const defaultOrder: LlmProviderName[] = ["gemini", "openrouter", "groq", "nvidia"];
   const order = opts.providerOrder && opts.providerOrder.length > 0
     ? [...opts.providerOrder, ...defaultOrder.filter((p) => !opts.providerOrder!.includes(p))]
     : defaultOrder;

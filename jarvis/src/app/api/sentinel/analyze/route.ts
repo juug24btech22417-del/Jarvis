@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { callJsonLlm } from "@/lib/llm/fastJson";
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
@@ -155,44 +156,16 @@ async function tryNvidiaVision(imageBase64: string): Promise<string> {
  * Uses a text-only LLM to analyze active window/process info.
  */
 async function tryTextAnalysis(desktopContext: string): Promise<string> {
-  if (!OPENROUTER_API_KEY || OPENROUTER_API_KEY === "your-api-key-here") {
-    throw new Error("OPENROUTER_API_KEY not configured");
-  }
-
-  for (const model of OPENROUTER_TEXT_MODELS) {
-    try {
-      const res = await fetch(OPENROUTER_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-          "HTTP-Referer": "https://jarvis.local",
-          "X-Title": "JARVIS Sentinel",
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            {
-              role: "user",
-              content: `${SENTINEL_TEXT_PROMPT}\n\n--- DESKTOP SNAPSHOT ---\n${desktopContext}`,
-            },
-          ],
-          max_tokens: 450,
-          temperature: 0.2,
-        }),
-        signal: AbortSignal.timeout(16000),
-      });
-
-      if (!res.ok) continue;
-
-      const data = await res.json();
-      const content = data.choices?.[0]?.message?.content?.trim();
-      if (content) return content;
-    } catch {
-      continue;
-    }
-  }
-
+  // OpenRouter's free text tier is daily-capped (429), so the text lane runs
+  // on Gemini + Groq instead — raced in parallel for the fastest valid answer.
+  const parsed = await callJsonLlm<{ comment?: string; action?: unknown }>({
+    system: SENTINEL_TEXT_PROMPT,
+    user: `--- DESKTOP SNAPSHOT ---\n${desktopContext}`,
+    maxTokens: 450,
+    temperature: 0.2,
+    label: "SentinelText",
+  });
+  if (parsed?.comment) return JSON.stringify(parsed);
   throw new Error("All text models failed");
 }
 
@@ -302,38 +275,109 @@ export async function POST(req: NextRequest) {
     let rawOutput: string | null = null;
     let successfulModel = "";
 
-    // 1. Try OpenRouter vision models in priority order
-    for (const model of OPENROUTER_VISION_MODELS) {
+    // 0. If a desktop-context snapshot is available, answer from it FIRST.
+    //    It is fast and reliable, and avoids burning seconds on the (often
+    //    daily-capped) OpenRouter vision tier before falling back anyway.
+    if (desktopContext) {
       try {
-        console.log(`[Sentinel] Attempting analysis with ${model}...`);
-        rawOutput = await tryOpenRouterVision(imageBase64, model);
-        successfulModel = model;
-        console.log(`[Sentinel] Success with ${model}`);
-        break;
-      } catch (err: any) {
-        console.warn(`[Sentinel] Model ${model} failed:`, err?.message || err);
+        rawOutput = await tryTextAnalysis(desktopContext);
+        successfulModel = "text-fallback";
+      } catch (textErr: any) {
+        console.warn("[Sentinel] Text analysis failed:", textErr?.message);
       }
     }
 
-    // 2. If OpenRouter models failed, try NVIDIA NIM as secondary fallback
-    if (!rawOutput && NVIDIA_API_KEY) {
+    // 1. Gemini 2.5 Flash vision — reliable, fast, and free-tier available.
+    try {
+      const gKey = process.env.GEMINI_API_KEY;
+      if (gKey && gKey !== "your-api-key-here") {
+        console.log("[Sentinel] Attempting analysis with Gemini vision...");
+        const clean = imageBase64.replace(/^data:image\/\w+;base64,/, "");
+        const gRes = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${process.env.GEMINI_VISION_MODEL || "gemini-2.5-flash"}:generateContent?key=${gKey}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            signal: AbortSignal.timeout(9000),
+            body: JSON.stringify({
+              generationConfig: { responseMimeType: "application/json", thinkingConfig: { thinkingBudget: 0 } },
+              contents: [
+                {
+                  parts: [
+                    { text: SENTINEL_SYSTEM_PROMPT },
+                    { inlineData: { mimeType: "image/png", data: clean } },
+                  ],
+                },
+              ],
+            }),
+          }
+        );
+        if (gRes.ok) {
+          const gData = await gRes.json();
+          const text = gData.candidates?.[0]?.content?.parts
+            ?.map((p: { text?: string }) => p.text ?? "")
+            .join("");
+          if (text) {
+            rawOutput = text;
+            successfulModel = "gemini-vision";
+          }
+        } else {
+          console.warn(`[Sentinel] Gemini vision HTTP ${gRes.status}`);
+        }
+      }
+    } catch (gErr: any) {
+      console.warn("[Sentinel] Gemini vision failed:", gErr?.message || gErr);
+    }
+
+    // 2. OpenRouter vision models as a secondary attempt. Stop as soon as a
+    //    model reports 429 — the whole free tier is daily-capped, so trying
+    //    the remaining slugs just wastes seconds for the same result.
+    if (!rawOutput) {
+      for (const model of OPENROUTER_VISION_MODELS) {
+        try {
+          console.log(`[Sentinel] Attempting analysis with ${model}...`);
+          rawOutput = await tryOpenRouterVision(imageBase64, model);
+          successfulModel = model;
+          console.log(`[Sentinel] Success with ${model}`);
+          break;
+        } catch (err: any) {
+          console.warn(`[Sentinel] Model ${model} failed:`, err?.message || err);
+          if (/\b429\b|rate.?limit/i.test(String(err?.message ?? ""))) {
+            console.warn("[Sentinel] OpenRouter free tier rate-limited — skipping remaining vision models");
+            break;
+          }
+        }
+      }
+    }
+
+    // 3. If a desktop-context snapshot is available, answer from text rather
+    //    than 503ing — this is the common "screen capture came back black" case.
+    if (!rawOutput && desktopContext) {
       try {
-        console.log("[Sentinel] Attempting fallback to NVIDIA NIM...");
-        rawOutput = await tryNvidiaVision(imageBase64);
-        successfulModel = "nvidia-nim";
-      } catch (nimErr: any) {
-        console.warn("[Sentinel] NVIDIA NIM failed:", nimErr?.message || nimErr);
+        rawOutput = await tryTextAnalysis(desktopContext);
+        successfulModel = "text-fallback";
+      } catch (textErr: any) {
+        console.warn("[Sentinel] Text fallback failed:", textErr?.message);
       }
     }
 
     if (!rawOutput) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "All vision models unavailable or rate-limited",
+      // Last resort: never hand the HUD a hard 503 for a decorative overlay.
+      const fgWindow = desktopContext?.match(/FOREGROUND_WINDOW:\s*(.+)/i)?.[1]?.trim() || "your desktop";
+      const fgApp = desktopContext?.match(/FOREGROUND_PROCESS:\s*(.+)/i)?.[1]?.trim() || "an application";
+      return NextResponse.json({
+        success: true,
+        proactive: true,
+        comment: `Boss, I can see you're working with ${fgApp} — "${fgWindow}". All systems nominal.`,
+        action: {
+          type: "task",
+          title: "Desktop Monitoring",
+          details: `Active application: ${fgApp}.`,
+          metadata: {},
         },
-        { status: 503 }
-      );
+        modelUsed: "context-fallback",
+        mode: "text",
+      });
     }
 
     const result = parseVisionResponse(rawOutput);

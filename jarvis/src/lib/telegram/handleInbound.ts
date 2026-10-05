@@ -272,6 +272,23 @@ async function readChatResponse(
     if (!payload || payload === "[DONE]") continue;
     try {
       const parsed = JSON.parse(payload);
+      // In-band provider error (Groq, NVIDIA, etc. can return
+      // {"error":{"message":"...overloaded..."}} inside a 200 SSE).
+      // Surface it as an offline/error reply rather than leaked content.
+      if (parsed?.error) {
+        const errMsg =
+          typeof parsed.error === "string"
+            ? parsed.error
+            : (parsed.error?.message ?? JSON.stringify(parsed.error));
+        // Only bail if we have no real content yet — a partial reply is
+        // better than an error stub.
+        if (!full) {
+          return { text: `⚠️ ${errMsg}`, offline: true };
+        }
+        // Already have some content — stop accumulating, treat what we
+        // have as the reply.
+        break;
+      }
       const delta =
         parsed?.choices?.[0]?.delta?.content ??
         parsed?.choices?.[0]?.text ??
@@ -1129,7 +1146,51 @@ export async function handleInboundMessage(
     // Clean reasoning traces and cap length BEFORE looking for
     // buttons, since the ```buttons``` block convention is at the
     // very end and 1.5k is plenty of room for a real reply.
-    const sanitized = capReplyLength(stripReasoning(streamed));
+    let sanitized = capReplyLength(stripReasoning(streamed));
+
+    // If the reply looks like a raw provider error (overload / rate-limit),
+    // try the chat route ONE more time after a short back-off. We only retry
+    // once to avoid doubling latency on genuine errors.
+    const OVERLOAD_PATTERNS = [
+      /overloaded/i,
+      /rate.?limit/i,
+      /too many requests/i,
+      /service temporarily unavailable/i,
+      /model api is currently/i,
+    ];
+    const looksLikeError = OVERLOAD_PATTERNS.some((r) => r.test(sanitized));
+    if (looksLikeError && !offline) {
+      console.warn("[telegram/handleInbound] reply looks like a provider error — retrying in 2s");
+      await ctx.editLastProgress("🔄 *Jarvis* — providers busy, retrying…").catch(() => {});
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        const retryRes = await fetch(`${API_BASE}/api/chat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            messages,
+            systemPrompt: buildTelegramSystemPrompt(),
+          }),
+        });
+        if (retryRes.ok) {
+          let retryStreamed = "";
+          const retryResult = await readChatResponse(retryRes, (chunk) => { retryStreamed += chunk; });
+          if (!retryStreamed && retryResult.text) retryStreamed = retryResult.text;
+          const retrySanitized = capReplyLength(stripReasoning(retryStreamed));
+          const retryLooksLikeError = OVERLOAD_PATTERNS.some((r) => r.test(retrySanitized));
+          if (!retryLooksLikeError && retrySanitized.trim()) {
+            streamed = retryStreamed;
+            offline = retryResult.offline;
+            sanitized = retrySanitized;
+            console.log("[telegram/handleInbound] retry succeeded");
+          } else {
+            console.warn("[telegram/handleInbound] retry also returned error — using original");
+          }
+        }
+      } catch (retryErr: any) {
+        console.warn("[telegram/handleInbound] retry failed:", retryErr?.message);
+      }
+    }
 
     const parsed: ParsedChatResponse = (() => {
       const { cleaned, buttons } = detectButtons(sanitized);

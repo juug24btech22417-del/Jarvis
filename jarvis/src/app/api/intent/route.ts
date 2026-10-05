@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { INTENT_SYSTEM_PROMPT } from "@/lib/jarvis/personality";
 
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || process.env.NEXT_PUBLIC_NVIDIA_API_KEY;
 
 // 2.5s timeout — the intent parse is a convenience, not a gate.
-// If NVIDIA is rate-limited or slow, fall through to "chat" so the
-// /api/chat path still serves the user.
 function fetchWithTimeout(url: string, opts: RequestInit, ms = 2500) {
   const c = new AbortController();
   const t = setTimeout(() => c.abort(), ms);
@@ -14,16 +14,6 @@ function fetchWithTimeout(url: string, opts: RequestInit, ms = 2500) {
 
 export async function POST(req: NextRequest) {
   try {
-    if (!NVIDIA_API_KEY) {
-      // No key — don't 500, just route everything to the chat path.
-      return NextResponse.json({
-        intent: "chat",
-        params: { message: "" },
-        fallback: true,
-        reason: "no_api_key",
-      });
-    }
-
     const { text } = await req.json();
 
     if (!text) {
@@ -33,82 +23,94 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    let response: Response;
-    try {
-      response = await fetchWithTimeout(
-        "https://integrate.api.nvidia.com/v1/chat/completions",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${NVIDIA_API_KEY}`,
+    // 1) Primary: Groq qwen/qwen3.8-27b (takes ~200-300ms)
+    if (GROQ_API_KEY && GROQ_API_KEY.trim() !== "" && GROQ_API_KEY !== "your-api-key-here") {
+      try {
+        const response = await fetchWithTimeout(
+          "https://api.groq.com/openai/v1/chat/completions",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${GROQ_API_KEY}`,
+            },
+            body: JSON.stringify({
+              model: "qwen/qwen3.8-27b",
+              messages: [
+                { role: "system", content: INTENT_SYSTEM_PROMPT },
+                { role: "user", content: text },
+              ],
+              temperature: 0.1,
+              max_tokens: 128,
+              response_format: { type: "json_object" },
+            }),
           },
-          body: JSON.stringify({
-            model: "nvidia/nemotron-3-super-120b-a12b",
-            messages: [
-              { role: "system", content: INTENT_SYSTEM_PROMPT },
-              { role: "user", content: text },
-            ],
-            temperature: 0.1,
-            max_tokens: 256,
-            // CRITICAL: nemotron-3 is a reasoning model. Without this flag it
-            // burns the entire request in thinking mode — the dev log showed
-            // 16-20 SECOND intent parses ("POST /api/intent 200 in 19927ms").
-            // Thinking off brings the parse back under ~1s. The old 4s timeout
-            // just aborted these slow calls, wasting NVIDIA quota on every
-            // single message and rate-limiting the real chat request.
-            chat_template_kwargs: { thinking: false },
-          }),
-        },
-        2500
-      );
-    } catch (e: any) {
-      // Timeout or network error — fall through to chat. The user
-      // should never see a 10-minute hang because the intent parse is stuck.
-      console.warn("[Intent API] NVIDIA unreachable/timeout — falling back to chat:", e?.name || e?.message);
-      return NextResponse.json({
-        intent: "chat",
-        params: { message: text },
-        fallback: true,
-        reason: e?.name === "AbortError" ? "timeout" : "network",
-      });
-    }
+          1500
+        );
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("[Intent API] LLM error:", response.status, errorText);
-      // 429/5xx — same fallback. Don't 500 the caller.
-      return NextResponse.json({
-        intent: "chat",
-        params: { message: text },
-        fallback: true,
-        reason: `http_${response.status}`,
-      });
-    }
-
-    const data = await response.json();
-    const content = data.choices?.[0]?.message?.content || "";
-
-    // Extract JSON from response
-    try {
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        return NextResponse.json({
-          intent: parsed.intent || "chat",
-          params: parsed.params || { message: text },
-        });
+        if (response.ok) {
+          const data = await response.json();
+          const content = data.choices?.[0]?.message?.content || "";
+          try {
+            const parsed = JSON.parse(content);
+            if (parsed && typeof parsed === "object") {
+              return NextResponse.json({
+                intent: parsed.intent || "chat",
+                params: parsed.params || { message: text },
+              });
+            }
+          } catch {}
+        }
+      } catch (err: any) {
+        console.warn("[Intent API] Groq intent parse failed:", err?.message || err);
       }
-    } catch {
-      console.error("[Intent API] Failed to parse LLM response:", content);
     }
 
-    // Fallback to chat if parsing fails
+    // 2) Fallback: Gemini 2.5 Flash
+    if (GEMINI_API_KEY && GEMINI_API_KEY.trim() !== "" && GEMINI_API_KEY !== "your-api-key-here") {
+      try {
+        const response = await fetchWithTimeout(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{ role: "user", parts: [{ text: text }] }],
+              systemInstruction: { parts: [{ text: INTENT_SYSTEM_PROMPT }] },
+              generationConfig: {
+                temperature: 0.1,
+                maxOutputTokens: 128,
+                responseMimeType: "application/json",
+              },
+            }),
+          },
+          1800
+        );
+
+        if (response.ok) {
+          const data = await response.json();
+          const content = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+          try {
+            const parsed = JSON.parse(content);
+            if (parsed && typeof parsed === "object") {
+              return NextResponse.json({
+                intent: parsed.intent || "chat",
+                params: parsed.params || { message: text },
+              });
+            }
+          } catch {}
+        }
+      } catch (err: any) {
+        console.warn("[Intent API] Gemini intent parse failed:", err?.message || err);
+      }
+    }
+
+    // Fast fallback to chat
     return NextResponse.json({
       intent: "chat",
       params: { message: text },
+      fallback: true,
     });
-
   } catch (error) {
     console.error("[Intent API] Error:", error);
     return NextResponse.json(

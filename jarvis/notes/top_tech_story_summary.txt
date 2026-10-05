@@ -1,1 +1,7 @@
-(no inputs to summarize)
+- **Live, hourly‑updated snapshot** of the top AI & tech stories across Hacker News, GitHub Trending, Product Hunt, Hugging Face, Techmeme, Solidot, Startup Archive, and the App Store.  
+- **Top three headlines** for the day:  
+  1. **Marv** – an AI cursor companion that predicts what to click.  
+  2. **Spira Maxima** – a video model that turns scripts into viral social‑media clips.  
+  3. **SpeechShield** – a live interview & meeting copilot for Mac, built from your resume.  
+- The feed lists **30 curated stories** (including tools, GitHub projects, industry news, and product launches) and is refreshed every hour.  
+- Links to the full news archive and a daily digest are provided for deeper dives.

@@ -78,7 +78,7 @@ ${tasks.length > 0 ? `${userName.toUpperCase()}'S PENDING TASKS:\n${tasks.map((t
 ${recentMessages.length > 0 ? `RECENT CONVERSATION:\n${recentMessages.map((m) => `${m.role === "user" ? userName : "JARVIS"}: ${m.content}`).join("\n")}` : ""}
 
 AVAILABLE CAPABILITIES:
-You can help with: web search, task management, calendar, email drafts, file analysis, memory storage, weather, music control, screen analysis, web automation, and general conversation.
+You can help with: web search, WhatsApp & messaging (instantly sending messages to any phone number or saved contact, composing short natural messages from conversational context), task management, calendar, email drafts, file analysis, memory storage, weather, music control, screen analysis, web automation, and general conversation.
 
 CODE FORGE PROTOCOL — when ${userName} asks you to write code (HTML page, calculator, game, snippet, script, etc.):
 - The chat window is a conversation, not a code dump. NEVER print fenced code blocks (\`\`\`...\`\`\`) in your reply. Instead write the full program into the special block below — it gets routed to the Code Forge panel automatically.
@@ -462,8 +462,8 @@ AVAILABLE INTENTS AND EXAMPLES:
 }
 {
   "intent": "whatsapp_send",
-  "examples": ["send a whatsapp to dad", "message mom on whatsapp saying i'm coming home", "whatsapp rahul tell him i'm late"],
-  "params": { "contact": "person name", "message": "content of message" }
+  "examples": ["send hi msg to 9606571200", "send hi to 9606571200", "msg 9606571200 that I will call back in 5 mins", "tell mom I'm stuck in traffic and will be 20 mins late", "text Sarah happy birthday", "send a whatsapp to dad", "message mom on whatsapp saying i'm coming home", "whatsapp rahul tell him i'm late"],
+  "params": { "recipient": "person name or phone number", "message": "the message to send (compose a polite short message if user gave context)" }
 }
 {
   "intent": "price_compare",
@@ -563,48 +563,78 @@ RESPONSE FORMAT:
 // Parse intent using LLM
 export async function parseIntentWithLLM(
   text: string,
-  apiKey: string
+  apiKey?: string
 ): Promise<{
   intent: string;
   params: Record<string, string | number | boolean | null>;
 }> {
-  const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: "nvidia/nemotron-3-super-120b-a12b",
-      messages: [
-        { role: "system", content: INTENT_SYSTEM_PROMPT },
-        { role: "user", content: text },
-      ],
-      temperature: 0.1,
-      max_tokens: 256,
-    }),
-  });
+  const groqKey = process.env.GROQ_API_KEY;
+  if (groqKey && groqKey.trim() !== "" && groqKey !== "your-api-key-here") {
+    try {
+      const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${groqKey}`,
+        },
+        body: JSON.stringify({
+          model: "qwen/qwen3.8-27b",
+          messages: [
+            { role: "system", content: INTENT_SYSTEM_PROMPT },
+            { role: "user", content: text },
+          ],
+          temperature: 0.1,
+          max_tokens: 128,
+          response_format: { type: "json_object" },
+        }),
+      });
 
-  if (!response.ok) {
-    throw new Error(`LLM request failed: ${response.status}`);
+      if (response.ok) {
+        const data = await response.json();
+        const content = data.choices?.[0]?.message?.content || "";
+        const parsed = JSON.parse(content);
+        if (parsed && typeof parsed === "object") {
+          return {
+            intent: parsed.intent || "chat",
+            params: parsed.params || { message: text },
+          };
+        }
+      }
+    } catch {}
   }
 
-  const data = await response.json();
-  const content = data.choices?.[0]?.message?.content || "";
+  const geminiKey = process.env.GEMINI_API_KEY;
+  if (geminiKey && geminiKey.trim() !== "" && geminiKey !== "your-api-key-here") {
+    try {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: text }] }],
+            systemInstruction: { parts: [{ text: INTENT_SYSTEM_PROMPT }] },
+            generationConfig: {
+              temperature: 0.1,
+              maxOutputTokens: 128,
+              responseMimeType: "application/json",
+            },
+          }),
+        }
+      );
 
-  // Extract JSON from response
-  try {
-    // Try to parse directly
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
-      return {
-        intent: parsed.intent || "chat",
-        params: parsed.params || { message: text },
-      };
-    }
-  } catch {
-    // Fallback to chat if parsing fails
+      if (response.ok) {
+        const data = await response.json();
+        const content = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+        const parsed = JSON.parse(content);
+        if (parsed && typeof parsed === "object") {
+          return {
+            intent: parsed.intent || "chat",
+            params: parsed.params || { message: text },
+          };
+        }
+      }
+    } catch {}
   }
 
   return { intent: "chat", params: { message: text } };

@@ -9,7 +9,12 @@
 // reloads don't kill the stream silently.
 
 import type { NextRequest } from "next/server";
-import { subscribeEvents, type JarvisEvent } from "@/lib/composio/eventBus";
+import {
+  subscribeEvents,
+  subscribeClipboardEvents,
+  type JarvisEvent,
+  type ClipboardAssistEvent,
+} from "@/lib/composio/eventBus";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -36,6 +41,17 @@ export function GET(_req: NextRequest) {
       unsubscribe = subscribeEvents((event: JarvisEvent) => {
         send("jarvis:event", event);
       });
+
+      // OS-wide clipboard assistant: each copy analysed elsewhere on the
+      // laptop arrives here for the in-browser "answer ready" offer.
+      const unsubClipboard = subscribeClipboardEvents((event: ClipboardAssistEvent) => {
+        send("jarvis:clipboard", event);
+      });
+      const prevUnsubscribe = unsubscribe;
+      unsubscribe = () => {
+        prevUnsubscribe?.();
+        unsubClipboard();
+      };
 
       keepAlive = setInterval(() => {
         try {

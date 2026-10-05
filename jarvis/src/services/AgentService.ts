@@ -468,16 +468,11 @@ async function llmRace(opts: {
     throw new Error(`no LLM provider key (OPENROUTER/GROQ/GEMINI/NVIDIA) for ${label}`);
   }
 
-  // Build sequential fallback chain: Gemini → Groq → OpenRouter → NIM
+  // Build the fallback chain: Gemini → OpenRouter → Groq → NVIDIA NIM (last).
   const chain: Array<() => Promise<string>> = [];
 
   if (geminiKey) {
     chain.push(() => attempt("gemini", GEMINI_URL, geminiKey, GEMINI_PLANNER_MODEL));
-  }
-  if (groqKey) {
-    for (const model of GROQ_PLANNER_MODELS) {
-      chain.push(() => attempt("groq", GROQ_URL, groqKey, model));
-    }
   }
   if (openrouterKey) {
     for (const model of OPENROUTER_PLANNER_MODELS) {
@@ -487,6 +482,11 @@ async function llmRace(opts: {
           "X-Title": "JARVIS AI Assistant",
         })
       );
+    }
+  }
+  if (groqKey) {
+    for (const model of GROQ_PLANNER_MODELS) {
+      chain.push(() => attempt("groq", GROQ_URL, groqKey, model));
     }
   }
   if (nimKey) {
