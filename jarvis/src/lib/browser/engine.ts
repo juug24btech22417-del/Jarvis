@@ -369,21 +369,19 @@ const CAPTCHA_SIGNS = [
   "confirm you're not a bot",
 ];
 
-/**
- * Markers that never render as text, so they can only be found in the markup
- * (flipkart's bot-protection cookie names show up in its wall page's scripts).
- */
-const CAPTCHA_MARKUP_SIGNS = ["apex__"];
-
 export async function detectCaptcha(page: Page): Promise<boolean> {
   try {
+    // Visible text only, and deliberately so. Two reasons:
+    //  1. Correctness — matching markup false-positived on working pages
+    //     (YouTube's own bundles contain the word "captcha").
+    //  2. Speed — page.content() serialises the ENTIRE DOM, which on a page like
+    //     YouTube costs seconds. That ran on every check, including the one that
+    //     gates starting a feed scroll, and it was most of the "why does it take
+    //     so long to open" time. Reading innerText is a cheap single read.
     const visible = ((await page.evaluate(
       () => document.body?.innerText || ""
     )) as string).toLowerCase();
-    if (CAPTCHA_SIGNS.some((s) => visible.includes(s))) return true;
-
-    const html = (await page.content()).toLowerCase();
-    return CAPTCHA_MARKUP_SIGNS.some((s) => html.includes(s));
+    return CAPTCHA_SIGNS.some((s) => visible.includes(s));
   } catch {
     return false;
   }
@@ -839,7 +837,10 @@ async function createRealBrowserSession(opts: SessionOptions): Promise<AgentSess
         console.warn("[BrowserEngine] real goto fell back:", e.message.split("\n")[0]);
         await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => {});
       });
-      await page.waitForTimeout(1200);
+      // Just enough for the document to exist so the caller can read its URL and
+      // text. This used to be 1200ms of dead time on EVERY real-browser
+      // navigation, which the user felt as "it takes forever to open".
+      await page.waitForTimeout(400);
     },
     async snapshot() {
       const raw = await page.evaluate((s) => eval(s), SNAPSHOT_SCRIPT);

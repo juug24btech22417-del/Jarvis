@@ -48,7 +48,9 @@ export const FEED_TARGETS: Record<string, { url: string; label: string }> = {
 export function feedScrollIntent(goal: string): { site: string; url: string; label: string } | null {
   const g = goal || "";
   const wantsFeed = /\b(shorts?|reels?|foryou|for\s?you|fyp|spotlight)\b/i.test(g);
-  const wantsScroll = /\b(scroll|swipe|browse|flip|go through)\b/i.test(g);
+  // Suffix-tolerant on purpose: people type "scrolling" / "swiping" / "browsing".
+  // (`browse\w*`, not `brows\w*`, so "in the browser" doesn't count as a verb.)
+  const wantsScroll = /\b(?:scroll\w*|swip\w*|browse\w*|flip\w*|go through)\b/i.test(g);
   if (!wantsFeed && !wantsScroll) return null;
 
   let site = Object.keys(FEED_TARGETS).find((s) => new RegExp(`(^|[^a-z0-9])${s}([^a-z0-9]|$)`, "i").test(g));
@@ -58,9 +60,13 @@ export function feedScrollIntent(goal: string): { site: string; url: string; lab
     else if (/\breels?\b/i.test(g)) site = "instagram";
   }
   if (!site) return null;
-  // A scroll verb alone is too vague ("scroll youtube comments"); require a
-  // feed noun or the explicit "and scroll" phrasing people actually use.
-  if (!wantsFeed && !/\b(?:and|then)\s+(?:scroll|swipe|browse|flip)\b/i.test(g)) return null;
+
+  // A scroll verb alone is too vague ("scroll youtube comments"). It counts as a
+  // feed request when a feed noun is named, when the sentence chains the scroll
+  // onto opening the site ("… and scroll"), or when it says to keep going.
+  const chainedScroll = /\b(?:and|then)\s+(?:keep\s+)?(?:scroll\w*|swip\w*|browse\w*|flip\w*)\b/i.test(g);
+  const keepScrolling = /\bkeep\s+(?:scroll\w*|swip\w*)\b/i.test(g);
+  if (!wantsFeed && !chainedScroll && !keepScrolling) return null;
 
   const { url, label } = FEED_TARGETS[site];
   return { site, url, label };

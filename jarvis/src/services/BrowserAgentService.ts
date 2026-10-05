@@ -80,6 +80,11 @@ const LOGIN_WALL_RE = /(\/accounts\/login|\/login|\/signin|\/sign-in|\/checkpoin
 // of playing Shorts, so the URL gives it away before the page even renders.
 const BOT_WALL_RE = /(?:accounts\.google\.com|\/sorry\/|\/recaptcha|\/challenge)/i;
 
+// Chrome's own error page. The browser never reached the site at all — which
+// happens to a browser launched through the JARVIS proxy whenever the proxy is
+// not running. Without this the loop happily "scrolled" an error page.
+const DEAD_PAGE_RE = /^(?:chrome-error:\/\/|edge-error:\/\/|chrome:\/\/network-error)/i;
+
 /**
  * A page that is really a sign-in form or a bot check is not a feed.
  *
@@ -90,6 +95,9 @@ const BOT_WALL_RE = /(?:accounts\.google\.com|\/sorry\/|\/recaptcha|\/challenge)
  */
 async function feedWall(session_obj: AgentSession, label: string): Promise<string | null> {
   const url = session_obj.url();
+  if (!url || DEAD_PAGE_RE.test(url)) {
+    return `${label} wouldn't load — the browser reported a connection error. If that browser is routed through the JARVIS proxy, it has no internet while the proxy is down: start JARVIS, or launch the browser with launch-jarvis-browser.bat.`;
+  }
   if (LOGIN_WALL_RE.test(url)) {
     return `${label} asked me to sign in. I left that page open in your browser (${url}) — sign in once there and ask me again; the login is remembered.`;
   }
@@ -176,6 +184,10 @@ async function runFeedLoop(rec: FeedSession, intervalMs = FEED_DEFAULT_INTERVAL,
         // forever. The URL checks are free; the content check walks the DOM, so
         // it runs every third advance rather than on every 10s tick.
         const liveUrl = rec.session_obj.url();
+        if (!liveUrl || DEAD_PAGE_RE.test(liveUrl)) {
+          rec.lastError = "The page dropped out — stopped scrolling. Check that browser has internet.";
+          break;
+        }
         if (LOGIN_WALL_RE.test(liveUrl)) {
           rec.lastError = "Sign-in expired — stopped scrolling. Sign in again and ask me.";
           break;

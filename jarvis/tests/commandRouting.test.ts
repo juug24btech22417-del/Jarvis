@@ -8,7 +8,7 @@
 //
 // Run with:  npx tsx tests/commandRouting.test.ts
 
-import { allowsSpotifyTransport, isMissionControlOpen } from "../src/lib/jarvis/commandRouting";
+import { allowsSpotifyTransport, feedScrollIntent, isMissionControlOpen } from "../src/lib/jarvis/commandRouting";
 
 let passed = 0;
 let failed = 0;
@@ -99,6 +99,44 @@ for (const cmd of [
   "",
 ]) {
   check(`"${cmd}" → false`, isMissionControlOpen(cmd) === false);
+}
+
+// The feed runner must catch how people actually type it, from either the
+// command bar or the Mission Control composer.
+section("feedScrollIntent — natural phrasing resolves to a feed");
+
+const feedCases: Array<[string, string]> = [
+  ["open youtube and scroll shorts", "youtube"],
+  ["open instagram and scroll reels", "instagram"],
+  ["open youtube and scroll", "youtube"],
+  ["open instagram and keep scrolling", "instagram"],
+  ["scroll reels on instagram", "instagram"],
+  ["scroll through youtube shorts", "youtube"],
+  ["scroll shorts", "youtube"],
+  ["scroll reels", "instagram"],
+  ["keep scrolling reels", "instagram"],
+  ["show me instagram reels", "instagram"],
+  ["browse instagram reels", "instagram"],
+  ["open tiktok and scroll", "tiktok"],
+  ["open snapchat spotlight", "snapchat"],
+];
+for (const [cmd, site] of feedCases) {
+  const hit = feedScrollIntent(cmd);
+  check(`"${cmd}" → ${site}`, hit?.site === site, `got ${hit ? hit.site : "null"}`);
+}
+
+section("feedScrollIntent — other commands are left alone");
+
+for (const cmd of [
+  "scroll youtube comments",
+  "open youtube and play any song",
+  "play some music",
+  "open the proxy panel",
+  "open youtube in the browser",
+  "find the best free react course and open the best one",
+  "",
+]) {
+  check(`"${cmd}" → null`, feedScrollIntent(cmd) === null, `got ${JSON.stringify(feedScrollIntent(cmd))}`);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

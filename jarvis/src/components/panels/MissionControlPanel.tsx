@@ -17,6 +17,9 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+// Shared with the command bar so "open youtube and scroll shorts" resolves to the
+// same feed from either entry point.
+import { feedScrollIntent } from "@/lib/jarvis/commandRouting";
 import {
   X,
   Send,
@@ -235,6 +238,9 @@ export default function MissionControlPanel({ isOpen, onClose }: MissionControlP
   const [liveRecId, setLiveRecId] = useState<string | null>(null);
   const [recBusy, setRecBusy] = useState(false);
   const [aborting, setAborting] = useState(false);
+  // A feed being scrolled from this panel — not a mission, so it gets its own
+  // card (and its own stop button) rather than a fake job.
+  const [feedRun, setFeedRun] = useState<{ id: string; label: string; notice: string } | null>(null);
   // Show the real Chromium window while autonomous browser steps run.
   const [watch, setWatch] = useState(false);
   // Live frame metadata streamed out of the running browser step.
@@ -252,6 +258,8 @@ export default function MissionControlPanel({ isOpen, onClose }: MissionControlP
   const esRef = useRef<EventSource | null>(null);
   const historyRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const feedRef = useRef<HTMLDivElement | null>(null);
+  // Set when Stop is pressed before the start request returned an id.
+  const pendingFeedStopRef = useRef(false);
   const followRef = useRef<HTMLDivElement | null>(null);
   const autoOpenedRef = useRef<Set<string>>(new Set());
   // When we open a recent mission from history, suppress the toast for its
@@ -419,10 +427,81 @@ export default function MissionControlPanel({ isOpen, onClose }: MissionControlP
 
   /* ── actions ─────────────────────────────────────────────────────── */
 
+  const stopFeedRun = async () => {
+    const run = feedRun;
+    if (!run) return;
+    setFeedRun(null);
+    if (run.id.startsWith("pending_")) {
+      // The start request hasn't returned an id yet — flag it so submitGoal
+      // stops the session the moment it exists.
+      pendingFeedStopRef.current = true;
+      return;
+    }
+    try {
+      await fetch("/api/browser/feed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "stop", id: run.id }),
+      });
+    } catch {
+      // Best-effort: the loop also stops if the tab is closed.
+    }
+  };
+
+
   const submitGoal = async (g?: string) => {
     const text = (g ?? goal).trim();
     if (!text) return;
     setError(null);
+
+    // Shorts / Reels are not a mission. They are a feed that scrolls until
+    // stopped, so hand them to the feed runner instead of the mission planner —
+    // a plan would open the page once and finish, leaving the feed sitting on
+    // the first video. Same matcher the command bar uses, so the two agree.
+    const feed = feedScrollIntent(text);
+    if (feed) {
+      const pendingId = `pending_${Date.now()}`;
+      setJob(null);
+      setPhase("idle");
+      setGoal("");
+      // Attaching to the real browser and loading Instagram can take 30s+.
+      // Show what is happening straight away instead of a dead composer.
+      setFeedRun({ id: pendingId, label: feed.label, notice: `Opening ${feed.label} in your real browser…` });
+      try {
+        const res = await fetch("/api/browser/feed", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "start", goal: text }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data?.success) throw new Error(data?.error || `HTTP ${res.status}`);
+        const id = String(data.id);
+        // Stopped while the start was still in flight — end it now that it has
+        // an id, so it can't scroll on with no way to see or stop it.
+        if (pendingFeedStopRef.current) {
+          pendingFeedStopRef.current = false;
+          void fetch("/api/browser/feed", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "stop", id }),
+          }).catch(() => {});
+        }
+        setFeedRun((cur) =>
+          cur && cur.id === pendingId
+            ? {
+                id,
+                label: feed.label,
+                notice: `Scrolling ${feed.label} in your real browser. One advance every 10 seconds, until you stop it.`,
+              }
+            : cur
+        );
+      } catch (e) {
+        setFeedRun((cur) => (cur && cur.id === pendingId ? null : cur));
+        setError((e as Error).message);
+        setPhase("error");
+      }
+      return;
+    }
     setPhase("planning");
     setJob(null);
     setFeed([]);
@@ -1123,6 +1202,23 @@ export default function MissionControlPanel({ isOpen, onClose }: MissionControlP
                   <div className="flex items-center gap-2 text-text-secondary/80 text-xs font-rajdhani">
                     <Loader2 className="w-3.5 h-3.5 animate-spin text-reactor-core" />
                     Decomposing the mission into steps…
+                  </div>
+                )}
+
+                {/* ── feed scrolling (not a mission) ── */}
+                {feedRun && (
+                  <div
+                    data-testid="feed-run-notice"
+                    className="text-xs font-rajdhani text-reactor-core bg-reactor-core/10 border border-reactor-core/30 rounded-lg p-3 flex items-start gap-3"
+                  >
+                    <Radio className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                    <span className="flex-1">{feedRun.notice}</span>
+                    <button
+                      onClick={() => void stopFeedRun()}
+                      className="shrink-0 px-2.5 py-1 rounded-full border border-reactor-core/50 hover:bg-reactor-core/20 uppercase tracking-wider transition-colors"
+                    >
+                      Stop
+                    </button>
                   </div>
                 )}
 
