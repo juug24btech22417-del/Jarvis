@@ -31,64 +31,66 @@ It includes:
 ---
 
 ## Project Architecture
-The architecture is layered for separation of concerns:
+The system is organized in layered modules with a shared integration surface:
 
-1. **Presentation Layer (UI / Panels / HUD)**
-   - Located in `jarvis/src/components`
-   - Includes the Arc Reactor UI, command surfaces, and feature panels
+```mermaid
+flowchart TD
+  U[User / Operator] --> UI[Presentation Layer\n`jarvis/src/components`\nHUD, panels, widgets, cinematic UI]
+  UI --> APP[App Router Layer\n`jarvis/src/app`\nPages + API routes]
+  APP --> SRV[Service Orchestration Layer\n`jarvis/src/services`\nResearch, automation, mission, media]
+  SRV --> LIB[Core Library Layer\n`jarvis/src/lib`\nMemory, agent/runtime logic, OS bridges,\nsecurity, messaging, integrations]
+  UI <--> ST[Client State Layer\n`jarvis/src/store`\nZustand]
+  APP --> DATA[Data Layer\n`jarvis/prisma`\nPrisma schema + SQLite]
+  LIB --> EXT[External Systems\nLLM providers, Telegram, WhatsApp,\nSpotify, browser/desktop tooling]
+  ROOT[Root Runtime Utilities\n`*.js` / `*.bat` at repo root] --> APP
+  ROOT --> EXT
+```
 
-2. **App & API Layer (Next.js App Router)**
-   - Located in `jarvis/src/app`
-   - `page.tsx` drives the primary interface
-   - `api/*/route.ts` endpoints expose system functions (chat, research, automation, messaging, tools)
-
-3. **Service Layer**
-   - Located in `jarvis/src/services`
-   - Encapsulates orchestration logic (research, browser actions, scheduling, mission flows)
-
-4. **Core Library Layer**
-   - Located in `jarvis/src/lib`
-   - Shared domain utilities for memory, agent logic, security, OS bridges, Telegram/WhatsApp helpers, and more
-
-5. **State Layer**
-   - Located in `jarvis/src/store`
-   - Central client state (Zustand store)
-
-6. **Data Layer**
-   - Located in `jarvis/prisma`
-   - Prisma schema + SQLite database models
-
-7. **External Runtime Utilities**
-   - Root-level scripts (e.g. `whatsapp-server.js`, setup/debug scripts)
-   - Complement the main app for specific integrations
+### Architecture Mapping
+- **Presentation Layer**: `jarvis/src/components/*` (reactor, panels, cinematic surfaces, control overlays)
+- **Routing + API Layer**: `jarvis/src/app/*` (UI routes + `api/*/route.ts` server handlers)
+- **Service Layer**: `jarvis/src/services/*` (orchestration and workflow composition)
+- **Core Library Layer**: `jarvis/src/lib/*` (shared domain modules and integration clients)
+- **State Layer**: `jarvis/src/store/jarvis.store.ts`
+- **Data Layer**: `jarvis/prisma/schema.prisma` + migrations
+- **Runtime Utility Layer**: root scripts and helper entry points (server bridges, debug/bootstrap scripts)
 
 ---
 
 ## Directory Structure
 ```text
 Jarvis/
+├─ .agents/                     # Local agent skills and support assets
 ├─ README.md
 ├─ .env.example
-├─ whatsapp-server.js
 ├─ package.json
-├─ prisma/                      # Root-level Prisma assets/utilities
+├─ package-lock.json
+├─ prisma/                      # Root-level Prisma schema/assets
+├─ whatsapp-server.js           # Optional WhatsApp bridge server
+├─ *.bat                        # Windows bootstrap and workflow helpers
+├─ test-*.js                    # Root integration/debug test scripts
 ├─ jarvis/                      # Main Next.js application workspace
 │  ├─ package.json
 │  ├─ next.config.mjs
+│  ├─ docs/                     # App-specific design/ops notes
+│  ├─ scripts/                  # App automation/e2e helper scripts
+│  ├─ scratch/                  # Local experiments and diagnostics
+│  ├─ notes/                    # User notes and generated text artifacts
 │  ├─ prisma/
-│  │  └─ schema.prisma
-│  ├─ public/
+│  │  ├─ schema.prisma
+│  │  └─ migrations/
+│  ├─ public/                   # Static assets, vision/model artifacts
 │  ├─ src/
-│  │  ├─ app/                   # Next.js App Router pages + API routes
-│  │  ├─ components/            # UI panels, reactor, cinematic modules
+│  │  ├─ app/                   # App Router pages + API route handlers
+│  │  ├─ components/            # UI panels, HUD, reactor, cinematic modules
 │  │  ├─ hooks/                 # Client hooks (voice, gesture, sentinel, etc.)
-│  │  ├─ lib/                   # Core logic and integrations
+│  │  ├─ lib/                   # Core runtime logic and integrations
 │  │  ├─ services/              # Feature orchestration services
 │  │  ├─ store/                 # Zustand state
 │  │  └─ types/
 │  ├─ tests/                    # App-level test suites
-│  └─ docs/
-└─ scripts and integration helpers
+│  └─ tsconfig.json
+└─ debug and integration helpers at repository root
 ```
 
 ---
