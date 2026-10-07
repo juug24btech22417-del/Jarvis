@@ -8,6 +8,7 @@ A cinematic, modular AI assistant platform built with **Next.js + TypeScript**. 
 ## Table of Contents
 - [Overview](#overview)
 - [Capabilities at a Glance](#capabilities-at-a-glance)
+- [Capability Availability](#capability-availability)
 - [Project Architecture](#project-architecture)
 - [Directory Structure](#directory-structure)
 - [How to Clone or Download](#how-to-clone-or-download)
@@ -34,48 +35,52 @@ It includes:
 ## Capabilities at a Glance
 JARVIS is designed as an operations-grade AI copilot: conversational, multimodal, and automation-ready. It blends premium command-center UX with practical execution across research, messaging, browser workflows, and local system control.
 
-- **AI Assistant Workflows**
-  - Conversational assistant flows across multiple AI providers (OpenAI, Gemini, Anthropic, Hugging Face) with mission-style orchestration and follow-up handling.
-  - Structured tasking, checkpoints, and command-based interactions across UI and messaging surfaces.
+- **🧠 AI Workflows + Mission Orchestration**
+  - Conversational workflows across OpenAI, Gemini, Anthropic, and Hugging Face, with mission-style planning, checkpoints, and follow-up execution.
+  - Mission Control as a true orchestration surface for chaining multi-step browser, research, messaging, and system actions.
+  - Compound missions can coordinate outcomes in one flow (for example: find top-rated nearby options, open directions, and message a contact), depending on enabled integrations.
 
-- **Research + Intelligence**
-  - Deep research pipelines that plan sub-queries, search the web, scrape sources, extract facts, and synthesize reports.
-  - Report lifecycle support with progress tracking, source/fact metrics, and persistence for later retrieval and follow-ups.
+- **🔎 Research, Reporting, and Meeting Intelligence**
+  - Deep research pipelines: query planning, web search/scrape/extract, synthesis, report persistence, and follow-up retrieval.
+  - Real-time **Meeting Shadow** assistance: transcript-snippet analysis with meeting-topic context, concise tactical talking points, counter-arguments, and optional private whisper-style voice playback.
+  - Meeting workflows include live caption capture/sync and structured post-meeting outputs where integrations are configured.
 
-- **Voice + Persona Layer**
-  - Voice interaction with transcription and text-to-speech pathways for conversational operation.
-  - Persona-driven voice/tone profiles (including configurable language, rate, pitch, and style behavior).
+- **🎙️ Voice, Persona, and Communication Surfaces**
+  - Voice interaction with transcription + text-to-speech, plus persona/tone controls (language, rate, pitch, style).
+  - Telegram command operations for voice/text/media/reminders/briefings, with optional WhatsApp bridge workflows.
+  - AI-assisted email composition with tone control, plus sending via configured email integrations.
 
-- **Messaging Operations (Telegram + Optional WhatsApp)**
-  - Telegram command surface for text, voice, media/files, reminders, briefings, and remote command execution.
-  - Optional WhatsApp bridge for persistent messaging workflows when configured.
+- **🌐 Browser Automation + Record-and-Repeat Runtime**
+  - Autonomous browser execution for real web tasks (forms, sign-ins, extraction, comparisons, checkout-prep flows).
+  - Entertainment/navigation automation for scroll-style feeds (such as reels/shorts-style experiences) where browser/session conditions allow.
+  - Record-and-repeat automation across browser and desktop: recording, replay, parameterized steps, screenshots, form-fill history, and analytics surfaces.
+  - Commerce and task automation can drive supported shopping/ordering journeys through browser automation, with user configuration, permissions, and confirmation gates.
 
-- **Memory, Tasks, and Persistent State**
-  - Prisma + SQLite-backed storage for memory, conversations, tasks, reminders, reports, scheduled jobs, and operational queues.
-  - Durable state for automation continuity and history-aware assistant behavior.
+- **💻 Desktop, Filesystem, and Context Intelligence**
+  - System controls and telemetry where supported: screenshots, app/URL launch, lock/sleep/shutdown, audio/brightness, and hardware/network status.
+  - Network-awareness workflows can incorporate connectivity context and IP/location-aware provider responses when supporting integrations are configured.
+  - Clipboard intelligence includes background capture/watch flows and context-aware assistance pipelines (with platform/runtime qualification).
+  - Filesystem integration supports local read/write/search workflows within configured and permitted boundaries.
+  - Persistent memory/task/report state via Prisma + SQLite for continuity across sessions.
 
-- **Browser Automation + Macro Runtime**
-  - Playwright/Puppeteer-driven browser control for scripted actions, extraction, and task execution.
-  - Macro record/replay flows with form-fill history and analytics surfaces.
+- **🧩 Integrations for Developer + Productivity Work**
+  - GitHub integration paths for repository exploration and developer workflows (repos, code, issues, PRs, commits, and related actions where authorized).
+  - Notion and Todoist integrations for research delivery, notes, action-item sync, and productivity execution.
+  - NASA integration for APOD and related astronomy/space imagery experiences.
+  - CAD/design workflow support via MCP CAD tooling and generated parametric model flows (integration capability, not a full standalone CAD engine).
 
-- **Desktop + System Controls (Where Supported)**
-  - Local actions including screenshots, app/URL open, lock, sleep, shutdown/restart, volume, brightness, clipboard, and PC status telemetry.
-  - Availability depends on platform, permissions, and local bridge/runtime configuration.
-
-- **Sentinel/Security Command Surface**
-  - Security-oriented commands and status flows for armed-state visibility, intrusion attempts, siren trigger, and stealth mode.
-  - Face/security monitoring hooks are available where configured.
-
-- **Media + Ecosystem Integrations**
-  - Spotify/media control paths and integration-ready service endpoints across the stack.
-
-- **Cinematic Command-Center Experience**
-  - HUD-style panels, motion/3D visual layers, mission-control views, and live operational status rails.
-  - Hooks for gesture/vision and real-time operator feedback loops.
-
-> **Capability Scope:** Core conversational UI, API routes, and persistence are first-class. Integrations such as WhatsApp, certain media/security features, and some desktop controls are optional or platform-dependent, and activate fully when credentials and runtime bridges are configured.
+- **👁️ Sensor-Driven Interaction + Cinematic UX**
+  - Hand and eye interaction where supported: gaze-based cursor control, gesture/air-mouse control, and gesture-based media controls.
+  - Sentinel/security command surfaces for armed-state flows, alerts, and monitoring hooks where configured.
+  - Cinematic command-center UI with HUD panels, motion/3D layers, live status rails, and operator feedback loops.
 
 ---
+
+## Capability Availability
+- **Core by default:** command-center UI, core assistant routing, API surfaces, and local persistence.
+- **Optional integrations:** services such as WhatsApp, GitHub, Notion, Todoist, NASA, advanced email, maps, and CAD flows require setup, credentials, and/or external providers.
+- **Platform and permission dependent:** desktop controls, clipboard watcher behavior, hand/eye controls, and some media/security features depend on OS support plus camera/microphone/browser permissions.
+- **Safety and confirmation:** execution on live websites and outbound actions (including commerce or email flows) may require explicit user confirmation, authenticated sessions, and configured safeguards.
 
 ## Project Architecture
 The system is organized in layered modules with a shared integration surface:
