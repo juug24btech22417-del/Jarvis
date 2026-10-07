@@ -7,6 +7,7 @@ A cinematic, modular AI assistant platform built with **Next.js + TypeScript**. 
 
 ## Table of Contents
 - [Overview](#overview)
+- [Capabilities at a Glance](#capabilities-at-a-glance)
 - [Project Architecture](#project-architecture)
 - [Directory Structure](#directory-structure)
 - [How to Clone or Download](#how-to-clone-or-download)
@@ -27,6 +28,52 @@ It includes:
 - Service and integration layers for research, browser automation, scheduling, and messaging
 - Prisma + SQLite persistence for memory, tasks, reports, reminders, and automations
 - Optional WhatsApp server bridge for persistent messaging connectivity
+
+---
+
+## Capabilities at a Glance
+JARVIS is designed as an operations-grade AI copilot: conversational, multimodal, and automation-ready. It blends premium command-center UX with practical execution across research, messaging, browser workflows, and local system control.
+
+- **AI Assistant Workflows**
+  - Conversational assistant flows across multiple AI providers (OpenAI, Gemini, Anthropic, Hugging Face) with mission-style orchestration and follow-up handling.
+  - Structured tasking, checkpoints, and command-based interactions across UI and messaging surfaces.
+
+- **Research + Intelligence**
+  - Deep research pipelines that plan sub-queries, search the web, scrape sources, extract facts, and synthesize reports.
+  - Report lifecycle support with progress tracking, source/fact metrics, and persistence for later retrieval and follow-ups.
+
+- **Voice + Persona Layer**
+  - Voice interaction with transcription and text-to-speech pathways for conversational operation.
+  - Persona-driven voice/tone profiles (including configurable language, rate, pitch, and style behavior).
+
+- **Messaging Operations (Telegram + Optional WhatsApp)**
+  - Telegram command surface for text, voice, media/files, reminders, briefings, and remote command execution.
+  - Optional WhatsApp bridge for persistent messaging workflows when configured.
+
+- **Memory, Tasks, and Persistent State**
+  - Prisma + SQLite-backed storage for memory, conversations, tasks, reminders, reports, scheduled jobs, and operational queues.
+  - Durable state for automation continuity and history-aware assistant behavior.
+
+- **Browser Automation + Macro Runtime**
+  - Playwright/Puppeteer-driven browser control for scripted actions, extraction, and task execution.
+  - Macro record/replay flows with form-fill history and analytics surfaces.
+
+- **Desktop + System Controls (Where Supported)**
+  - Local actions including screenshots, app/URL open, lock, sleep, shutdown/restart, volume, brightness, clipboard, and PC status telemetry.
+  - Availability depends on platform, permissions, and local bridge/runtime configuration.
+
+- **Sentinel/Security Command Surface**
+  - Security-oriented commands and status flows for armed-state visibility, intrusion attempts, siren trigger, and stealth mode.
+  - Face/security monitoring hooks are available where configured.
+
+- **Media + Ecosystem Integrations**
+  - Spotify/media control paths and integration-ready service endpoints across the stack.
+
+- **Cinematic Command-Center Experience**
+  - HUD-style panels, motion/3D visual layers, mission-control views, and live operational status rails.
+  - Hooks for gesture/vision and real-time operator feedback loops.
+
+> **Capability Scope:** Core conversational UI, API routes, and persistence are first-class. Integrations such as WhatsApp, certain media/security features, and some desktop controls are optional or platform-dependent, and activate fully when credentials and runtime bridges are configured.
 
 ---
 
