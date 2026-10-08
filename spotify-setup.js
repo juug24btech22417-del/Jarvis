@@ -210,6 +210,7 @@ async function main() {
       'user-modify-playback-state',
       'user-read-currently-playing',
       'streaming',
+      'user-library-read',
       'playlist-read-private'
     ];
 

@@ -19,6 +19,7 @@ export default function SpotifySetup() {
       "user-modify-playback-state",
       "user-read-currently-playing",
       "streaming",
+      "user-library-read",
       "playlist-read-private",
       "playlist-read-collaborative",
     ];

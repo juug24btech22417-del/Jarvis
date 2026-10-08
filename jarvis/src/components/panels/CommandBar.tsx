@@ -15,7 +15,14 @@ import PersonaSwitcher from "@/components/ui/PersonaSwitcher";
 import type { Macro } from "@/lib/ghost/macroTypes";
 import { startAssemble } from "@/lib/cinematic/assembleStore";
 import { isMissionFollowup } from "@/lib/agent/followupRefs";
-import { allowsSpotifyTransport, feedScrollIntent, isMissionControlOpen } from "@/lib/jarvis/commandRouting";
+import {
+  allowsSpotifyTransport,
+  feedScrollIntent,
+  isMissionControlOpen,
+  liveBrowseIntent,
+  mentionsLiveSite,
+  namedSiteUrl,
+} from "@/lib/jarvis/commandRouting";
 
 /**
  * Code Forge: route code that JARVIS wrote into the panel instead of the chat.
@@ -184,6 +191,74 @@ function matchWidgetCommand(text: string): string | null {
   // "show my panel"
   if (weak.test(t) && open.test(t)) return "";
   return null;
+}
+
+/**
+ * Hand a goal to the generic agentic browser and report the real answer as a
+ * follow-up message.
+ *
+ * The run takes 20-60s and happens in a VISIBLE window, so blocking the chat
+ * reply on it would look like a hang. Instead the caller acknowledges instantly
+ * ("watch the browser") and this posts the answer when the agent lands.
+ * Shared by the early live-browse router and the `browser_task` intent so both
+ * paths behave identically.
+ */
+function dispatchBrowserTask(
+  goal: string,
+  startUrl: string | undefined,
+  addMessage: (m: { role: "assistant"; content: string }) => void,
+  speak: (text: string) => void
+): void {
+  void (async () => {
+    try {
+      const res = await fetch("/api/playwright", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "task", task: goal, startUrl }),
+      });
+      const data = await res.json();
+      const answer = String(data?.answer || "").trim();
+      if (data?.success && answer) {
+        addMessage({ role: "assistant", content: answer });
+        speak(answer);
+      } else {
+        const msg = `I couldn't finish that in the browser, Boss.${
+          data?.error ? ` ${data.error}` : ""
+        }`;
+        addMessage({ role: "assistant", content: msg });
+      }
+    } catch {
+      addMessage({ role: "assistant", content: "The browser run failed, Boss." });
+    }
+  })();
+}
+
+/**
+ * Fall back to the INSTALLED Spotify app when the Web API has no usable login.
+ * Opens the desktop app and sends the hardware play/pause key, so "play music"
+ * still does something instead of dying on a revoked token.
+ */
+async function startSpotifyDesktop(): Promise<string> {
+  try {
+    await fetch("/api/system/openapp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ app: "spotify" }),
+    });
+    // Give the app a moment to take media focus before sending the key.
+    await new Promise((r) => setTimeout(r, 1500));
+    const res = await fetch("/api/os/media", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "play-pause" }),
+    });
+    const data = await res.json();
+    return data.success
+      ? "Spotify's saved login expired, so I started playback in your Spotify app instead. Reconnect Spotify to restore Liked Songs."
+      : "Spotify's saved login expired and I couldn't drive your Spotify app. Reconnect Spotify, Boss.";
+  } catch {
+    return "Spotify's saved login expired and I couldn't reach your Spotify app. Reconnect Spotify, Boss.";
+  }
 }
 
 /** Natural-language Second Brain / memory-graph requests. */
@@ -462,6 +537,22 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
     if (/\b(avengers[\s,]+assemble|assemble\s+the\s+avengers|avengers\s+assembled?)\b/i.test(lower)) {
       startAssemble();
       return "Avengers… assemble.";
+    }
+
+    // ── LIVE BROWSING (fires first, and wins) ──────────────────────────────
+    // "Go to github.com, open the microsoft/playwright repository, and tell me
+    // its star count" was being swallowed three different ways below: the word
+    // "playwright" opened the Browser Automation panel, "price of" was read as
+    // a Mission Control research run, and the generic search matcher threw the
+    // text at google.com in a new tab. All three meant nothing was ever
+    // actually browsed. An explicit "go to <real site>" is unambiguous, so
+    // route it to the generic agent and let it run where you can watch it.
+    {
+      const live = liveBrowseIntent(text);
+      if (live) {
+        dispatchBrowserTask(live.task, live.url, addMessage, speak);
+        return `On it, Boss. Watch the browser — I'm working through "${live.task}" live on the page. I'll report back the moment I have it.`;
+      }
     }
 
     // TIER 2A v3: HYBRID MISSION CONTROL (Firecrawl × Playwright)
@@ -879,6 +970,13 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
     const isAutomationCmd = isPlaywrightCmd || isYouTubePlay || isDirections || isJobSearchCmd || isEmailCompose || isMovieSearch || isWebScrape || isTracking;
     
     if (searchMatch && !lower.includes("youtube") && !hasFileExtension && !isAutomationCmd) {
+      // Naming a real site is a browse errand, not a Google query. Without this
+      // the whole sentence ("search for umbrella, add it to cart and proceed to
+      // buy it …") was dumped into a Google tab instead of being worked live.
+      if (mentionsLiveSite(searchMatch[1])) {
+        dispatchBrowserTask(text, namedSiteUrl(searchMatch[1]), addMessage, speak);
+        return `On it, Boss. Watch the browser — I'm handling "${text}" live on the page. I'll report back the moment I have it.`;
+      }
       const query = encodeURIComponent(searchMatch[1]);
       window.open(`https://google.com/search?q=${query}`, "_blank");
       return `Searching Google for "${searchMatch[1]}". Because clearly you couldn't type that yourself, Boss.`;
@@ -1153,6 +1251,48 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
     // different site or phrasing cannot regress it later.
     const allowSpotifyTransport = allowsSpotifyTransport(lower);
 
+    // Liked Songs / "play the first song" — use the LOCAL Spotify client via the
+    // Web API, never a browser tab. "go to spotify and head to liked songs and
+    // play the first song" lands here; without this it was either searched as a
+    // literal title or sent to the browser.
+    {
+      const spotifyMentioned = /\bspotify\b/i.test(lower);
+      const likedRef =
+        /\b(?:liked|saved)\s+(?:songs?|tracks?|music)\b/i.test(lower) ||
+        /\bmy\s+(?:songs?|music|library|playlists?)\b/i.test(lower);
+      const firstTrackRef = /\b(?:first|top|1st)\s+(?:song|track)\b/i.test(lower);
+      // "play any song" / "play a song" means "just play something". Without
+      // this it is a vague reference with nothing to search for.
+      const anySongRef = /\b(?:any|some|random|a)\s+(?:song|track|tune|music)\b/i.test(lower);
+      if (
+        allowSpotifyTransport &&
+        !lower.includes("youtube") &&
+        (likedRef || anySongRef || (firstTrackRef && spotifyMentioned))
+      ) {
+        try {
+          const response = await fetch("/api/spotify", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "liked" }),
+          });
+          const data = await response.json();
+          if (data.success && data.track) {
+            const artists = data.track.artists ? ` by ${data.track.artists}` : "";
+            return `Playing your Liked Songs on Spotify — starting with "${data.track.name}"${artists}. Enjoy, Boss.`;
+          }
+          if (data.authRequired) {
+            return await startSpotifyDesktop();
+          }
+          if (data.error) {
+            return `I couldn't start your Liked Songs: ${data.error} Boss.`;
+          }
+        } catch (e) {
+          console.error("Spotify liked songs failed:", e);
+        }
+        return "I couldn't start your Liked Songs. Make sure Spotify is open on this machine, Boss.";
+      }
+    }
+
     // Play - matches: play music, play the music, play spotify, play songs, resume music, etc.
     if (allowSpotifyTransport && lower.match(/\b(play( the| some)?\s+(music|song|songs|spotify|track|audio)|resume( the)?\s+(music|playback)?)\b/)) {
       try {
@@ -1175,6 +1315,9 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
         }
 
         // Error cases
+        if (data.authRequired) {
+          return await startSpotifyDesktop();
+        }
         if (data.error?.includes("Device") || response.status === 404) {
           return "No active Spotify device found. Please open Spotify on your computer or phone first, Boss.";
         }
@@ -1263,6 +1406,17 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
     const hasAutomationKeywords = /\b(todoist|notion|task|email|remind|add to|save to|jobs?|movie|movies|film|tickets?|flights?|book|scrape|track|directions?)\b/.test(lower);
     if (spotifySearchMatch && !lower.includes("youtube") && !hasAutomationKeywords) {
       const query = spotifySearchMatch[2]?.trim() || spotifySearchMatch[1]?.trim();
+      let searchAuthRequired = false;
+      // "play the first song", "play my liked songs", "open my playlist" are
+      // POSITIONAL references, not song titles. They used to be searched verbatim
+      // and fail with "I couldn't find \"first song\"…". There is nothing to look
+      // up, so let the command fall through to the live browser agent instead.
+      const vagueTrackRef =
+        /^(?:the\s+)?(?:first|last|next|previous|current|latest|top|best|same|this|that|some|any|a|an|my|our)?\s*(?:song|track|tune|music|one|number|item)s?$/i.test(query) ||
+        /\b(?:liked|saved|favourite|favorite|my)\s+(?:songs?|tracks?|music)\b|\bplaylists?\b/i.test(query);
+      if (vagueTrackRef) {
+        return null;
+      }
       try {
         const response = await fetch("/api/spotify", {
           method: "POST",
@@ -1270,7 +1424,11 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
           body: JSON.stringify({ action: "search", query }),
         });
         const data = await response.json();
-        if (data.success && data.results?.tracks?.items?.length > 0) {
+        if (data.authRequired) {
+          // The saved Spotify login is dead, so NOTHING can be searched. Say so
+          // and drive the desktop app instead of claiming the song doesn't exist.
+          searchAuthRequired = true;
+        } else if (data.success && data.results?.tracks?.items?.length > 0) {
           const track = data.results.tracks.items[0];
           // Play the first result
           await fetch("/api/spotify", {
@@ -1283,6 +1441,7 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
       } catch (e) {
         console.error("Spotify search failed:", e);
       }
+      if (searchAuthRequired) return await startSpotifyDesktop();
       return `I couldn't find "${query}". Your musical taste remains a mystery to me, Boss.`;
     }
 
@@ -1606,13 +1765,6 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
       return /[+\d]/.test(target)
         ? `Opening Project Diplomat with ${target} ready, Boss. Press Start AI Call, then dial it on a phone on speaker (or share the WebRTC room) and I'll handle the talking.`
         : "Opening Project Diplomat, Boss. I need a phone number with its country code to dial.";
-    }
-
-    // rPPG VITALS SCAN COMMANDS
-    if (lower.match(/\b(vitals|heart\s+rate|pulse\s+check|check\s+(?:my\s+)?pulse|measure\s+stress|rppg)\b/i)) {
-      setActivePanel("mcp-hub");
-      onOpenMcpHub?.();
-      return "Engaging rPPG Optical Vitals Sentinel, Boss. Align your face with the targeting reticle.";
     }
 
     // MARK PROTOTYPE 3D CAD COMMANDS
@@ -3261,17 +3413,12 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
         case "amazon_buy": {
           const product = parsed.params.product as string;
           if (product) {
-            const searchUrl = `https://www.amazon.in/s?k=${encodeURIComponent(product)}`;
-            try {
-              fetch("/api/playwright", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ action: "buy", url: searchUrl, selector: product }),
-              }).catch(err => console.error("Playwright trigger failed:", err));
-              return `Initializing Amazon automation for "${product}", Boss. I'll search for the best match and guide you through the process.`;
-            } catch {
-              return "I couldn't initialize the shopping automation, Boss.";
-            }
+            // No hardcoded shopping flow: hand the errand to the generic agent
+            // so it works the same way it does for any other site, in the same
+            // watchable window that stays open when it finishes.
+            const goal = `Go to amazon.in, search for "${product}", and open the first matching product`;
+            dispatchBrowserTask(goal, "https://www.amazon.in", addMessage, speak);
+            return `On it, Boss. Watch the browser — I'm looking up "${product}" on Amazon live. I'll report back as soon as I have it.`;
           }
           return null;
         }
@@ -3458,9 +3605,32 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
           return "I need a URL to fill the form, Boss.";
         }
 
+        // The generic agentic browser: a plain-language goal worked out live
+        // against whatever the page actually contains. Runs in a VISIBLE window
+        // (moving cursor, cyan spotlight, status strip) so it can be watched.
+        // It takes 20-60s, so we acknowledge instantly and report the real
+        // answer as a follow-up message instead of blocking the reply.
+        case "browser_task": {
+          const goal =
+            (parsed.params.task as string) ||
+            (parsed.params.goal as string) ||
+            (parsed.params.query as string) ||
+            "";
+          if (!goal) return "What should I do in the browser, Boss?";
+          const startUrl = (parsed.params.url as string) || undefined;
+          dispatchBrowserTask(goal, startUrl, addMessage, speak);
+          return `On it, Boss. Watch the browser — I'm working through "${goal}" live. I'll report back as soon as I have it.`;
+        }
+
         case "search_web": {
           const query = parsed.params.query as string;
           if (query) {
+            // If they named a real site, browse it live rather than dumping the
+            // whole sentence into a Google tab.
+            if (mentionsLiveSite(query)) {
+              dispatchBrowserTask(query, namedSiteUrl(query), addMessage, speak);
+              return `On it, Boss. Watch the browser — I'm handling "${query}" live. I'll report back as soon as I have it.`;
+            }
             window.open(`https://google.com/search?q=${encodeURIComponent(query)}`, "_blank");
             return `Searching Google for "${query}", Boss.`;
           }
@@ -4032,12 +4202,30 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
 
   // Send message to Claude API
   const sendToClaude = async (userMessage: string, signal?: AbortSignal) => {
-    // Client-side ceiling on the whole turn. The server already bounds itself
-    // with a 5s provider budget, but a wedged dev-server compile or a dropped
-    // socket would otherwise leave the UI in "Thinking" forever. When this
-    // fires we surface a real error instead of hanging.
-    const clientCtrl = new AbortController();
-    const clientTimer = setTimeout(() => clientCtrl.abort(), 20000);
+    // ── Turn timing ──────────────────────────────────────────────────────
+    // The server bounds its own provider chain (9s budget) and measured TTFB
+    // is ~0.2-1.0s even with three requests in flight. So a stall here is a
+    // CLIENT socket problem, never a slow provider. The previous hard 20s
+    // ceiling reported "providers stalled out", which blamed the wrong thing,
+    // and it also discarded whatever had already streamed onto the screen.
+    //
+    // Instead: a STALL watchdog that resets on every chunk. A stream that is
+    // actively delivering is never cut off mid-answer, while a genuinely wedged
+    // socket is still caught. One automatic retry on top, because a fresh
+    // connection almost always succeeds immediately.
+    const STALL_MS = 30000;
+    let activeCtrl: AbortController | null = null;
+    let watchdog: ReturnType<typeof setTimeout> | null = null;
+    let feedWatchdog: () => void = () => {};
+    const stopWatchdog = () => {
+      if (watchdog) {
+        clearTimeout(watchdog);
+        watchdog = null;
+      }
+    };
+    const userAborted = () => !!signal?.aborted;
+    // Hoisted so the error path below can still keep a partial answer.
+    let fullResponse = "";
     try {
       setState("thinking");
       setStreamingContent("");
@@ -4045,35 +4233,56 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
       const context = buildContext();
       const systemPrompt = buildSystemPrompt(context);
 
-      // Fetch with one automatic retry on transient network errors (e.g. the rare
-      // browser connection-pool hiccup that produces 'Failed to fetch' before
-      // the stream even starts).  Explicit AbortErrors are NOT retried.
-      let response: Response;
-      try {
-        response = await fetch("/api/chat", {
+      // One attempt = a fresh controller plus its own stall watchdog. Note the
+      // old code attached clientCtrl to the fetch ONLY when no external signal
+      // was passed, so the ceiling silently governed nothing.
+      const openStream = (): Promise<Response> => {
+        const ctrl = new AbortController();
+        activeCtrl = ctrl;
+        if (signal) {
+          if (signal.aborted) ctrl.abort();
+          else signal.addEventListener("abort", () => ctrl.abort(), { once: true });
+        }
+        feedWatchdog = () => {
+          if (watchdog) clearTimeout(watchdog);
+          watchdog = setTimeout(() => ctrl.abort(), STALL_MS);
+        };
+        feedWatchdog();
+        return fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             messages: [...messages, { role: "user", content: userMessage }],
             systemPrompt,
           }),
-          signal: signal ?? clientCtrl.signal,
+          signal: ctrl.signal,
         });
-      } catch (fetchErr: any) {
-        if (fetchErr?.name === "AbortError") throw fetchErr; // user abort or ceiling
-        // One retry after 400ms — a brief gap to let the socket pool drain.
-        console.warn("[CommandBar] First fetch failed, retrying in 400ms:", fetchErr?.message);
-        await new Promise(r => setTimeout(r, 400));
-        response = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            messages: [...messages, { role: "user", content: userMessage }],
-            systemPrompt,
-          }),
-          signal: signal ?? clientCtrl.signal,
-        });
+      };
+
+      let response: Response | null = null;
+      for (let attempt = 1; attempt <= 2 && !response; attempt++) {
+        try {
+          response = await openStream();
+        } catch (fetchErr: any) {
+          // A genuine barge-in / panel close must stay quiet and bubble up.
+          if (userAborted()) throw fetchErr;
+          if (attempt >= 2) {
+            // Cast defeats control-flow narrowing: activeCtrl is assigned inside
+            // the openStream closure, so TS cannot see the assignment and would
+            // otherwise collapse the type to null here.
+            const stalled = !!(activeCtrl as AbortController | null)?.signal.aborted;
+            throw new Error(
+              stalled
+                ? "The reply stream went silent and did not recover."
+                : (fetchErr?.message || "Could not reach the chat service.")
+            );
+          }
+          console.warn("[CommandBar] Stream attempt failed, retrying once:", fetchErr?.message || "stalled");
+          stopWatchdog();
+          await new Promise((r) => setTimeout(r, 300));
+        }
       }
+      if (!response) throw new Error("Could not reach the chat service.");
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
@@ -4120,7 +4329,7 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
       // Handle streaming response
       const reader = response.body?.getReader();
       const decoder = new TextDecoder();
-      let fullResponse = "";
+      fullResponse = "";
       let buffer = "";
       let lastSpokenIndex = 0;
 
@@ -4133,6 +4342,8 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
+          // Data arrived — the socket is alive, so reset the stall window.
+          feedWatchdog();
 
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split("\n");
@@ -4176,6 +4387,7 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
           if (streamError) break;
         }
         } finally {
+          stopWatchdog();
           // Always release the upstream socket to prevent browser connection pool exhaustion.
           // Without this, each streaming reply holds a socket open and after 6 messages
           // subsequent fetch calls throw 'Failed to fetch' until sockets drain.
@@ -4227,14 +4439,25 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
       // failure, so stay quiet (the old generic error fired on these too).
       // An abort raised by our own ceiling is a failure, and is reported.
       if (err?.name === "AbortError") {
-        if (!clientCtrl.signal.aborted || signal?.aborted) {
+        stopWatchdog();
+        // A real barge-in / panel close — not a failure, stay quiet.
+        if (userAborted()) {
+          setState("idle");
+          return;
+        }
+        // Our stall watchdog fired. If words already streamed, the answer is
+        // genuine — keep it rather than throwing it away for an apology (the
+        // old code replaced a partially received reply with an error).
+        if (fullResponse.trim()) {
+          addMessage({ role: "assistant", content: fullResponse });
+          speak(fullResponse);
           setState("idle");
           return;
         }
         addMessage({
           role: "assistant",
           content:
-            "That one took too long, Boss — my providers stalled out. Give it another go and I'll route around it.",
+            "The reply stream went silent before any words arrived, Boss — the language providers themselves were fine. This is usually a wedged browser connection; closing other JARVIS panels or reloading clears it. Try once more.",
         });
         setState("idle");
         return;
@@ -4255,7 +4478,7 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
       });
       setState("idle");
     } finally {
-      clearTimeout(clientTimer);
+      stopWatchdog();
     }
   };
 

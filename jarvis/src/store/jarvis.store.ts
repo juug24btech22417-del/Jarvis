@@ -59,6 +59,8 @@ export interface ClipboardAssist {
   /** Foreground app/window the copy came from (best effort, may be empty). */
   source?: string;
   analysis: Record<string, any>;
+  /** What the clip was detected as (kind, label, per-kind action buttons). */
+  detection?: Record<string, any>;
   at: number;
 }
 

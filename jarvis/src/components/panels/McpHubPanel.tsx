@@ -34,15 +34,13 @@ import {
   Globe,
   Plus,
   Radio,
-  Heart,
   Box,
 } from "lucide-react";
 import DiplomatTab from "@/components/mcp/DiplomatTab";
-import VitalsTab from "@/components/mcp/VitalsTab";
 import CadTab from "@/components/mcp/CadTab";
 import { useJarvisStore } from "@/store/jarvis.store";
 
-type McpKey = "whatsapp" | "diplomat" | "vitals" | "markprototype" | "github" | "filesystem" | "googlemaps";
+type McpKey = "whatsapp" | "diplomat" | "markprototype" | "github" | "filesystem" | "googlemaps";
 
 async function postMcp(body: any): Promise<any> {
   const send = () =>
@@ -514,7 +512,6 @@ export default function McpHubPanel() {
   const tabs: { id: McpKey; label: string; icon: React.ReactNode; blurb: string }[] = [
     { id: "whatsapp", label: "WhatsApp", icon: <MessageSquare className="h-4 w-4 text-emerald-400" />, blurb: "Headless daemon" },
     { id: "diplomat", label: "Diplomat", icon: <Radio className="h-4 w-4 text-cyan-400" />, blurb: "Voice calling agent" },
-    { id: "vitals", label: "rPPG Vitals", icon: <Heart className="h-4 w-4 text-rose-400" />, blurb: "Contactless pulse" },
     { id: "markprototype", label: "Mark CAD", icon: <Box className="h-4 w-4 text-amber-400" />, blurb: "Text-to-3D print" },
     { id: "github", label: "GitHub", icon: <GitBranch className="h-4 w-4 text-purple-400" />, blurb: "Any repo" },
     { id: "filesystem", label: "Filesystem", icon: <FolderTree className="h-4 w-4 text-blue-400" />, blurb: "Read · write" },
@@ -587,9 +584,6 @@ export default function McpHubPanel() {
         >
           {/* ═══════════ PROJECT DIPLOMAT ═══════════ */}
           {activeMcp === "diplomat" && <DiplomatTab initialNumber={dialSeed} />}
-
-          {/* ═══════════ rPPG VITALS SENTINEL ═══════════ */}
-          {activeMcp === "vitals" && <VitalsTab />}
 
           {/* ═══════════ MARK PROTOTYPE 3D CAD ═══════════ */}
           {activeMcp === "markprototype" && <CadTab />}

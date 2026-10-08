@@ -1031,11 +1031,6 @@ export async function POST(req: NextRequest) {
         const res = await handleDiplomat(action, params || {});
         return NextResponse.json(res);
       }
-      case "vitals": {
-        const { handleVitals } = await import("@/lib/mcp/vitalsHandler");
-        const res = await handleVitals(action, params || {});
-        return NextResponse.json(res);
-      }
       case "cad": {
         const { handleCad } = await import("@/lib/mcp/cadHandler");
         const res = await handleCad(action, params || {});
@@ -1053,7 +1048,7 @@ export async function POST(req: NextRequest) {
 export async function GET() {
   return NextResponse.json({
     success: true,
-    providers: ["github", "filesystem", "googlemaps", "whatsapp", "diplomat", "vitals", "cad"],
+    providers: ["github", "filesystem", "googlemaps", "whatsapp", "diplomat", "cad"],
     projectRoot: PROJECT_ROOT,
   });
 }

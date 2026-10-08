@@ -13,6 +13,7 @@
 
 import { prisma } from "@/lib/db/queries";
 import { getAnniversary, getThrowback } from "./journey";
+import { callJsonLlm } from "@/lib/llm/fastJson";
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -768,6 +769,52 @@ function firstName(name: string): string {
 }
 
 /**
+ * Write the greeting fresh, from the facts we actually gathered.
+ *
+ * The template below picks between two or three canned lines per section, so
+ * with no absence/mood/thread context it produced the same handful of
+ * sentences every launch. This composes a new one each time instead, and is
+ * explicitly forbidden from inventing anything the context does not contain.
+ * Returns null when no provider is reachable so the caller can fall back.
+ */
+async function composeGreeting(input: {
+  name: string;
+  timeBand: string;
+  now: Date;
+  notes: string[];
+}): Promise<string | null> {
+  const { name, timeBand, now, notes } = input;
+  const weekday = now.toLocaleDateString(undefined, { weekday: "long" });
+  const clock = now.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+
+  const result = await callJsonLlm<{ greeting: string }>({
+    system: `You are JARVIS greeting Boss the moment he opens the interface.
+Write exactly ONE or TWO short spoken sentences, at most 30 words total.
+
+RULES:
+- Vary your wording every single time. Never reuse a stock or templated line.
+- Use ONLY the facts given. Never invent an event, person, task, memory or mood that is not listed.
+- The context notes are real things you observed. Weave in AT MOST ONE, and only if it fits naturally.
+- If there are no notes, greet him naturally using the weekday and time of day. Do not pad it out.
+- No emoji, no stage directions, no surrounding quotes. Address him as Boss.
+Respond with ONLY {"greeting":"<the sentence>"}.`,
+    user: `Name: ${name}
+Weekday: ${weekday}
+Local time: ${clock}
+Time band: ${timeBand}
+Real context notes (may be empty): ${notes.length ? notes.join("; ") : "(none)"}`,
+    // 0.9 keeps the phrasing genuinely different between launches.
+    temperature: 0.9,
+    maxTokens: 160,
+    timeoutMs: 6000,
+    label: "CompanionGreeting",
+  });
+
+  const text = result?.greeting?.trim();
+  return text && text.length > 2 ? text : null;
+}
+
+/**
  * A greeting that only JARVIS could give *this* user.
  * Deterministic structure, varied phrasing, real memory behind it.
  */
@@ -897,6 +944,15 @@ export async function buildCompanionGreeting(
     }
   } catch {
     // non-fatal
+  }
+
+  // Prefer a freshly written line. The canned variants assembled above are the
+  // FALLBACK for when no provider is reachable — they were never meant to be
+  // the product, and they are exactly why the greeting read almost identically
+  // on every launch.
+  const composed = await composeGreeting({ name, timeBand, now, notes: careNotes });
+  if (composed) {
+    return { text: composed, careNotes };
   }
 
   return {

@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "tsx tests/missionPlan.test.ts && tsx tests/missionGoals.test.ts && tsx tests/commandDeck.test.ts && tsx tests/commandRouting.test.ts && tsx tests/machineOps.test.ts && tsx tests/missionRuntime.test.ts && tsx tests/missionAgents.test.ts && tsx tests/jarvisSurfaces.test.ts && tsx tests/memoryLearn.test.ts && tsx tests/proximity.test.ts && tsx tests/handPose.test.ts && tsx tests/gazeCursor.test.ts && tsx tests/eyeCalibration.test.ts && tsx tests/researchPipeline.test.ts",
+    "test": "tsx tests/missionPlan.test.ts && tsx tests/missionGoals.test.ts && tsx tests/clipboardDetect.test.ts && tsx tests/commandDeck.test.ts && tsx tests/commandRouting.test.ts && tsx tests/machineOps.test.ts && tsx tests/missionRuntime.test.ts && tsx tests/missionAgents.test.ts && tsx tests/jarvisSurfaces.test.ts && tsx tests/memoryLearn.test.ts && tsx tests/proximity.test.ts && tsx tests/handPose.test.ts && tsx tests/gazeCursor.test.ts && tsx tests/eyeCalibration.test.ts && tsx tests/researchPipeline.test.ts",
     "hotkey": "powershell -ExecutionPolicy Bypass -File scripts/hotkey-listener.ps1",
     "clipboard": "powershell -ExecutionPolicy Bypass -File scripts/clipboard-watcher.ps1",
     "whatsapp:server": "node ../whatsapp-server.js"

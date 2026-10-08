@@ -75,6 +75,8 @@ export interface ClipboardAssistEvent {
   source?: string;
   /** Result of analyzeSnippet — kept loose to avoid a type-import cycle. */
   analysis: Record<string, any>;
+  /** What the clip was detected as (kind + its action buttons). */
+  detection?: Record<string, any>;
   at: number;
 }
 

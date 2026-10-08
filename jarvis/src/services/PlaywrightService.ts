@@ -20,7 +20,7 @@ class PlaywrightService {
   async takeScreenshot(url: string): Promise<PlaywrightResponse> {
     try {
       console.log(`[Playwright] Navigating to ${url} for screenshot...`);
-      const browser = await chromium.launch({ headless: true });
+      const browser = await chromium.launch({ headless: process.env.JARVIS_BROWSER_VISIBLE === "0", slowMo: process.env.JARVIS_BROWSER_VISIBLE === "0" ? 0 : 150, args: process.env.JARVIS_BROWSER_VISIBLE === "0" ? [] : ["--start-maximized", "--window-position=40,40"] });
       const page = await browser.newPage();
       await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
       const screenshotBuffer = await page.screenshot({ type: 'jpeg', quality: 80 });
@@ -42,7 +42,7 @@ class PlaywrightService {
   async extractText(url: string, selector: string): Promise<PlaywrightResponse> {
     try {
       console.log(`[Playwright] Extracting text from ${url} with selector ${selector}...`);
-      const browser = await chromium.launch({ headless: true });
+      const browser = await chromium.launch({ headless: process.env.JARVIS_BROWSER_VISIBLE === "0", slowMo: process.env.JARVIS_BROWSER_VISIBLE === "0" ? 0 : 150, args: process.env.JARVIS_BROWSER_VISIBLE === "0" ? [] : ["--start-maximized", "--window-position=40,40"] });
       const page = await browser.newPage();
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
       // Use .first() to avoid strict mode violations if multiple elements match
@@ -64,7 +64,7 @@ class PlaywrightService {
   async clickElement(url: string, selector: string): Promise<PlaywrightResponse> {
     try {
       console.log(`[Playwright] Clicking ${selector} on ${url}...`);
-      const browser = await chromium.launch({ headless: true });
+      const browser = await chromium.launch({ headless: process.env.JARVIS_BROWSER_VISIBLE === "0", slowMo: process.env.JARVIS_BROWSER_VISIBLE === "0" ? 0 : 150, args: process.env.JARVIS_BROWSER_VISIBLE === "0" ? [] : ["--start-maximized", "--window-position=40,40"] });
       const page = await browser.newPage();
       await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
       await page.locator(selector).click();
@@ -439,7 +439,7 @@ class PlaywrightService {
     let browser;
     try {
       console.log(`[Playwright] Capturing ${format} of ${url}...`);
-      browser = await chromium.launch({ headless: true });
+      browser = await chromium.launch({ headless: process.env.JARVIS_BROWSER_VISIBLE === "0", slowMo: process.env.JARVIS_BROWSER_VISIBLE === "0" ? 0 : 150, args: process.env.JARVIS_BROWSER_VISIBLE === "0" ? [] : ["--start-maximized", "--window-position=40,40"] });
       const page = await browser.newPage();
       await page.goto(url, { waitUntil: 'load', timeout: 30000 });
       await page.waitForTimeout(3000);
@@ -479,7 +479,7 @@ class PlaywrightService {
       let browser;
       try {
         console.log(`[Playwright] Checking ${store.name} for "${product}"...`);
-        browser = await chromium.launch({ headless: true });
+        browser = await chromium.launch({ headless: process.env.JARVIS_BROWSER_VISIBLE === "0", slowMo: process.env.JARVIS_BROWSER_VISIBLE === "0" ? 0 : 150, args: process.env.JARVIS_BROWSER_VISIBLE === "0" ? [] : ["--start-maximized", "--window-position=40,40"] });
         const ctx = await browser.newContext({ userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36', viewport: { width: 1280, height: 720 }, locale: 'en-IN' });
         const page = await ctx.newPage();
         await page.goto(store.url, { waitUntil: 'load', timeout: 30000 });
@@ -510,7 +510,7 @@ class PlaywrightService {
     let browser;
     try {
       console.log(`[Playwright] Scraping news for "${topic}"...`);
-      browser = await chromium.launch({ headless: true });
+      browser = await chromium.launch({ headless: process.env.JARVIS_BROWSER_VISIBLE === "0", slowMo: process.env.JARVIS_BROWSER_VISIBLE === "0" ? 0 : 150, args: process.env.JARVIS_BROWSER_VISIBLE === "0" ? [] : ["--start-maximized", "--window-position=40,40"] });
       const page = await browser.newPage();
       await page.goto(`https://news.google.com/search?q=${encodeURIComponent(topic)}&hl=en-IN`, { waitUntil: 'load', timeout: 30000 });
       await page.waitForTimeout(3000);
@@ -824,7 +824,7 @@ class PlaywrightService {
     let browser;
     try {
       console.log(`[Playwright] Scraping ${url} for "${whatToFind}"...`);
-      browser = await chromium.launch({ headless: true });
+      browser = await chromium.launch({ headless: process.env.JARVIS_BROWSER_VISIBLE === "0", slowMo: process.env.JARVIS_BROWSER_VISIBLE === "0" ? 0 : 150, args: process.env.JARVIS_BROWSER_VISIBLE === "0" ? [] : ["--start-maximized", "--window-position=40,40"] });
       const ctx = await browser.newContext({
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         viewport: { width: 1280, height: 720 },
@@ -922,7 +922,7 @@ class PlaywrightService {
     let browser;
     try {
       console.log(`[Playwright] Tracking package ${trackingId} on ${courier}...`);
-      browser = await chromium.launch({ headless: true });
+      browser = await chromium.launch({ headless: process.env.JARVIS_BROWSER_VISIBLE === "0", slowMo: process.env.JARVIS_BROWSER_VISIBLE === "0" ? 0 : 150, args: process.env.JARVIS_BROWSER_VISIBLE === "0" ? [] : ["--start-maximized", "--window-position=40,40"] });
       const ctx = await browser.newContext({
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         viewport: { width: 1280, height: 720 },

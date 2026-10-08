@@ -15,6 +15,36 @@
 export async function register() {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
 
+  // ── Network resilience (installed before any request is served) ──
+  // A transient DNS failure inside the Node process makes EVERY provider fail
+  // at the same instant with `TypeError: fetch failed` — Groq, Gemini,
+  // OpenRouter and NVIDIA together — which looks like "all models are down"
+  // and reads as rate limiting, though the providers were never contacted.
+  // Measured on this machine, curl reaches the same hosts successfully while
+  // Node reports fetch failed, and the provider logs only ever printed
+  // err.message (literally "fetch failed"), hiding the real code in err.cause.
+  //   • ipv4first  — a broken IPv6 route is a common cause of Node-only connect
+  //                  failures while curl's happy-eyeballs silently falls back.
+  //   • fetch retry — a DNS blip is sub-second; one delayed retry clears it.
+  // Imported dynamically so node-only modules stay out of the edge build.
+  try {
+    // IMPORTANT: do NOT write `import("node:dns")` here. This file is compiled
+    // by webpack for the edge runtime as well, and a "node:" specifier fails the
+    // build with UnhandledSchemeError — which 500s EVERY route sharing that
+    // build. getBuiltinModule (Node 22.3+) resolves it at runtime instead, so
+    // webpack never sees it. Confirmed on Node v24.
+    const dns = (process as unknown as { getBuiltinModule?: (n: string) => any })
+      .getBuiltinModule?.("dns");
+    dns?.setDefaultResultOrder?.("ipv4first");
+    // fetchRetry is an app-internal module using only web APIs, so this import
+    // is bundler-safe.
+    const { installFetchRetry } = await import("@/lib/net/fetchRetry");
+    installFetchRetry();
+    console.log("[NetGuard] ipv4first + global fetch retry installed");
+  } catch (err) {
+    console.warn("[NetGuard] install failed (non-fatal):", (err as Error)?.message);
+  }
+
   // ── Audio meter warmup (fire-and-forget) ──
   // The music-reactive reactor polls /api/system/audio; the first poll used
   // to spawn a cold PowerShell/WASAPI meter process mid-session, so the

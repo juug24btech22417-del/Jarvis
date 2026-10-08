@@ -2,7 +2,6 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { QrCode, Radio, Clapperboard, Scan, FileText, Brain, ListTodo, Ear, UserCheck, Bot, Sparkles, Layers } from "lucide-react";
 import ArcReactor from "@/components/reactor/ArcReactor";
 import AvengersAssemble from "@/components/cinematic/AvengersAssemble";
 import StatusHUD from "@/components/panels/StatusHUD";
@@ -29,9 +28,9 @@ import PhoneRemotePanel from "@/components/panels/PhoneRemotePanel";
 import GesturePractice from "@/components/ui/GesturePractice";
 import ScreenNarratorToast from "@/components/ui/ScreenNarratorToast";
 import ConnectedPanel from "@/components/panels/ConnectedPanel";
+import AppDeck, { type DeckId } from "@/components/hud/AppDeck";
 import CommunicationHub from "@/components/panels/CommunicationHub";
 import SecurityPanel from "@/components/panels/SecurityPanel";
-import SentinelArmToggle from "@/components/panels/SentinelArmToggle";
 import { useSentinelWatcher } from "@/hooks/useSentinelWatcher";
 import VaultPanel from "@/components/panels/VaultPanel";
 import DungeonPanel from "@/components/panels/DungeonPanel";
@@ -652,6 +651,59 @@ export default function Home() {
     }).catch(() => {});
   }, []);
 
+  // App Deck -> the panel each entry opens. One place, so the deck component
+  // stays a pure UI shell and the panel state stays here with its siblings.
+  const launchDeck = useCallback(
+    (deckId: DeckId) => {
+      recordPanelOpen(deckId);
+      switch (deckId) {
+        case "security":
+          setSecurityOpen(true);
+          break;
+        case "second-brain":
+          setSecondBrainOpen(true);
+          break;
+        case "tasks":
+          setTaskDeckOpen(true);
+          break;
+        case "telegram":
+          setTelegramOpen(true);
+          break;
+        case "connected":
+          setConnectedOpen(true);
+          break;
+        case "qr-teleporter":
+          setTeleportOpen(true);
+          break;
+        case "proximity-scanner":
+          setProximityOpen(true);
+          break;
+        case "video-director":
+          setVideoDirectorOpen(true);
+          break;
+        case "room-scanner":
+          setRoomScannerOpen(true);
+          break;
+        case "whiteboard-ocr":
+          setWhiteboardOpen(true);
+          break;
+        case "meeting-shadow":
+          setMeetingShadowOpen(true);
+          break;
+        case "face-crm":
+          setFaceCrmOpen(true);
+          break;
+        case "task-agent":
+          setTaskAgentOpen(true);
+          break;
+        case "mcp-hub":
+          setMcpHubOpen(true);
+          break;
+      }
+    },
+    [recordPanelOpen]
+  );
+
   // Tier 2: API-based features
   const [weatherOpen, setWeatherOpen] = useState(false);
   const [spotifyOpen, setSpotifyOpen] = useState(false);
@@ -1057,252 +1109,10 @@ export default function Home() {
             )}
           </AnimatePresence>
 
-          {/* Holographic App Dock (top-left) — home screen only. Every panel is
-              modal, so the dock steps aside instead of floating over it. */}
-          {desktopView && (
-          <div className="fixed top-12 sm:top-16 left-2 sm:left-5 z-[75] flex items-center gap-1.5 sm:gap-2.5 overflow-x-auto max-w-[calc(100vw-1rem)] sm:max-w-none pb-1 no-scrollbar">
-            <SentinelArmToggle />
-
-            {/* Second Brain launcher */}
-            <motion.button
-              whileHover={{ scale: 1.08, y: -1 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={() => {
-                recordPanelOpen("second-brain");
-                setSecondBrainOpen(true);
-              }}
-              title="Second Brain — your memory constellation"
-              aria-label="Open Second Brain"
-              className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-400/50 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240]"
-            >
-              <div className="absolute inset-0 rounded-full bg-gradient-to-br from-cyan-500/25 to-violet-600/10 opacity-70 group-hover:opacity-100 transition-opacity" />
-              <Brain className="w-5 h-5 text-cyan-300 group-hover:text-cyan-100 transition-colors drop-shadow-[0_0_8px_rgba(0,243,255,0.8)] relative z-10" />
-            </motion.button>
-
-            {/* Command Deck — tasks + timers */}
-            <motion.button
-              whileHover={{ scale: 1.08, y: -1 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={() => {
-                recordPanelOpen("tasks");
-                setTaskDeckOpen(true);
-              }}
-              title="Command Deck — your tasks and timers"
-              aria-label="Open Command Deck"
-              className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-amber-400/50 hover:border-amber-300 bg-[#1a1206]/90 hover:bg-[#241a08]"
-            >
-              <div className="absolute inset-0 rounded-full bg-gradient-to-br from-amber-500/25 to-orange-600/10 opacity-70 group-hover:opacity-100 transition-opacity" />
-              <ListTodo className="w-5 h-5 text-amber-300 group-hover:text-amber-100 transition-colors drop-shadow-[0_0_8px_rgba(255,190,60,0.8)] relative z-10" />
-            </motion.button>
-
-            {/* Telegram quick-launch button */}
-            <AnimatePresence>
-              {!telegramOpen && (
-                <motion.button
-                  key="telegram-launcher"
-                  initial={{ opacity: 0, scale: 0.8 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.8 }}
-                  whileHover={{ scale: 1.08, y: -1 }}
-                  whileTap={{ scale: 0.95 }}
-                  onClick={() => {
-                    recordPanelOpen("telegram");
-                    setTelegramOpen(true);
-                  }}
-                  title="Open Telegram Bot Relay"
-                  aria-label="Open Telegram Bot Relay"
-                  className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-400/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240]"
-                >
-                  <div className="absolute inset-0 rounded-full bg-gradient-to-br from-cyan-500/25 to-blue-600/10 opacity-70 group-hover:opacity-100 transition-opacity" />
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    viewBox="0 0 24 24"
-                    fill="currentColor"
-                    className="w-5 h-5 text-cyan-400 group-hover:text-cyan-200 transition-colors drop-shadow-[0_0_8px_rgba(0,243,255,0.7)] relative z-10"
-                    aria-hidden="true"
-                  >
-                    <path d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 13.3 3.64 12c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.73 12.86c-.19.91-.74 1.13-1.5.71L12.6 16.3l-1.99 1.93c-.23.23-.42.42-.83.42z" />
-                  </svg>
-                  {/* Glowing online indicator dot */}
-                  <span className="absolute top-0.5 right-0.5 w-2 h-2 rounded-full bg-cyan-400 ring-2 ring-[#061426] shadow-[0_0_8px_#00f3ff]" />
-                </motion.button>
-              )}
-            </AnimatePresence>
-
-            {/* Connected Apps launcher */}
-            <AnimatePresence>
-              {!connectedOpen && (
-                <motion.button
-                  key="connected-launcher"
-                  initial={{ opacity: 0, scale: 0.8 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.8 }}
-                  whileHover={{ scale: 1.08, y: -1 }}
-                  whileTap={{ scale: 0.95 }}
-                  onClick={() => {
-                    recordPanelOpen("connected");
-                    setConnectedOpen(true);
-                  }}
-                  title="Open Connected Apps"
-                  aria-label="Open Connected Apps"
-                  className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240]"
-                >
-                  <div className="absolute inset-0 rounded-full bg-gradient-to-br from-cyan-500/25 to-teal-600/10 opacity-70 group-hover:opacity-100 transition-opacity" />
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    className="w-5 h-5 text-cyan-400 group-hover:text-cyan-200 transition-colors drop-shadow-[0_0_8px_rgba(0,243,255,0.7)] relative z-10"
-                    aria-hidden="true"
-                  >
-                    <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
-                  </svg>
-                </motion.button>
-              )}
-            </AnimatePresence>
-
-            {/* QR Teleporter launcher */}
-            <motion.button
-              whileHover={{ scale: 1.08, y: -1 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={() => {
-                recordPanelOpen("qr-teleporter");
-                setTeleportOpen(true);
-              }}
-              title="Quantum QR Teleporter (Beam to Phone)"
-              aria-label="Quantum QR Teleporter"
-              className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240]"
-            >
-              <QrCode className="w-5 h-5 text-cyan-400 group-hover:text-cyan-200 transition-colors drop-shadow-[0_0_8px_rgba(0,243,255,0.7)]" />
-            </motion.button>
-
-            {/* Proximity Awareness Radar launcher */}
-            <motion.button
-              whileHover={{ scale: 1.08, y: -1 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={() => {
-                recordPanelOpen("proximity-scanner");
-                setProximityOpen(true);
-              }}
-              title="Proximity Radar & Desk Presence"
-              aria-label="Proximity Radar"
-              className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240]"
-            >
-              <Radio className="w-5 h-5 text-green-400 group-hover:text-green-200 transition-colors drop-shadow-[0_0_8px_rgba(0,255,136,0.7)]" />
-            </motion.button>
-
-            {/* AI Video Director launcher */}
-            <motion.button
-              whileHover={{ scale: 1.08, y: -1 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={() => {
-                recordPanelOpen("video-director");
-                setVideoDirectorOpen(true);
-              }}
-              title="Stark Cinema AI Video Director"
-              aria-label="AI Video Director"
-              className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240]"
-            >
-              <Clapperboard className="w-5 h-5 text-amber-400 group-hover:text-amber-200 transition-colors drop-shadow-[0_0_8px_rgba(255,170,0,0.7)]" />
-            </motion.button>
-
-            {/* Spatial Room Scanner launcher */}
-            <motion.button
-              whileHover={{ scale: 1.08, y: -1 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={() => {
-                recordPanelOpen("room-scanner");
-                setRoomScannerOpen(true);
-              }}
-              title="Spatial Desk & Room Scanner"
-              aria-label="Spatial Room Scanner"
-              className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240]"
-            >
-              <Scan className="w-5 h-5 text-cyan-400 group-hover:text-cyan-200 transition-colors drop-shadow-[0_0_8px_rgba(0,243,255,0.7)]" />
-            </motion.button>
-
-
-
-            {/* Whiteboard OCR launcher */}
-            <motion.button
-              whileHover={{ scale: 1.08, y: -1 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={() => {
-                recordPanelOpen("whiteboard-ocr");
-                setWhiteboardOpen(true);
-              }}
-              title="Whiteboard OCR & Schematic Digitizer"
-              aria-label="Whiteboard OCR"
-              className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240] shrink-0"
-            >
-              <FileText className="w-5 h-5 text-purple-400 group-hover:text-purple-200 transition-colors drop-shadow-[0_0_8px_rgba(168,85,247,0.7)]" />
-            </motion.button>
-
-            {/* Real-Time Meeting Shadow launcher */}
-            <motion.button
-              whileHover={{ scale: 1.08, y: -1 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={() => {
-                recordPanelOpen("meeting-shadow");
-                setMeetingShadowOpen(true);
-              }}
-              title="Real-Time Meeting Shadow (Private Earpiece AI)"
-              aria-label="Meeting Shadow"
-              className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240] shrink-0 shadow-[0_0_12px_rgba(6,182,212,0.3)]"
-            >
-              <Ear className="w-5 h-5 text-cyan-400 group-hover:text-cyan-200 transition-colors drop-shadow-[0_0_8px_rgba(0,243,255,0.7)]" />
-            </motion.button>
-
-            {/* Face-to-CRM launcher */}
-            <motion.button
-              whileHover={{ scale: 1.08, y: -1 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={() => {
-                recordPanelOpen("face-crm");
-                setFaceCrmOpen(true);
-              }}
-              title="Face-to-CRM Secret Dossier"
-              aria-label="Face-to-CRM"
-              className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240] shrink-0 shadow-[0_0_12px_rgba(6,182,212,0.3)]"
-            >
-              <UserCheck className="w-5 h-5 text-emerald-400 group-hover:text-emerald-200 transition-colors drop-shadow-[0_0_8px_rgba(16,185,129,0.7)]" />
-            </motion.button>
-
-            {/* Autonomous Task Agent launcher */}
-            <motion.button
-              whileHover={{ scale: 1.08, y: -1 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={() => {
-                recordPanelOpen("task-agent");
-                setTaskAgentOpen(true);
-              }}
-              title="Autonomous Task Agent ('Just Handle It')"
-              aria-label="Autonomous Task Agent"
-              className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240] shrink-0 shadow-[0_0_12px_rgba(6,182,212,0.3)]"
-            >
-              <Bot className="w-5 h-5 text-amber-400 group-hover:text-amber-200 transition-colors drop-shadow-[0_0_8px_rgba(245,158,11,0.7)]" />
-            </motion.button>
-
-            {/* MCP Hub launcher */}
-            <motion.button
-              whileHover={{ scale: 1.08, y: -1 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={() => {
-                recordPanelOpen("mcp-hub");
-                setMcpHubOpen(true);
-              }}
-              title="Model Context Protocol (MCP) Hub - GitHub, Filesystem, Maps, WhatsApp"
-              aria-label="MCP Hub"
-              className="w-11 h-11 aspect-square shrink-0 !rounded-full outline-none focus-visible:!outline-none flex items-center justify-center relative group transition-all duration-300 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-300 bg-[#061426]/90 hover:bg-[#092240] shrink-0 shadow-[0_0_12px_rgba(6,182,212,0.3)]"
-            >
-              <Layers className="w-5 h-5 text-purple-400 group-hover:text-purple-200 transition-colors drop-shadow-[0_0_8px_rgba(168,85,247,0.7)]" />
-            </motion.button>
-          </div>
-          )}
+          {/* App Deck (top-left) — one glass button instead of a row of
+              floating launchers. The deck carries every tool, its live state
+              and its inline controls, so the home screen stays clean. */}
+          {desktopView && <AppDeck onLaunch={launchDeck} />}
 
           {/* Communication Hub */}
           <AnimatePresence>

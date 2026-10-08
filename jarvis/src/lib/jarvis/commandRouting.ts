@@ -72,6 +72,118 @@ export function feedScrollIntent(goal: string): { site: string; url: string; lab
   return { site, url, label };
 }
 
+/** A concrete destination as a dotted host, e.g. github.com, amazon.in, nasa.gov. */
+const LIVE_HOST_RE =
+  /\b((?:[a-z0-9-]+\.)+(?:com|in|org|net|io|dev|co|gov|edu|ai|me|app|shop|store|tv|xyz))\b/i;
+
+/**
+ * Well-known destination BRANDS, the way people actually say them ("go to
+ * amazon", "head to spotify"). Kept as one list so any spoken brand reaches the
+ * live agent instead of a hardcoded handler.
+ *
+ * Deliberately EXCLUDES media/social sites that already have purpose-built
+ * engines — youtube, instagram, facebook, tiktok — so their feed and playback
+ * handlers keep priority. Naming one of those with an explicit navigation verb
+ * still works whenever it is written as a real host.
+ */
+const LIVE_BRAND_RE =
+  /\b(?:amazon|flipkart|myntra|ajio|meesho|snapdeal|ebay|aliexpress|swiggy|zomato|bookmyshow|makemytrip|goibibo|reddit|quora|stack ?overflow|geeksforgeeks|linkedin|naukri|indeed|nasa|wikipedia|imdb|hacker\s?news|github|gmail)\b/i;
+
+/** Verbs that mean "take the browser there". */
+const LIVE_NAV_RE = /\b(?:go|head|navigate|browse|take me)\s+(?:over\s+)?(?:to|into)\b/i;
+
+/** "open <site>" also aims the browser at a destination. */
+const LIVE_OPEN_RE = /\bopen\b/i;
+
+/**
+ * Media/social brands that have their own local handlers (desktop app open,
+ * feed scrolling, playback). A bare "open spotify" or "open youtube and play X"
+ * must stay with those; only an explicit navigation verb ("go to spotify and …")
+ * hands them to the live agent.
+ */
+const LIVE_MEDIA_BRAND_RE =
+  /\b(?:spotify|youtube|yt|netflix|prime video|hotstar|soundcloud|instagram|facebook|tiktok|snapchat)\b/i;
+
+/**
+ * Commerce / form actions that only make sense ON the named site. This is what
+ * lets "add this to the cart on amazon" (no "go to") still reach the live
+ * agent. Deliberately narrow — it must NOT include "search" or "play", or it
+ * would steal "play X on spotify" from the local Spotify client.
+ */
+const LIVE_ACTION_RE =
+  /\b(?:add\b[^.]{0,50}?\bto\s+(?:the\s+|my\s+)?(?:cart|bag|basket)\b|buy|purchase|order|check ?out|proceed to (?:buy|checkout|pay|payment)|place an? order|fill)\b/i;
+
+/** The https URL for the first dotted host named in the text, or undefined. */
+export function namedSiteUrl(text: string): string | undefined {
+  const m = String(text || "").match(LIVE_HOST_RE);
+  return m ? `https://${m[1].toLowerCase()}` : undefined;
+}
+
+/** Whether the text names a real site, by host or by well-known brand. */
+export function mentionsLiveSite(text: string): boolean {
+  const t = String(text || "");
+  return LIVE_HOST_RE.test(t) || LIVE_BRAND_RE.test(t);
+}
+
+/**
+ * Detect an unmistakable LIVE BROWSING errand — "go to <site> … and tell me X".
+ *
+ * This has to be decided before every other keyword handler, because the ones
+ * that run first are greedy and swallow these commands:
+ *   - the word "playwright" opened the Browser Automation PANEL ("…open the
+ *     microsoft/playwright repository…"),
+ *   - "price of" was eaten as a Mission Control research run,
+ *   - and the generic `search|google|look up|find` matcher opened google.com in
+ *     a new tab, so nothing was ever browsed live.
+ *
+ * Deliberately high-precision: it needs an explicit navigation verb aimed at a
+ * real site (or a bare URL). "find the best free react course" and "research
+ * X and open the best one" stay with Mission Control, and "open youtube"
+ * stays with the existing media handlers.
+ *
+ * Returns the goal to hand the generic browser agent, or null.
+ */
+export function liveBrowseIntent(command: string): { task: string; url?: string } | null {
+  const raw = (command || "")
+    .trim()
+    .replace(/^(?:hey\s+)?jarvis[,:]?\s*/i, "")
+    .trim();
+  if (!raw || raw.length > 400) return null;
+
+  // A pasted URL is always a browse job.
+  const urlMatch = raw.match(/https?:\/\/[^\s]+/i);
+  const pasted = urlMatch ? urlMatch[0].replace(/[.,;)]+$/, "") : undefined;
+  if (pasted) return { task: raw, url: pasted };
+
+  // Spotify / YouTube / Instagram … have LOCAL handlers (the desktop app, the
+  // Web API, feed scrolling). "go to spotify and play my liked songs" must use
+  // the installed app, not a browser tab — so when a media brand is the only
+  // thing named, stand aside and let those handlers take it.
+  if (
+    LIVE_MEDIA_BRAND_RE.test(raw) &&
+    !LIVE_HOST_RE.test(raw) &&
+    !LIVE_BRAND_RE.test(raw)
+  ) {
+    return null;
+  }
+
+  // Otherwise it must name a real site (host or brand) AND aim the browser at
+  // it. "go to nasa.gov" and "open wikipedia" count; "open chrome" does not.
+  if (!mentionsLiveSite(raw)) return null;
+
+  const aims =
+    LIVE_NAV_RE.test(raw) ||
+    LIVE_ACTION_RE.test(raw) ||
+    // "open" counts for ordinary sites, but a media brand needs a real
+    // navigation verb so its own app/feed/playback handler keeps priority.
+    (LIVE_OPEN_RE.test(raw) && !LIVE_MEDIA_BRAND_RE.test(raw));
+  if (!aims) return null;
+
+  // A bare host becomes a concrete start URL so the agent can never mistake
+  // nasa.gov for nasa.com — the window opens on the site the user actually said.
+  return { task: raw, url: namedSiteUrl(raw) };
+}
+
 /**
  * "Open mission control" → bring the deck up WITHOUT starting a run.
  *

@@ -19,11 +19,36 @@ import {
   MessageCircleQuestion,
   Wrench,
   ListChecks,
-  Minus,
 } from "lucide-react";
 import { useJarvisStore } from "@/store/jarvis.store";
 
+/* ── Presentation ────────────────────────────────────────────────────────
+ * The clipboard surfaces use the system SF stack with Apple's dark palette
+ * (#1C1C1E / #2C2C2E / #0A84FF) so the cards feel native next to the OS
+ * watcher's own popup, instead of the cyan HUD used elsewhere in JARVIS. */
+const SF =
+  '"SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif';
+const MONO = '"SF Mono", ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace';
+
 type AssistMode = "answer" | "code" | "error" | "task" | "explain";
+
+interface ClipAction {
+  id: string;
+  label: string;
+  /** Handled on the client (open a URL) — never hits a model. */
+  local?: boolean;
+  /** The result code can be applied over the copied snippet. */
+  applies?: boolean;
+}
+
+interface Detection {
+  kind: string;
+  label: string;
+  noun?: string;
+  language?: string;
+  confidence?: number;
+  actions: ClipAction[];
+}
 
 interface ExplainResult {
   mode: AssistMode;
@@ -36,44 +61,110 @@ interface ExplainResult {
   bullets: Array<{ title: string; desc: string }>;
   soundbite: string;
   originalText: string;
+  /** Result-card headline ("Fixed code", "Summary"...). */
+  title?: string;
+  /** True when `code` is a drop-in replacement for the copied snippet. */
+  applies?: boolean;
+  actionId?: string;
+  actionLabel?: string;
 }
 
-/** Per-mode presentation: verb, icon, and the modal headline. */
-const MODE_META: Record<
-  AssistMode,
-  { verb: string; heading: string; icon: React.ReactNode }
-> = {
-  answer: {
-    verb: "ANSWERED",
-    heading: "TACTICAL OVERLAY · ANSWERED",
-    icon: <MessageCircleQuestion className="w-4 h-4" />,
-  },
-  code: {
-    verb: "CODE READY",
-    heading: "TACTICAL OVERLAY · CODE FORGED",
-    icon: <Code2 className="w-4 h-4" />,
-  },
-  error: {
-    verb: "FIX READY",
-    heading: "TACTICAL OVERLAY · DIAGNOSIS",
-    icon: <Wrench className="w-4 h-4" />,
-  },
-  task: {
-    verb: "DONE",
-    heading: "TACTICAL OVERLAY · TASK COMPLETE",
-    icon: <ListChecks className="w-4 h-4" />,
-  },
-  explain: {
-    verb: "EXPLAINED",
-    heading: "TACTICAL OVERLAY · EXPLAIN THIS",
-    icon: <BookOpen className="w-4 h-4" />,
-  },
+const KIND_LABELS: Record<string, string> = {
+  question: "Question detected",
+  code: "Code detected",
+  error: "Error detected",
+  url: "Website detected",
+  youtube: "Video detected",
+  github: "Repository detected",
+  article: "Content detected",
+  message: "Message detected",
+  sql: "SQL detected",
+  image: "Image detected",
+  json: "Structured data detected",
+  cli: "Command detected",
+  math: "Equation detected",
+  text: "Text detected",
+};
+
+/** Kinds whose snippet reads better in a monospace preview. */
+const MONO_KINDS = new Set(["code", "error", "sql", "json", "cli"]);
+
+const MODE_META: Record<AssistMode, { verb: string; heading: string; icon: React.ReactNode }> = {
+  answer: { verb: "ANSWERED", heading: "Answer", icon: <MessageCircleQuestion className="w-4 h-4" /> },
+  code: { verb: "CODE READY", heading: "Code", icon: <Code2 className="w-4 h-4" /> },
+  error: { verb: "FIX READY", heading: "Diagnosis", icon: <Wrench className="w-4 h-4" /> },
+  task: { verb: "DONE", heading: "Task complete", icon: <ListChecks className="w-4 h-4" /> },
+  explain: { verb: "EXPLAINED", heading: "Explanation", icon: <BookOpen className="w-4 h-4" /> },
+};
+
+const STATUS_VERB: Record<string, string> = {
+  answer: "Answering",
+  explain: "Explaining",
+  explain_simple: "Simplifying",
+  exam_answer: "Writing the exam answer",
+  research: "Researching",
+  fix: "Fixing",
+  optimize: "Optimizing",
+  test: "Writing tests",
+  diagnose: "Diagnosing",
+  summarize: "Summarizing",
+  keypoints: "Extracting key points",
+  extract: "Extracting information",
+  analyze: "Analyzing",
+  questions: "Writing questions",
+  reply: "Drafting a reply",
+  improve: "Improving",
+  professional: "Rewriting",
+  debug: "Debugging your SQL",
+  format: "Formatting",
+  convert: "Converting",
+  safety: "Auditing the command",
+  solve: "Solving",
+  visualize: "Plotting",
+  extract_text: "Reading the image",
+  open: "Opening",
 };
 
 const modeOf = (m: unknown): AssistMode =>
-  m === "answer" || m === "code" || m === "error" || m === "task" || m === "explain"
-    ? m
-    : "explain";
+  m === "answer" || m === "code" || m === "error" || m === "task" || m === "explain" ? m : "explain";
+
+/** Map a detected kind onto the modal's icon/label mode. */
+function modeForKind(kind: string): AssistMode {
+  if (kind === "code" || kind === "sql" || kind === "json" || kind === "cli") return "code";
+  if (kind === "error") return "error";
+  if (kind === "question" || kind === "math") return "answer";
+  if (kind === "message") return "task";
+  return "explain";
+}
+
+function extractUrl(text: string): string {
+  const m = text.match(/https?:\/\/[^\s<>"')]+/i);
+  return m ? m[0] : "";
+}
+
+function normaliseDetection(raw: any): Detection | null {
+  if (!raw || typeof raw !== "object") return null;
+  const actions: ClipAction[] = Array.isArray(raw.actions)
+    ? raw.actions
+        .filter((a: any) => a && typeof a.id === "string" && typeof a.label === "string")
+        .map((a: any) => ({
+          id: String(a.id),
+          label: String(a.label),
+          local: Boolean(a.local),
+          applies: Boolean(a.applies),
+        }))
+    : [];
+  const kind = typeof raw.kind === "string" ? raw.kind : "text";
+  if (!actions.length) return null;
+  return {
+    kind,
+    label: typeof raw.label === "string" ? raw.label : KIND_LABELS[kind] ?? "Text detected",
+    noun: typeof raw.noun === "string" ? raw.noun : undefined,
+    language: typeof raw.language === "string" ? raw.language : undefined,
+    confidence: typeof raw.confidence === "number" ? raw.confidence : undefined,
+    actions,
+  };
+}
 
 /** Tell the server to ignore a clipboard write we made ourselves. */
 function suppressClipboard(text: string) {
@@ -96,29 +187,31 @@ export default function ExplainOverlay() {
   const [selectedText, setSelectedText] = useState("");
   const [floatingPos, setFloatingPos] = useState<{ x: number; y: number } | null>(null);
   const [loading, setLoading] = useState(false);
+  const [pendingAction, setPendingAction] = useState<ClipAction | null>(null);
   const [result, setResult] = useState<ExplainResult | null>(null);
+  const [detection, setDetection] = useState<Detection | null>(null);
+  const [activeActionId, setActiveActionId] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
   const [saved, setSaved] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [customInput, setCustomInput] = useState("");
   const offerRef = useRef<HTMLDivElement>(null);
-  // Compact, non-modal offer shown for a system-wide clip. Nothing is opened
-  // automatically any more — the answer is already computed, but we ASK first
-  // and only open the full breakdown when the user clicks "Ask JARVIS".
+
+  // The detection card: what was copied (kind + its buttons) and, when the
+  // server already answered it (auto mode), the ready result behind it.
   const [offer, setOffer] = useState<{
     text: string;
-    mode: AssistMode;
-    summary: string;
     source?: string;
+    detection: Detection | null;
+    ready?: ExplainResult | null;
   } | null>(null);
 
   const normalise = useCallback((a: any, rawText: string): ExplainResult => {
     return {
       mode: modeOf(a?.mode),
       category: typeof a?.category === "string" ? a.category : "General",
-      urgency:
-        a?.urgency === "critical" || a?.urgency === "caution" ? a.urgency : "safe",
+      urgency: a?.urgency === "critical" || a?.urgency === "caution" ? a.urgency : "safe",
       summary: typeof a?.summary === "string" ? a.summary : "",
       answer: typeof a?.answer === "string" ? a.answer : "",
       code: typeof a?.code === "string" ? a.code : "",
@@ -129,65 +222,120 @@ export default function ExplainOverlay() {
     };
   }, []);
 
+  /** Map an action result (/api/clipboard/capture act) onto the shared shape. */
+  const normaliseActionResult = useCallback((r: any, rawText: string): ExplainResult => {
+    const kind = typeof r?.kind === "string" ? r.kind : "text";
+    return {
+      mode: modeForKind(kind),
+      category: typeof r?.title === "string" ? r.title : "Result",
+      urgency: "safe",
+      summary: typeof r?.summary === "string" ? r.summary : "",
+      answer: typeof r?.answer === "string" ? r.answer : "",
+      code: typeof r?.code === "string" ? r.code : "",
+      language: typeof r?.language === "string" ? r.language : "",
+      bullets: [],
+      soundbite: typeof r?.soundbite === "string" ? r.soundbite : "",
+      originalText: rawText,
+      title: typeof r?.title === "string" ? r.title : undefined,
+      applies: Boolean(r?.applies),
+      actionId: typeof r?.actionId === "string" ? r.actionId : undefined,
+      actionLabel: typeof r?.actionLabel === "string" ? r.actionLabel : undefined,
+    };
+  }, []);
+
   const closeOverlay = useCallback(() => {
     setIsOpen(false);
-    if (activePanel === "explain-overlay") {
-      setActivePanel(null);
-    }
+    if (activePanel === "explain-overlay") setActivePanel(null);
     if (window.speechSynthesis) {
       window.speechSynthesis.cancel();
       setSpeaking(false);
     }
   }, [activePanel, setActivePanel]);
 
-  const runAnalysis = useCallback(async (textToAnalyze: string) => {
-    if (!textToAnalyze.trim()) return;
-    setLoading(true);
-    setResult(null);
-    setSaved(false);
-
-    try {
-      const res = await fetch("/api/explain", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: textToAnalyze }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setResult(normalise(data, textToAnalyze));
+  /* ── Legacy free-form analysis (selection pill, Ctrl+Shift+E, paste box) ── */
+  const runAnalysis = useCallback(
+    async (textToAnalyze: string) => {
+      if (!textToAnalyze.trim()) return;
+      setLoading(true);
+      setResult(null);
+      setPendingAction(null);
+      setSaved(false);
+      try {
+        const res = await fetch("/api/explain", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: textToAnalyze }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          setResult(normalise(data, textToAnalyze));
+          setDetection(normaliseDetection(data.detection));
+        }
+      } catch (e) {
+        console.error("[ExplainOverlay] Fetch error:", e);
+      } finally {
+        setLoading(false);
       }
-    } catch (e) {
-      console.error("[ExplainOverlay] Fetch error:", e);
-    } finally {
-      setLoading(false);
-    }
-  }, [normalise]);
+    },
+    [normalise]
+  );
+
+  /* ── Run one detected action (the whole point of the card) ── */
+  const runAction = useCallback(
+    async (text: string, action: ClipAction, kind: string) => {
+      if (!text.trim()) return;
+      setLoading(true);
+      setResult(null);
+      setSaved(false);
+      setPendingAction(action);
+      setActiveActionId(action.id);
+      setSelectedText(text);
+      try {
+        const res = await fetch("/api/clipboard/capture", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, source: "", action: "act", id: action.id, kind }),
+        });
+        const data = await res.json();
+        if (data?.success && data.result) {
+          setResult(normaliseActionResult(data.result, text));
+        }
+      } catch (e) {
+        console.error("[ExplainOverlay] Action error:", e);
+      } finally {
+        setLoading(false);
+        setPendingAction(null);
+      }
+    },
+    [normaliseActionResult]
+  );
 
   /* ── OS-wide clipboard events ──
-   * The server already answered the clip, but we never pop the full overlay on
-   * our own — "whenever I copy it opens that panel" was the complaint. Instead
-   * we surface a compact "Ask JARVIS?" card (with where it was copied from)
-   * and let the user decide. The full breakdown opens on click. */
+   * The server detected (and in auto mode already answered) the clip. We never
+   * pop the full panel on our own: a compact card names what was copied and
+   * offers that kind's buttons. Only a click opens the panel. */
   useEffect(() => {
     if (!clipboardAssist) return;
     const a: any = clipboardAssist.analysis || {};
     const res = normalise(a, clipboardAssist.text);
+    const det =
+      normaliseDetection(clipboardAssist.detection) ?? normaliseDetection(a.detection);
     setSelectedText(clipboardAssist.text);
-    setResult(res);
+    setDetection(det);
+    setResult(det ? null : res);
+    setActiveActionId(null);
     setLoading(false);
     setFloatingPos(null);
     setOffer({
       text: clipboardAssist.text,
-      mode: res.mode,
-      summary: res.summary,
       source: clipboardAssist.source,
+      detection: det,
+      ready: det ? res : null,
     });
-    // Consume the event so it can't fire twice.
     setClipboardAssist(null);
   }, [clipboardAssist, normalise, setClipboardAssist]);
 
-  // The clipboard card asks first and gets out of the way: a click anywhere
-  // outside it dismisses the offer.
+  // The card gets out of the way: a click anywhere outside dismisses it.
   useEffect(() => {
     if (!offer) return;
     const onDown = (e: MouseEvent) => {
@@ -198,7 +346,7 @@ export default function ExplainOverlay() {
     return () => document.removeEventListener("mousedown", onDown);
   }, [offer]);
 
-  // Sync with activePanel if opened via launcher
+  // Sync with activePanel if opened via launcher.
   useEffect(() => {
     if (activePanel === "explain-overlay") {
       setIsOpen(true);
@@ -213,11 +361,10 @@ export default function ExplainOverlay() {
     }
   }, [activePanel]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Listen for selection mouseups to show floating prompt
+  // Selection mouseup → floating "Ask JARVIS" pill.
   useEffect(() => {
     const handleMouseUp = (e: MouseEvent) => {
       if (isOpen) return;
-
       const sel = window.getSelection()?.toString().trim();
       if (sel && sel.length > 5) {
         setSelectedText(sel);
@@ -227,22 +374,22 @@ export default function ExplainOverlay() {
         });
       } else {
         setTimeout(() => {
-          if (!window.getSelection()?.toString().trim()) {
-            setFloatingPos(null);
-          }
+          if (!window.getSelection()?.toString().trim()) setFloatingPos(null);
         }, 150);
       }
     };
-
     window.addEventListener("mouseup", handleMouseUp);
     return () => window.removeEventListener("mouseup", handleMouseUp);
   }, [isOpen]);
 
-  // Global hotkey: Ctrl+Shift+E or Alt+E
+  // Global hotkey: Ctrl+Shift+E or Alt+E.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "e") || (e.altKey && e.key.toLowerCase() === "e")) {
+      if (
+        (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "e") ||
+        (e.altKey && e.key.toLowerCase() === "e")
+      ) {
         e.preventDefault();
         const sel = window.getSelection()?.toString().trim() || selectedText;
         setIsOpen(true);
@@ -256,7 +403,6 @@ export default function ExplainOverlay() {
         closeOverlay();
       }
     };
-
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isOpen, selectedText, closeOverlay, runAnalysis]);
@@ -278,8 +424,6 @@ export default function ExplainOverlay() {
   };
 
   const handleCopy = (text: string, which: "full" | "code" = "full") => {
-    // Suppress BEFORE writing: the OS watcher polls every ~700ms, so telling
-    // the server first guarantees it never analyses our own output back.
     suppressClipboard(text);
     navigator.clipboard.writeText(text);
     if (which === "code") {
@@ -296,35 +440,62 @@ export default function ExplainOverlay() {
     addMemory({
       content: `[${result.category}] ${result.summary} (Soundbite: ${result.soundbite})`,
       category: "dossier",
-      source: "Instant Explain Overlay",
+      source: "Clipboard assistant",
     });
     setSaved(true);
     setTimeout(() => setSaved(false), 2500);
   };
 
+  /** One action from the card / the modal's action strip. */
+  const chooseAction = (text: string, action: ClipAction, kind: string, det: Detection | null) => {
+    if (action.local) {
+      const url = extractUrl(text);
+      if (url) window.open(url, "_blank", "noopener");
+      setOffer(null);
+      return;
+    }
+    setDetection(det);
+    setOffer(null);
+    setIsOpen(true);
+    runAction(text, action, kind);
+  };
+
   const getUrgencyBadge = (urgency: string) => {
-    if (urgency === "critical") {
+    const base =
+      "flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium border";
+    if (urgency === "critical")
       return (
-        <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-rose-950/70 border border-rose-500/50 text-rose-300 shadow-[0_0_12px_rgba(244,63,94,0.3)] animate-pulse">
-          <ShieldAlert className="w-3.5 h-3.5" /> CRITICAL ALERT
+        <span className={`${base} bg-rose-500/15 border-rose-400/40 text-rose-300`}>
+          <ShieldAlert className="w-3 h-3" /> Critical
         </span>
       );
-    }
-    if (urgency === "caution") {
+    if (urgency === "caution")
       return (
-        <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-950/70 border border-amber-500/50 text-amber-300 shadow-[0_0_12px_rgba(245,158,11,0.3)]">
-          <AlertTriangle className="w-3.5 h-3.5" /> CAUTION REQUIRED
+        <span className={`${base} bg-amber-500/15 border-amber-400/40 text-amber-300`}>
+          <AlertTriangle className="w-3 h-3" /> Caution
         </span>
       );
-    }
     return (
-      <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-950/70 border border-emerald-500/50 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.3)]">
-        <ShieldCheck className="w-3.5 h-3.5" /> VERIFIED SAFE
+      <span className={`${base} bg-emerald-500/15 border-emerald-400/30 text-emerald-300`}>
+        <ShieldCheck className="w-3 h-3" /> Safe
       </span>
     );
   };
 
   const meta = MODE_META[result ? result.mode : "explain"];
+  const isMonoSnippet = detection ? MONO_KINDS.has(detection.kind) : false;
+  const snippetPreview =
+    selectedText.length > 320 ? `${selectedText.slice(0, 317)}...` : selectedText;
+  const fullCopyText = result
+    ? [
+        result.answer,
+        result.code ? "```" + (result.language || "") + "\n" + result.code + "\n```" : "",
+        result.summary,
+        ...result.bullets.map((b) => `- ${b.title}: ${b.desc}`),
+      ]
+        .filter(Boolean)
+        .join("\n\n")
+    : "";
 
   return (
     <>
@@ -332,10 +503,10 @@ export default function ExplainOverlay() {
       <AnimatePresence>
         {floatingPos && !isOpen && (
           <motion.div
-            initial={{ opacity: 0, scale: 0.85, y: 5 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.85 }}
-            style={{ left: `${floatingPos.x}px`, top: `${floatingPos.y}px` }}
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.9 }}
+            style={{ left: `${floatingPos.x}px`, top: `${floatingPos.y}px`, fontFamily: SF }}
             className="fixed z-[100] cursor-pointer"
             onClick={() => {
               setIsOpen(true);
@@ -343,10 +514,10 @@ export default function ExplainOverlay() {
               runAnalysis(selectedText);
             }}
           >
-            <div className="flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-black/90 border border-cyan-400/80 shadow-[0_0_20px_rgba(6,182,212,0.5)] backdrop-blur-md text-cyan-300 hover:text-white hover:border-cyan-300 transition-all font-rajdhani text-xs tracking-wider font-semibold">
-              <Sparkles className="w-3.5 h-3.5 text-cyan-400 animate-spin" style={{ animationDuration: "4s" }} />
-              <span>ASK JARVIS</span>
-              <kbd className="px-1.5 py-0.5 rounded bg-cyan-950/80 border border-cyan-500/40 text-[10px] text-cyan-200">
+            <div className="flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-[#1c1c1e]/90 border border-white/10 shadow-[0_8px_28px_-8px_rgba(0,0,0,0.8)] backdrop-blur-xl text-white/90 hover:bg-[#2c2c2e]/95 transition-all text-[12.5px] font-medium">
+              <Sparkles className="w-3.5 h-3.5 text-[#0a84ff]" />
+              <span>Ask JARVIS</span>
+              <kbd className="px-1.5 py-0.5 rounded-[6px] bg-white/[0.08] text-[10px] text-white/50">
                 Ctrl+Shift+E
               </kbd>
             </div>
@@ -354,59 +525,90 @@ export default function ExplainOverlay() {
         )}
       </AnimatePresence>
 
-      {/* ── Compact "answer ready" offer (system-wide clipboard) ── */}
+      {/* ── Detection card (system-wide copy) ── */}
       <AnimatePresence>
         {offer && !isOpen && (
           <motion.div
-            initial={{ opacity: 0, x: 30, scale: 0.95 }}
+            initial={{ opacity: 0, x: 24, scale: 0.97 }}
             animate={{ opacity: 1, x: 0, scale: 1 }}
-            exit={{ opacity: 0, x: 30, scale: 0.95 }}
-            transition={{ type: "spring", stiffness: 380, damping: 28 }}
+            exit={{ opacity: 0, x: 24, scale: 0.97 }}
+            transition={{ type: "spring", stiffness: 420, damping: 30 }}
             data-testid="clipboard-offer"
             ref={offerRef}
-            className="fixed bottom-28 right-5 z-[110] w-[17.5rem] max-w-[calc(100vw-2rem)] pointer-events-auto"
+            style={{ fontFamily: SF }}
+            className="fixed bottom-28 right-5 z-[110] w-[14.5rem] max-w-[calc(100vw-2rem)] pointer-events-auto"
           >
-            <div className="rounded-2xl border border-cyan-500/40 bg-zinc-950/95 backdrop-blur-xl shadow-[0_0_30px_rgba(6,182,212,0.35)] overflow-hidden font-rajdhani text-white">
-              <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-transparent via-cyan-400 to-transparent" />
-              <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-cyan-500/20 bg-zinc-900/60">
-                <div className="flex items-center gap-2 min-w-0">
-                  <span className="p-1.5 rounded-lg bg-cyan-950/60 border border-cyan-500/40 text-cyan-300">
-                    {MODE_META[offer.mode].icon}
+            <div className="rounded-[18px] border border-white/[0.08] bg-[#1c1c1e]/90 backdrop-blur-2xl shadow-[0_20px_60px_-15px_rgba(0,0,0,0.85)] overflow-hidden">
+              {/* Header */}
+              <div className="flex items-start justify-between px-3 pt-2.5 pb-1.5">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="w-[6px] h-[6px] rounded-full bg-[#0a84ff] shrink-0" />
+                  <span className="text-[9.5px] font-semibold tracking-[0.08em] text-white/40 uppercase">
+                    JARVIS
                   </span>
-                  <div className="min-w-0">
-                    <div className="font-orbitron text-[11px] font-bold tracking-wider text-cyan-300">
-                      JARVIS · ASK FIRST
-                    </div>
-                    <div className="text-[10px] text-zinc-400 truncate">
-                      {offer.source ? `Copied from ${offer.source}` : "Copied to clipboard"}
-                    </div>
-                  </div>
                 </div>
-                <button
-                  onClick={() => setOffer(null)}
-                  className="p-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors shrink-0"
-                  title="Dismiss"
-                >
-                  <Minus className="w-4 h-4" />
-                </button>
+                {offer.detection && (
+                  <span className="text-[10.5px] font-medium text-[#0a84ff] shrink-0 ml-2">
+                    {offer.detection.label}
+                  </span>
+                )}
               </div>
-              <div className="px-3.5 py-3 space-y-3">
-                <p className="text-[12.5px] leading-snug text-zinc-300 line-clamp-3 break-words">
-                  "{offer.text.slice(0, 180)}{offer.text.length > 180 ? "…" : ""}"
+
+              <div className="px-3 pb-2">
+                <p className="text-[10px] text-white/35 truncate mb-1">
+                  {offer.source ? `Copied from ${offer.source}` : "Copied to your clipboard"}
                 </p>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => {
-                      setOffer(null);
-                      setIsOpen(true);
-                    }}
-                    className="flex-1 px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-xs font-semibold text-white flex items-center justify-center gap-1.5 transition-all"
-                  >
-                    <Sparkles className="w-3.5 h-3.5" /> Ask JARVIS
-                  </button>
+                <p
+                  style={isMonoSnippet ? { fontFamily: MONO } : undefined}
+                  className="text-[11.5px] leading-snug text-white/85 line-clamp-2 break-words"
+                >
+                  {offer.text.replace(/\s+/g, " ").slice(0, 240)}
+                  {offer.text.length > 240 ? "…" : ""}
+                </p>
+              </div>
+
+              {/* Actions - plain terms, no pill chrome, so the card stays small */}
+              <div className="px-2.5 pb-2.5">
+                <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
+                  {offer.ready && (
+                    <button
+                      onClick={() => {
+                        setResult(offer.ready || null);
+                        setOffer(null);
+                        setIsOpen(true);
+                      }}
+                      className="py-0.5 text-[11.5px] font-medium text-[#0a84ff] hover:text-[#409cff] transition-colors"
+                    >
+                      View answer
+                    </button>
+                  )}
+                  {offer.detection
+                    ? offer.detection.actions.map((a) => (
+                        <button
+                          key={a.id}
+                          onClick={() =>
+                            chooseAction(offer.text, a, offer.detection!.kind, offer.detection)
+                          }
+                          className="py-0.5 text-[11.5px] font-medium text-[#0a84ff] hover:text-[#409cff] transition-colors whitespace-nowrap"
+                        >
+                          {a.label}
+                        </button>
+                      ))
+                    : (
+                      <button
+                        onClick={() => {
+                          setOffer(null);
+                          setIsOpen(true);
+                          runAnalysis(offer.text);
+                        }}
+                        className="py-0.5 text-[11.5px] font-medium text-[#0a84ff] hover:text-[#409cff] transition-colors"
+                      >
+                        Ask JARVIS
+                      </button>
+                    )}
                   <button
                     onClick={() => setOffer(null)}
-                    className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-zinc-200 border border-zinc-700 transition-all"
+                    className="py-0.5 text-[11.5px] font-medium text-white/40 hover:text-white/80 transition-colors"
                   >
                     Dismiss
                   </button>
@@ -417,70 +619,97 @@ export default function ExplainOverlay() {
         )}
       </AnimatePresence>
 
-      {/* ── Main HUD Explain Modal ── */}
+      {/* ── Main panel ── */}
       <AnimatePresence>
         {isOpen && (
-          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/70 backdrop-blur-[6px]">
             <motion.div
-              initial={{ opacity: 0, scale: 0.92, y: 20 }}
+              initial={{ opacity: 0, scale: 0.96, y: 12 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.92, y: 20 }}
-              transition={{ duration: 0.2 }}
+              exit={{ opacity: 0, scale: 0.96, y: 12 }}
+              transition={{ duration: 0.18, ease: [0.32, 0.72, 0, 1] }}
               data-testid="explain-overlay"
-              className="relative w-full max-w-2xl max-h-[90vh] flex flex-col rounded-2xl border border-cyan-500/40 bg-zinc-950/95 shadow-[0_0_50px_rgba(6,182,212,0.25)] overflow-hidden text-white font-rajdhani"
+              style={{ fontFamily: SF }}
+              className="relative w-full max-w-xl max-h-[88vh] flex flex-col rounded-[26px] border border-white/[0.08] bg-[#1c1c1e]/95 backdrop-blur-2xl shadow-[0_30px_90px_-20px_rgba(0,0,0,0.9)] overflow-hidden text-white"
             >
-              {/* Top scanner beam effect */}
-              <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-transparent via-cyan-400 to-transparent animate-pulse" />
-
               {/* Header */}
-              <div className="flex items-center justify-between px-6 py-4 border-b border-cyan-500/20 bg-zinc-900/60">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-xl bg-cyan-950/60 border border-cyan-500/40 text-cyan-400">
-                    <Sparkles className="w-5 h-5" />
+              <div className="flex items-center justify-between px-5 pt-4 pb-3.5 border-b border-white/[0.06]">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-9 h-9 rounded-[11px] bg-white/[0.06] border border-white/[0.06] flex items-center justify-center text-[#0a84ff] shrink-0">
+                    {meta.icon}
                   </div>
-                  <div>
+                  <div className="min-w-0">
                     <div className="flex items-center gap-2">
-                      <h2 className="font-orbitron text-lg font-bold text-cyan-300 tracking-wider">
-                        {meta.heading}
+                      <h2 className="text-[15px] font-semibold text-white truncate">
+                        {result?.title || (detection ? detection.label : meta.heading)}
                       </h2>
-                      {result && (
-                        <span className="px-2 py-0.5 rounded text-[11px] font-mono tracking-widest bg-cyan-950/80 border border-cyan-500/40 text-cyan-300">
-                          {result.category.toUpperCase()}
+                      {detection && (
+                        <span className="px-2 py-[2px] rounded-full text-[10.5px] font-medium bg-white/[0.07] text-white/55 shrink-0">
+                          {detection.language
+                            ? detection.language.toUpperCase()
+                            : statusNoun(detection.kind)}
                         </span>
                       )}
                     </div>
-                    <p className="text-xs text-zinc-400 tracking-wide">
-                      Auto-detects questions, code, errors &amp; tasks — then actually does the work
+                    <p className="text-[11.5px] text-white/35 truncate">
+                      {selectedText
+                        ? `${selectedText.replace(/\s+/g, " ").slice(0, 70)}${selectedText.length > 70 ? "…" : ""}`
+                        : "Paste or type below"}
                     </p>
                   </div>
                 </div>
-
-                <div className="flex items-center gap-2">
-                  {result && getUrgencyBadge(result.urgency)}
+                <div className="flex items-center gap-2 shrink-0">
+                  {result && !loading && getUrgencyBadge(result.urgency)}
                   <button
                     onClick={closeOverlay}
-                    className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+                    className="w-8 h-8 rounded-full flex items-center justify-center text-white/45 hover:text-white hover:bg-white/[0.09] transition-colors"
                   >
-                    <X className="w-5 h-5" />
+                    <X className="w-4 h-4" />
                   </button>
                 </div>
               </div>
 
-              {/* Body */}
-              <div className="flex-1 overflow-y-auto p-6 space-y-5 custom-scrollbar">
-                {/* Highlighted text preview / Input box */}
-                <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-3.5 space-y-2">
-                  <div className="flex items-center justify-between text-xs text-zinc-400 font-mono">
-                    <span className="flex items-center gap-1.5">
-                      <BookOpen className="w-3.5 h-3.5 text-cyan-400" />
-                      SNIPPET
-                    </span>
-                    <span>{selectedText ? `${selectedText.length} chars` : "Paste or type below"}</span>
+              {/* Action strip — switch actions without re-copying */}
+              {detection && detection.actions.length > 0 && (
+                <div className="px-5 py-3 border-b border-white/[0.06]">
+                  <div className="flex flex-wrap gap-1.5">
+                    {detection.actions.map((a) => {
+                      const active = activeActionId === a.id;
+                      return (
+                        <button
+                          key={a.id}
+                          disabled={loading}
+                          onClick={() => chooseAction(selectedText, a, detection.kind, detection)}
+                          className={`px-3 py-1.5 rounded-full text-[12.5px] font-medium transition-colors disabled:opacity-60 ${
+                            active
+                              ? "bg-[#0a84ff] text-white"
+                              : "bg-white/[0.08] text-white/80 hover:bg-white/[0.16]"
+                          }`}
+                        >
+                          {a.label}
+                        </button>
+                      );
+                    })}
                   </div>
+                </div>
+              )}
 
+              {/* Body */}
+              <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4 custom-scrollbar">
+                {/* Snippet / custom input */}
+                <div className="rounded-[16px] bg-white/[0.04] border border-white/[0.06] p-3">
+                  <div className="flex items-center justify-between text-[10.5px] text-white/35 mb-2">
+                    <span className="tracking-[0.06em] uppercase">
+                      {result?.applies ? "Snippet (replaceable)" : "Snippet"}
+                    </span>
+                    <span>{selectedText ? `${selectedText.length} chars` : ""}</span>
+                  </div>
                   {selectedText ? (
-                    <div className="text-sm text-zinc-200 font-mono max-h-24 overflow-y-auto pr-2 bg-black/40 p-2.5 rounded border border-zinc-800/80 select-text">
-                      "{selectedText}"
+                    <div
+                      style={isMonoSnippet ? { fontFamily: MONO } : undefined}
+                      className="text-[12.5px] text-white/75 max-h-24 overflow-y-auto whitespace-pre-wrap break-words select-text"
+                    >
+                      {snippetPreview}
                     </div>
                   ) : (
                     <div className="flex gap-2">
@@ -489,7 +718,7 @@ export default function ExplainOverlay() {
                         value={customInput}
                         onChange={(e) => setCustomInput(e.target.value)}
                         placeholder="Paste a question, code, error, legal clause, or an instruction…"
-                        className="flex-1 bg-black/60 border border-zinc-700/80 rounded-lg p-2.5 text-sm text-zinc-200 focus:outline-none focus:border-cyan-400 font-mono resize-none placeholder:text-zinc-600"
+                        className="flex-1 bg-black/40 border border-white/[0.08] rounded-[12px] p-2.5 text-[12.5px] text-white/85 focus:outline-none focus:border-[#0a84ff]/70 resize-none placeholder:text-white/25"
                       />
                       <button
                         onClick={() => {
@@ -497,183 +726,172 @@ export default function ExplainOverlay() {
                           runAnalysis(customInput);
                         }}
                         disabled={!customInput.trim() || loading}
-                        className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white font-semibold flex items-center justify-center gap-1.5 text-sm transition-all"
+                        className="px-4 rounded-[12px] bg-[#0a84ff] hover:bg-[#409cff] disabled:opacity-40 text-white font-medium text-[12.5px] flex items-center justify-center gap-1.5 transition-colors"
                       >
                         <Search className="w-4 h-4" />
                         Analyze
                       </button>
                     </div>
                   )}
-
                   {selectedText && (
-                    <div className="flex justify-end">
+                    <div className="flex justify-end mt-2">
                       <button
                         onClick={() => {
                           setSelectedText("");
                           setResult(null);
                         }}
-                        className="text-xs text-cyan-400/80 hover:text-cyan-300 underline underline-offset-2"
+                        className="text-[11.5px] text-[#0a84ff] hover:text-[#409cff]"
                       >
-                        Clear snippet &amp; paste custom text
+                        Clear and paste something else
                       </button>
                     </div>
                   )}
                 </div>
 
-                {/* Loading state */}
+                {/* Loading */}
                 {loading && (
                   <div className="py-12 flex flex-col items-center justify-center gap-3">
-                    <div className="w-10 h-10 rounded-full border-2 border-cyan-400 border-t-transparent animate-spin" />
-                    <p className="font-orbitron text-xs text-cyan-300 tracking-widest animate-pulse">
-                      JARVIS NEURAL DECOMPILER RUNNING...
+                    <div className="w-8 h-8 rounded-full border-2 border-white/15 border-t-[#0a84ff] animate-spin" />
+                    <p className="text-[12.5px] text-white/55">
+                      {pendingAction
+                        ? `${STATUS_VERB[pendingAction.id] || pendingAction.label}…`
+                        : "Working on it…"}
                     </p>
                   </div>
                 )}
 
-                {/* Analysis Results */}
+                {/* Result */}
                 {result && !loading && (
-                  <div className="space-y-4">
-                    {/* Summary callout */}
-                    <div className="p-4 rounded-xl border border-cyan-500/30 bg-cyan-950/20 shadow-[0_0_20px_rgba(6,182,212,0.1)]">
-                      <div className="flex items-center gap-1.5 text-xs text-cyan-400 font-mono tracking-wider uppercase mb-1">
-                        {meta.icon}
-                        {result.mode === "answer"
-                          ? "Answer"
-                          : result.mode === "error"
-                          ? "Root Cause"
-                          : result.mode === "code"
-                          ? "What this code does"
-                          : result.mode === "task"
-                          ? "Result"
-                          : "Plain English Summary"}
+                  <div className="space-y-3">
+                    {result.summary && (
+                      <div className="rounded-[16px] bg-[#0a84ff]/[0.09] border border-[#0a84ff]/20 p-3.5">
+                        <p className="text-[13.5px] text-white font-medium leading-relaxed whitespace-pre-wrap">
+                          {result.summary}
+                        </p>
                       </div>
-                      <p className="text-base text-zinc-100 font-sans leading-relaxed font-medium whitespace-pre-wrap">
-                        {result.summary}
-                      </p>
-                    </div>
+                    )}
 
-                    {/* The actual answer / finished work product */}
                     {result.answer && (
-                      <div className="p-4 rounded-xl border border-emerald-500/30 bg-emerald-950/10">
-                        <div className="flex items-center justify-between mb-1.5">
-                          <div className="flex items-center gap-1.5 text-xs text-emerald-400 font-mono tracking-wider uppercase">
+                      <div className="rounded-[16px] bg-white/[0.04] border border-white/[0.06] p-3.5">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="flex items-center gap-1.5 text-[10.5px] tracking-[0.06em] uppercase text-white/40">
                             <Brain className="w-3.5 h-3.5" />
-                            {result.mode === "task" ? "Delivered" : "Jarvis Response"}
-                          </div>
+                            {result.mode === "task" ? "Delivered" : "Result"}
+                          </span>
                           <button
                             onClick={() => handleCopy(result.answer)}
-                            className="p-1 rounded text-emerald-300/70 hover:text-emerald-200 hover:bg-emerald-900/30 transition-colors"
+                            className="p-1 rounded-md text-white/40 hover:text-white hover:bg-white/[0.08] transition-colors"
                             title="Copy answer"
                           >
                             {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
                           </button>
-                        </div>                          <p data-testid="assist-answer" className="text-sm text-zinc-100 font-sans leading-relaxed whitespace-pre-wrap select-text">
+                        </div>
+                        <p
+                          data-testid="assist-answer"
+                          className="text-[13px] text-white/85 leading-relaxed whitespace-pre-wrap select-text"
+                        >
                           {result.answer}
                         </p>
                       </div>
                     )}
 
-                    {/* Code block */}
                     {result.code && (
-                      <div className="rounded-xl border border-violet-500/30 bg-black/50 overflow-hidden">
-                        <div className="flex items-center justify-between px-3.5 py-2 border-b border-violet-500/20 bg-violet-950/20">
-                          <span className="flex items-center gap-1.5 text-xs font-mono tracking-wider text-violet-300 uppercase">
-                            <Code2 className="w-3.5 h-3.5" />
-                            {result.mode === "error" ? "Suggested Fix" : "Generated Code"}
+                      <div className="rounded-[16px] overflow-hidden border border-white/[0.08] bg-black/50">
+                        <div className="flex items-center justify-between px-3.5 py-2 bg-white/[0.04] border-b border-white/[0.06]">
+                          <span className="text-[10.5px] tracking-[0.06em] uppercase text-white/40">
+                            {result.applies ? "Ready to apply" : "Code"}
                             {result.language ? ` · ${result.language}` : ""}
                           </span>
+                          {/* One button, one meaning: when the result is a drop-in
+                              replacement we say so, otherwise it is just code. */}
                           <button
                             onClick={() => handleCopy(result.code, "code")}
-                            className="flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-semibold bg-violet-600/30 hover:bg-violet-600/50 text-violet-100 border border-violet-500/40 transition-colors"
+                            title={
+                              result.applies
+                                ? "Copies the fixed code (the clipboard watcher ignores its own output) - paste it over your code with Ctrl+V"
+                                : "Copy this code"
+                            }
+                            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11.5px] font-medium transition-colors ${
+                              result.applies
+                                ? "bg-[#0a84ff] hover:bg-[#409cff] text-white"
+                                : "bg-white/[0.08] hover:bg-white/[0.16] text-white/85"
+                            }`}
                           >
                             {copiedCode ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                            {copiedCode ? "Copied" : "Copy"}
+                            {copiedCode ? "Copied" : result.applies ? "Copy fix" : "Copy"}
                           </button>
                         </div>
-                        <pre className="p-3.5 text-[12.5px] leading-relaxed text-zinc-100 font-mono overflow-x-auto select-text">
+                        <pre
+                          style={{ fontFamily: MONO }}
+                          className="p-3.5 text-[12px] leading-relaxed text-[#c9e9ff] overflow-x-auto select-text"
+                        >
                           <code>{result.code}</code>
                         </pre>
                       </div>
                     )}
 
-                    {/* Soundbite / Earpiece line */}
                     {result.soundbite && (
-                      <div className="flex items-center justify-between p-3 rounded-lg bg-zinc-900/80 border border-zinc-800">
-                        <div className="flex items-center gap-2.5">
-                          <Volume2 className="w-4 h-4 text-cyan-400 flex-shrink-0" />
-                          <span className="text-xs text-zinc-300 italic font-sans">
+                      <div className="flex items-center justify-between p-3 rounded-[14px] bg-white/[0.04] border border-white/[0.06]">
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <Volume2 className="w-4 h-4 text-[#0a84ff] shrink-0" />
+                          <span className="text-[12px] text-white/65 italic truncate">
                             "{result.soundbite}"
                           </span>
                         </div>
                         <button
                           onClick={() => handleSpeakSoundbite(result.soundbite)}
-                          className={`px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors ${
+                          className={`px-2.5 py-1 rounded-full text-[11.5px] font-medium shrink-0 transition-colors ${
                             speaking
-                              ? "bg-rose-500/20 text-rose-300 border border-rose-500/40"
-                              : "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 hover:bg-cyan-500/30"
+                              ? "bg-rose-500/20 text-rose-300 border border-rose-400/30"
+                              : "bg-white/[0.08] text-white/80 hover:bg-white/[0.16]"
                           }`}
                         >
-                          <Volume2 className="w-3 h-3" />
-                          {speaking ? "Stop Voice" : "Whisper into Ear"}
+                          {speaking ? "Stop" : "Speak"}
                         </button>
                       </div>
                     )}
 
-                    {/* 3 Tactical Breakdown Cards */}
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                      {result.bullets.map((b, idx) => (
-                        <div
-                          key={idx}
-                          className="p-3.5 rounded-xl border border-zinc-800 bg-zinc-900/60 hover:border-cyan-500/40 transition-colors space-y-1.5"
-                        >
-                          <div className="flex items-center gap-1.5 text-xs font-orbitron font-semibold text-cyan-300">
-                            {idx === 0 && <BookOpen className="w-3.5 h-3.5 text-blue-400" />}
-                            {idx === 1 && <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />}
-                            {idx === 2 && <ArrowRight className="w-3.5 h-3.5 text-emerald-400" />}
-                            <span>{b.title}</span>
+                    {result.bullets.length > 0 && (
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+                        {result.bullets.map((b, idx) => (
+                          <div
+                            key={idx}
+                            className="p-3 rounded-[14px] bg-white/[0.04] border border-white/[0.06] space-y-1"
+                          >
+                            <div className="flex items-center gap-1.5 text-[11.5px] font-semibold text-white/70">
+                              {idx === 0 && <BookOpen className="w-3.5 h-3.5 text-[#0a84ff]" />}
+                              {idx === 1 && <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />}
+                              {idx === 2 && <ArrowRight className="w-3.5 h-3.5 text-emerald-400" />}
+                              <span>{b.title}</span>
+                            </div>
+                            <p className="text-[12px] text-white/60 leading-relaxed">{b.desc}</p>
                           </div>
-                          <p className="text-xs text-zinc-300 font-sans leading-relaxed">
-                            {b.desc}
-                          </p>
-                        </div>
-                      ))}
-                    </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
 
-              {/* Footer actions */}
+              {/* Footer */}
               {result && !loading && (
-                <div className="flex items-center justify-between px-6 py-3 border-t border-cyan-500/20 bg-zinc-900/80">
-                  <div className="text-xs text-zinc-500 font-mono">
-                    Hotkey: <kbd className="text-zinc-400">Ctrl+Shift+E</kbd>
-                  </div>
+                <div className="flex items-center justify-between px-5 py-3 border-t border-white/[0.06]">
+                  <div className="text-[11px] text-white/25">Ctrl+Shift+E to open</div>
                   <div className="flex items-center gap-2">
                     <button
                       onClick={handleSaveToMemory}
                       disabled={saved}
-                      className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-zinc-200 border border-zinc-700 flex items-center gap-1.5 transition-all"
+                      className="px-3 py-1.5 rounded-full bg-white/[0.07] hover:bg-white/[0.14] text-[12px] font-medium text-white/80 flex items-center gap-1.5 transition-colors disabled:opacity-60"
                     >
-                      <Brain className="w-3.5 h-3.5 text-cyan-400" />
-                      {saved ? "Saved to Memory!" : "Save to Memory"}
+                      <Brain className="w-3.5 h-3.5 text-[#0a84ff]" />
+                      {saved ? "Saved" : "Save to memory"}
                     </button>
                     <button
-                      onClick={() =>
-                        handleCopy(
-                          [
-                            result.answer,
-                            result.code ? "```" + (result.language || "") + "\n" + result.code + "\n```" : "",
-                            result.summary,
-                            ...result.bullets.map((b) => `• ${b.title}: ${b.desc}`),
-                          ]
-                            .filter(Boolean)
-                            .join("\n\n")
-                        )
-                      }
-                      className="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-xs font-semibold text-white flex items-center gap-1.5 transition-all"
+                      onClick={() => handleCopy(fullCopyText || result.answer || result.summary)}
+                      className="px-3 py-1.5 rounded-full bg-[#0a84ff] hover:bg-[#409cff] text-[12px] font-medium text-white flex items-center gap-1.5 transition-colors"
                     >
                       {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                      {copied ? "Copied!" : "Copy All"}
+                      {copied ? "Copied" : "Copy all"}
                     </button>
                   </div>
                 </div>
@@ -684,4 +902,25 @@ export default function ExplainOverlay() {
       </AnimatePresence>
     </>
   );
+}
+
+/** "code" -> "Code", "youtube" -> "Video"... used for the header pill. */
+function statusNoun(kind: string): string {
+  const nouns: Record<string, string> = {
+    question: "Question",
+    code: "Code",
+    error: "Error",
+    url: "Website",
+    youtube: "Video",
+    github: "Repository",
+    article: "Content",
+    message: "Message",
+    sql: "SQL",
+    image: "Image",
+    json: "JSON",
+    cli: "Command",
+    math: "Equation",
+    text: "Text",
+  };
+  return nouns[kind] ?? "Clip";
 }

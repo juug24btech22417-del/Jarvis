@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { playwrightService } from "@/services/PlaywrightService";
+import { runBrowserTask } from "@/lib/agent/browserAgent";
 
 export async function POST(req: NextRequest) {
   try {
@@ -9,6 +10,23 @@ export async function POST(req: NextRequest) {
     console.log(`[Playwright API] Action: ${action}, URL: ${url}`);
 
     switch (action) {
+      // ── Generic agentic browser task ──
+      // Unlike every other action below (each one hardcoded to a specific
+      // site), this takes a plain-language goal and works out the steps at
+      // runtime against whatever the page actually contains.
+      case "task": {
+        const result = await runBrowserTask(String(body.task || ""), {
+          startUrl: body.startUrl ? String(body.startUrl) : undefined,
+          maxSteps: body.maxSteps ? Number(body.maxSteps) : undefined,
+          // Undefined means "use the default", which is a VISIBLE window — the
+          // agent is meant to be watchable. Pass headed:false for headless.
+          headed: body.headed === undefined ? undefined : !!body.headed,
+          // Undefined means "leave a visible browser open when the run ends".
+          keepOpen: body.keepOpen === undefined ? undefined : !!body.keepOpen,
+        });
+        return NextResponse.json(result);
+      }
+
       case "screenshot":
         const screenshotResult = await playwrightService.takeScreenshot(url);
         return NextResponse.json(screenshotResult);

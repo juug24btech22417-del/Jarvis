@@ -11,6 +11,8 @@
 //   Groq:   qwen/qwen3.8-27b — works in TEXT mode with /no_think (~250ms)
 //           openai/gpt-oss-120b / 20b — slower reasoners, kept as fallback
 //   NVIDIA: nvapi key expired (410)
+//   OpenRouter: free tier — separate account-wide quota, slower but reliable;
+//               the safety net when both above are throttled
 
 // Model IDs verified live Oct 2026. GEMINI_JSON_MODEL can override the first
 // entry; every model in the list is tried before the provider is abandoned.
@@ -192,6 +194,74 @@ async function tryGroqJson(opts: JsonLlmOptions): Promise<string | null> {
 }
 
 /**
+ * Free OpenRouter models, fastest first.
+ *
+ * Why this provider matters: Gemini's free quota is routinely exhausted (429)
+ * and Groq rate-limits PER MODEL — qwen at 7k input tokens/min, gpt-oss-120b at
+ * 8k tokens/min. A single ~4k-token prompt therefore exhausts a model's minute
+ * after one or two calls, and the agent then has no model to think with. These
+ * models sit on a separate account-wide quota, so they keep the app alive when
+ * both primary providers are throttled.
+ * Verified returning clean JSON (all four, Oct 2026).
+ */
+const OPENROUTER_MODELS = [
+  process.env.OPENROUTER_JSON_MODEL,
+  "nvidia/nemotron-3.5-lightning:free",
+  "nvidia/nemotron-3-ultra-550b-a55b:free",
+  "nvidia/nemotron-3-super-120b-a12b:free",
+  "dots-studio/dots-3-note-preview:free",
+].filter(Boolean) as string[];
+
+async function tryOpenRouterJson(opts: JsonLlmOptions): Promise<string | null> {
+  const key = process.env.OPENROUTER_API_KEY;
+  if (!key || key.trim() === "" || key === "your-api-key-here") return null;
+
+  // These are slower than Groq (a few seconds), so they only ever win the race
+  // when the fast providers are throttled — which is exactly the case they
+  // exist for. /no_think suppresses the reasoning preamble the way it does for
+  // Groq's qwen, so parseJsonLoose gets a bare object.
+  for (const model of OPENROUTER_MODELS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.max(opts.timeoutMs ?? 10000, 15000));
+    try {
+      const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${key}`,
+          // OpenRouter uses these for attribution; harmless and recommended.
+          "HTTP-Referer": "http://localhost:3000",
+          "X-Title": "JARVIS",
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model,
+          temperature: opts.temperature ?? 0.2,
+          max_tokens: opts.maxTokens ?? 900,
+          messages: [
+            { role: "user", content: `/no_think\n${opts.system}\n\n${opts.user}` },
+          ],
+        }),
+      });
+      if (!res.ok) {
+        console.warn(`[fastJson] OpenRouter ${model} HTTP ${res.status} — trying next model`);
+        continue;
+      }
+      const data = await res.json();
+      const raw: string | undefined = data?.choices?.[0]?.message?.content;
+      if (!raw || !raw.trim()) continue;
+      const cleaned = raw.replace(/<\/?think>/gi, "").trim();
+      if (cleaned) return cleaned;
+    } catch (e: unknown) {
+      console.warn(`[fastJson] OpenRouter ${model} failed:`, (e as Error)?.name ?? (e as Error)?.message);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return null;
+}
+
+/**
  * Race the configured providers and return the first parseable JSON object.
  * Resolves `null` (never throws) when every provider fails, so callers can
  * serve their deterministic fallback immediately.
@@ -200,7 +270,11 @@ export async function callJsonLlm<T = Record<string, unknown>>(
   opts: JsonLlmOptions
 ): Promise<T | null> {
   const label = opts.label ?? "fastJson";
-  const attempts: Array<Promise<string | null>> = [tryGeminiJson(opts), tryGroqJson(opts)];
+  const attempts: Array<Promise<string | null>> = [
+    tryGeminiJson(opts),
+    tryGroqJson(opts),
+    tryOpenRouterJson(opts),
+  ];
   try {
     // First valid JSON wins; a provider that returns junk simply loses.
     const first = await new Promise<T>((resolve, reject) => {

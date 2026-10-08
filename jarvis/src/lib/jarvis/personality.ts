@@ -511,6 +511,22 @@ AVAILABLE INTENTS AND EXAMPLES:
   "params": { "url": "website url", "fields": "json of fields to fill" }
 }
 {
+  "intent": "browser_task",
+  "examples": [
+    "go to wikipedia and find when ada lovelace was born",
+    "look up the imdb rating of interstellar",
+    "browse to news.ycombinator.com and tell me the top story",
+    "search duckduckgo for model context protocol and open the first result",
+    "go to github and tell me the latest release of next.js",
+    "check if the iphone 16 is in stock",
+    "find the cheapest iphone 15 price right now",
+    "find the top rated mechanical keyboard under 3000",
+    "who is the current ceo of nvidia per wikipedia",
+    "use the browser to figure out the weather in tokyo tomorrow"
+  ],
+  "params": { "task": "plain-language goal to accomplish by browsing live", "url": "optional starting url" }
+}
+{
   "intent": "macro_open",
   "examples": ["open macros", "open macro panel", "macros panel", "show macros", "record and replay", "open record and replay", "macro recorder"],
   "params": {}
@@ -556,9 +572,83 @@ RULES:
 2. Always include "intent" and "params" fields
 3. If the message is conversational, emotional, personal, or doesn't match any specific command, use intent "chat" with the original message
 4. Extract specific values from the command (numbers, names, times)
+5. Use "browser_task" ONLY when the user wants a real browser to actually go somewhere and figure something out — opening a site, searching, reading a page, comparing what is on a page, or any multi-step web errand. Put the user's whole request in "task". If a more specific intent above clearly matches (weather, stock_price, news, play_youtube, amazon_buy, flight_search, track_package, etc.), use that one instead, not browser_task. Do not use browser_task for plain conversation or for facts you can answer directly.
 
 RESPONSE FORMAT:
 {"intent": "intent_name", "params": {"key": "value"}}`;
+
+/**
+ * Deterministic safety net for browse-style commands.
+ *
+ * The LLM intent parser is the primary classifier, but when every provider is
+ * unreachable the route used to fall back to "chat" — which meant "go to
+ * wikipedia and tell me X" got *answered* instead of *browsed*, so the visible
+ * browser agent never ran. This recognises an unambiguous browser errand from
+ * the wording alone so that path survives a dead provider. It is only consulted
+ * AFTER the LLM has failed, so it can never override a good classification.
+ */
+export function detectBrowserTask(
+  text: string
+): { task: string; url?: string } | null {
+  const raw = String(text || "").trim();
+  if (!raw || raw.length > 400) return null;
+  const lower = raw.toLowerCase();
+
+  const urlMatch = raw.match(/https?:\/\/[^\s]+/i);
+  const url = urlMatch ? urlMatch[0].replace(/[.,;)]+$/, "") : undefined;
+
+  // Strong, explicit browser verbs.
+  const verbs = [
+    "go to ",
+    "navigate to ",
+    "browse to ",
+    "open the website",
+    "open the site",
+    "open the page",
+    "on the website",
+    "in the browser",
+    "using the browser",
+    "use the browser",
+    "with the browser",
+    "open a browser",
+    "search online",
+    "look it up online",
+    "check online",
+  ];
+  const hasVerb = verbs.some((v) => lower.includes(v));
+
+  // "... and open the first result" — an explicit multi-step browse instruction.
+  const multiStep =
+    /\b(open|click)\b[^.]*\b(first|top|result|link|page)\b/.test(lower) ||
+    /\bsearch\b[^.]*\band\b/.test(lower);
+
+  // Real sites named in the request (host-ish or well-known brand).
+  const siteMatch = lower.match(
+    /\b([a-z0-9-]+\.(com|in|org|net|io|dev|co|gov|edu)|wikipedia|imdb|hacker news|github|amazon|flipkart|bookmyshow|zomato|swiggy)\b/
+  );
+
+  // A page-reading ask: "tell me the X", "what is the X on <site>".
+  const asksForFact =
+    /\b(tell me|what is|what's|how much|how many|how tall|how old|find out|find the|who is|check if|check the|give me|price of|the price|cost of|rate of|rating of|number of)\b/.test(
+      lower
+    );
+
+  const fires =
+    !!url || hasVerb || multiStep || (!!siteMatch && asksForFact);
+  if (!fires) return null;
+
+  // Don't steal commands a purpose-built intent handles better.
+  const hijack = [
+    "play ",
+    "recipe",
+    "remind me",
+    "set a timer",
+    "add to my calendar",
+  ];
+  if (hijack.some((h) => lower.startsWith(h))) return null;
+
+  return { task: raw, url };
+}
 
 // Parse intent using LLM
 export async function parseIntentWithLLM(

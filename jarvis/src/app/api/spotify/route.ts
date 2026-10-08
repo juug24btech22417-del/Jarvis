@@ -234,6 +234,65 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ success: true, action: "queue" });
       }
 
+      // Play the user's Liked Songs on the LOCAL Spotify client (no browser tab).
+      // Needs the `user-library-read` scope; if the token predates it, Spotify
+      // answers 403 and we say so plainly instead of failing silently.
+      case "liked": {
+        let tracks;
+        try {
+          tracks = await spotifyRequest("/me/tracks?limit=20");
+        } catch (scopeError) {
+          if (String(scopeError).includes("403")) {
+            return NextResponse.json(
+              {
+                success: false,
+                error:
+                  "Spotify needs the 'user-library-read' permission for Liked Songs. Re-run the Spotify setup page once to grant it.",
+              },
+              { status: 403 }
+            );
+          }
+          throw scopeError;
+        }
+        const items = tracks?.items || [];
+        const uris = items
+          .map((it: { track?: { uri?: string } }) => it?.track?.uri)
+          .filter(Boolean)
+          .slice(0, 50);
+        if (!uris.length) {
+          return NextResponse.json({ success: false, error: "No liked songs found on this account." }, { status: 404 });
+        }
+        const first = items[0]?.track;
+        const track = {
+          name: first?.name || "Unknown",
+          artists: (first?.artists || [])
+            .map((a: { name?: string }) => a?.name)
+            .filter(Boolean)
+            .join(", "),
+        };
+        try {
+          await spotifyRequest("/me/player/play", { method: "PUT", body: JSON.stringify({ uris }) });
+        } catch (playError) {
+          const msg = String(playError);
+          const noDevice = msg.includes("404") || /device/i.test(msg);
+          if (!noDevice) throw playError;
+          const devices = await spotifyRequest("/me/player/devices");
+          const device = devices?.devices?.[0];
+          if (!device) {
+            return NextResponse.json(
+              { success: false, error: "No active Spotify device. Open Spotify on your computer first." },
+              { status: 404 }
+            );
+          }
+          await spotifyRequest("/me/player", {
+            method: "PUT",
+            body: JSON.stringify({ device_ids: [device.id], play: false }),
+          });
+          await spotifyRequest("/me/player/play", { method: "PUT", body: JSON.stringify({ uris }) });
+        }
+        return NextResponse.json({ success: true, action: "liked", track });
+      }
+
       case "playlists": {
         const playlists = await spotifyRequest("/me/playlists?limit=20");
         return NextResponse.json({ success: true, playlists });
@@ -247,6 +306,23 @@ export async function POST(req: NextRequest) {
     const errorMsg = String(error);
     const stack = error instanceof Error ? error.stack : "No stack";
     console.error("[Spotify API] Error stack:", stack);
+    // No usable token at all (e.g. the saved refresh token was revoked). Flag
+    // it explicitly so the caller can fall back to the LOCAL desktop app and
+    // tell the user to reconnect, instead of a vague "command failed".
+    if (errorMsg.includes("No valid access token")) {
+      const last = (globalThis as { spotifyLastError?: { error?: string; error_description?: string } })
+        .spotifyLastError;
+      return NextResponse.json(
+        {
+          success: false,
+          authRequired: true,
+          error:
+            "Spotify's saved login was revoked — reconnect Spotify to use playback and Liked Songs.",
+          reason: last?.error_description || last?.error || "invalid_token",
+        },
+        { status: 401 }
+      );
+    }
     // Check for specific errors
     if (errorMsg.includes("401")) {
       return NextResponse.json(

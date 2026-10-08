@@ -8,7 +8,14 @@
 //
 // Run with:  npx tsx tests/commandRouting.test.ts
 
-import { allowsSpotifyTransport, feedScrollIntent, isMissionControlOpen } from "../src/lib/jarvis/commandRouting";
+import {
+  allowsSpotifyTransport,
+  feedScrollIntent,
+  isMissionControlOpen,
+  liveBrowseIntent,
+} from "../src/lib/jarvis/commandRouting";
+import { detectBrowserTask } from "../src/lib/jarvis/personality";
+import { getShopperProfile, describeShopperProfile } from "../src/lib/agent/shopperProfile";
 
 let passed = 0;
 let failed = 0;
@@ -137,6 +144,144 @@ for (const cmd of [
   "",
 ]) {
   check(`"${cmd}" → null`, feedScrollIntent(cmd) === null, `got ${JSON.stringify(feedScrollIntent(cmd))}`);
+}
+
+// Regression: every one of these was hijacked away from a live browser run.
+// "playwright" opened the Browser Automation panel, "price of" became a
+// Mission Control research run, and the generic search matcher opened
+// google.com in a new tab — so the user never saw anything browsed live.
+section("liveBrowseIntent — the user's real commands route to the live agent");
+
+for (const cmd of [
+  'Go to github.com, open the microsoft/playwright repository, and tell me its star count and number of open issues.',
+  'Go to amazon.in, search for "mechanical keyboard", and tell me the price of the first search result',
+  'Go to imdb.com, search for "Interstellar", and tell me its rating, runtime, and director',
+  'Go to xe.com and find the current USD to INR rate, then calculate what 250 US dollars is in Indian rupee',
+  "go to wikipedia and tell me how tall the eiffel tower is",
+  "navigate to news.ycombinator.com and read me the top story",
+  "open wikipedia and find when Ada Lovelace was born",
+  "https://example.com/docs",
+]) {
+  check(`"${cmd}" → live browse`, liveBrowseIntent(cmd) !== null, "got null");
+}
+
+section("liveBrowseIntent — keeps the task text and extracts the url");
+
+const gh = liveBrowseIntent(
+  "Go to github.com, open the microsoft/playwright repository, and tell me its star count and number of open issues."
+);
+check("task is passed through verbatim", gh?.task.startsWith("Go to github.com") === true, gh?.task);
+check("a bare host becomes a concrete start url", gh?.url === "https://github.com", String(gh?.url));
+
+const pasted = liveBrowseIntent("read https://example.com/docs and summarize it");
+check("pasted url is extracted", pasted?.url === "https://example.com/docs", String(pasted?.url));
+
+section("liveBrowseIntent — everything else is left for the other engines");
+
+for (const cmd of [
+  "find the best free react course and open the best one",
+  "research the top 3 AI coding assistants and write a report",
+  "open youtube and play any song",
+  "open chrome",
+  "open my downloads folder",
+  "go to mission control",
+  "what is backpropagation",
+  "play some music",
+  "",
+]) {
+  check(`"${cmd}" → null`, liveBrowseIntent(cmd) === null, `got ${JSON.stringify(liveBrowseIntent(cmd))}`);
+}
+
+// Regression: these three all failed in the wild. nasa.gov was mis-resolved to
+// nasa.com (and then the window closed), "play the first song" was eaten by the
+// local Spotify handler, and the amazon errand was dumped into a Google tab.
+section("liveBrowseIntent — spoken brands and multi-step errands");
+
+for (const cmd of [
+  "Go to nasa.gov and tell me what today's astronomy picture of the day is",
+  "go to amazon and search for umbrella, add it to cart and proceed to buy it, and also fetch my current loc details and fill it in address if asked",
+  "add this umbrella to the cart on amazon",
+  "buy a phone case on flipkart",
+  "head to swiggy and order a pizza",
+]) {
+  check(`"${cmd}" → live browse`, liveBrowseIntent(cmd) !== null, "got null");
+}
+
+const nasa = liveBrowseIntent(
+  "Go to nasa.gov and tell me what today's astronomy picture of the day is"
+);
+check("nasa.gov resolves to https://nasa.gov", nasa?.url === "https://nasa.gov", String(nasa?.url));
+
+section("liveBrowseIntent — local media handlers keep their commands");
+
+for (const cmd of [
+  "open spotify",
+  "go to spotify and head to liked songs in spotify and play the first song",
+  "play some music",
+  "play the first song",
+  "play lofi beats on spotify",
+  "open youtube and play any song",
+  "open instagram and scroll reels",
+]) {
+  check(`"${cmd}" → null`, liveBrowseIntent(cmd) === null, `got ${JSON.stringify(liveBrowseIntent(cmd))}`);
+}
+
+// The intent API consults this only after BOTH providers have failed, so it is
+// the difference between browsing and answering from memory when the network
+// blips.
+section("detectBrowserTask — provider-down safety net");
+
+for (const cmd of [
+  "go to nasa.gov and tell me what today's astronomy picture of the day is",
+  "go to amazon and search for umbrella and add it to cart",
+]) {
+  check(`"${cmd}" → detected`, detectBrowserTask(cmd) !== null, "got null");
+}
+
+section("detectBrowserTask — provider-down safety net (existing)");
+
+for (const cmd of [
+  "go to news.ycombinator.com and tell me the top story",
+  "check the price of an iphone 15 on amazon.in",
+  "browse to imdb.com and find the rating of Interstellar",
+  "open the page https://example.com and tell me the headline",
+]) {
+  check(`"${cmd}" → detected`, detectBrowserTask(cmd) !== null, "got null");
+}
+
+for (const cmd of [
+  "how are you",
+  "tell me a joke",
+  "remind me to call mom",
+  "play lofi beats on youtube",
+  "what's the weather in tokyo",
+  "",
+]) {
+  check(`"${cmd}" → null`, detectBrowserTask(cmd) === null, `got ${JSON.stringify(detectBrowserTask(cmd))}`);
+}
+
+// Checkout autofill: the saved details the browser agent fills into any
+// order/address form. Nothing here is invented — only what is configured.
+section("shopperProfile — saved details drive autofill");
+
+const saved = { ...process.env };
+process.env.JARVIS_PROFILE_PHONE = "9606571200";
+process.env.JARVIS_PROFILE_EMAIL = "dhruvbijapur@gmail.com";
+delete process.env.JARVIS_PROFILE_NAME;
+delete process.env.JARVIS_PROFILE_ADDRESS;
+
+const profile = getShopperProfile();
+check("profile is returned when anything is set", profile !== null);
+check("phone is carried through", profile?.phone === "9606571200", String(profile?.phone));
+check("email is carried through", profile?.email === "dhruvbijapur@gmail.com", String(profile?.email));
+const described = describeShopperProfile(profile);
+check("phone appears in the prompt block", described.includes("9606571200"), described);
+check("email appears in the prompt block", described.includes("dhruvbijapur@gmail.com"), described);
+check("unset fields are not invented", !described.includes("Street address"), described);
+
+for (const [k, v] of Object.entries(saved)) {
+  if (v === undefined) delete process.env[k];
+  else process.env[k] = v;
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

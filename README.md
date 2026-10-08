@@ -29,6 +29,7 @@ It includes:
 - Service and integration layers for research, browser automation, scheduling, and messaging
 - Prisma + SQLite persistence for memory, tasks, reports, reminders, and automations
 - Optional WhatsApp server bridge for persistent messaging connectivity
+- A system-wide clipboard assistant (`npm run clipboard`) that detects copied content and offers the right actions
 
 ---
 
