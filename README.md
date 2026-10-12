@@ -1,12 +1,11 @@
-# J.A.R.V.I.S.
+<h1 align="center">J.A.R.V.I.S.</h1>
 
-### Just A Rather Very Intelligent System
+<p align="center">
+  <strong>Point at it. Say the word. It's done.</strong><br/>
+  <em>Just A Rather Very Intelligent System</em>
+</p>
 
-**Point at anything. Say what you want. Watch it happen.**
-
-A local AI assistant that does not stop at the answer.
-
-<p>
+<p align="center">
   <img alt="Next.js" src="https://img.shields.io/badge/Next.js-14-000?logo=nextdotjs&logoColor=white">
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white">
   <img alt="Prisma" src="https://img.shields.io/badge/Prisma-SQLite-2D3748?logo=prisma&logoColor=white">
@@ -16,17 +15,33 @@ A local AI assistant that does not stop at the answer.
 
 ---
 
-**[The idea](#the-whole-idea)** · **[Three promises](#three-promises)** · **[Architecture](#architecture)** · **[What it can do](#what-it-can-do)** · **[Directory structure](#directory-structure)** · **[Quick start](#quick-start)** · **[Using JARVIS](#using-jarvis)** · **[Verification](#verification)** · **[Environment variables](#environment-variables)** · **[Scripts](#scripts)** · **[Troubleshooting](#troubleshooting)** · **[Tech stack](#tech-stack)**
+**[The idea](#the-whole-idea)** · **[See it](#see-it)** · **[Three promises](#three-promises)** · **[Architecture](#architecture)** · **[What it can do](#what-it-can-do)** · **[Directory structure](#directory-structure)** · **[Quick start](#quick-start)** · **[Using JARVIS](#using-jarvis)** · **[Verification](#verification)** · **[Environment variables](#environment-variables)** · **[Scripts](#scripts)** · **[Troubleshooting](#troubleshooting)** · **[Tech stack](#tech-stack)**
 
 ---
 
 ## The whole idea
 
-Most assistants are a chat box with a large model behind it. You ask. They answer. Then you go and do the work.
+Most assistants answer the question.
 
-JARVIS is built for the part **after** the answer.
+Then you go and do the work.
 
-One keystroke freezes your screen. You draw a loop around anything — a paragraph, an invoice, an error, a product, a chart — and then you just say what you want.
+This one finishes the work.
+
+One keystroke freezes your screen and dims it. You draw a loop around the thing you mean — a paragraph, an invoice, an error, a product, a chart. You say what you want. Out loud, or typed.
+
+Then it happens, while you are still holding the mouse.
+
+There is no action menu. There is no list of supported intents buried somewhere you have to go and discover. The region is *seen* by a vision model. Your sentence becomes the goal. An agent picks a real tool and runs it.
+
+Which means the next capability anyone adds is available from a circle the same afternoon. Nothing was ever hardcoded.
+
+That is the whole product. Everything below is range.
+
+---
+
+## See it
+
+Two keystrokes. Two unrelated tools. No configuration.
 
 ```text
     Ctrl+Alt+S          draw a loop around the invoice
@@ -40,34 +55,43 @@ One keystroke freezes your screen. You draw a loop around anything — a paragra
     Ctrl+Alt+S          draw a loop around the French paragraph
     "translate this into Hindi"
 
-    → text.translate  ·  6.7s end to end
-      the Hindi sits over the paragraph you circled, in place.
+    → text.translate  ·  6.7 seconds, end to end
+      the Hindi sits over the paragraph you circled. In place. In your app.
 ```
 
-There is no action menu. There is no list of supported intents hidden somewhere in the code that you have to discover. The region is described by a vision model, your sentence becomes the goal, and an agent picks a real tool and runs it. When a capability is added later, it is available from a circle immediately — because nothing was hardcoded to begin with.
+Neither of those paths was built for the other. There is no branch in the code that says *if the user said "email", do this.* There is a goal, a toolset, and a loop.
 
 ---
 
 ## Three promises
 
 **It tells you the truth.**
-Every card shows the tool that actually ran and its actual output. When it cannot do something, it says so, in as many words:
+
+Every card shows the tool that actually ran and the output it actually returned. When it cannot do something, it says so in as many words:
 
 > *"I could not read the text in the circled region (vision timeout). Please press Ctrl+Alt+S, circle a tighter area, and ask me again."*
 
-That is a real answer from this system, on a day when every vision provider was rate-limited. It arrived in nine seconds. The version before it would have hung for eighty and then shown you an empty card. Honesty that fast is the feature.
+That is a real answer from this system, on a day when every vision provider was rate-limited. It arrived in nine seconds. The build before it hung for sixty to eighty and handed back an empty card.
+
+Honesty that fast is the feature.
 
 **It can take it back.**
-Every side-effecting action — a file move, a write, a send, a clipboard overwrite, a browser navigation — is recorded on an **action tape** with enough payload to reverse it. *Undo what you did ten minutes ago* is an operation, not a promise.
+
+Every side-effecting action — a file move, a write, a send, a clipboard overwrite, a browser navigation — is recorded on an **action tape**, with enough payload to reverse it.
+
+*Undo what you did ten minutes ago* is an operation, not a promise.
 
 **It proves what it claims.**
-21 unit suites and four live checks that drive the real gesture, the real routes, and a real email send. The numbers are [at the bottom](#verification). Nothing in this document is a guess.
+
+21 unit suites and four live checks that drive the real gesture, the real routes, and a real email send. The numbers are [at the bottom](#verification), and they fail loudly. Nothing in this document is a guess.
 
 ---
 
 ## Architecture
 
-Layered, so the desktop features and the web features share one brain: the same agent runtime that answers a chat message is the one that executes a circled instruction, and the same memory graph feeds both.
+One brain. Five ways in.
+
+The same agent runtime that answers a chat message is the one that executes a circled instruction, and the same memory graph feeds both. Desktop features and web features are not a fork — they are two doors into one room.
 
 ```mermaid
 flowchart TD
@@ -89,7 +113,7 @@ flowchart TD
 
 ### Circle to Act, end to end
 
-Every screen-level feature has the same shape: a thin desktop shell captures the input, the server does the thinking, the answer returns as a card next to your cursor.
+Every screen-level feature has the same shape: something small on the desktop captures the input, the server does the thinking, and the answer comes back as a card next to your cursor.
 
 ```mermaid
 sequenceDiagram
@@ -132,21 +156,26 @@ sequenceDiagram
 ### Three decisions worth knowing
 
 **Screen capture lives on the server, not in the watcher.**
-Reading the screen, encoding it, uploading it, owning global hotkeys and watching the clipboard — all in one PowerShell file — is precisely the shape Windows Defender's AMSI scanner refuses to run. It blocked the watcher outright and took clipboard intelligence down with it. Now the server writes a throwaway capture script per call, and the watcher only asks for a frame and decodes it.
 
-**The result cards cannot take the keyboard — and that is intentional.**
+Reading the screen, encoding it, uploading it, owning global hotkeys and watching the clipboard — all inside one PowerShell file — is precisely the shape Windows Defender's AMSI scanner refuses to run. It blocked the watcher outright and took clipboard intelligence down with it. Now the server writes a throwaway capture script per call, and the watcher only asks for a frame and decodes it.
+
+**The result cards cannot take the keyboard. That is the point.**
+
 They are no-activate windows, so they never steal focus from what you are working in. That is also why the natural-language input opens its own small activating ask box. A text field inside a no-activate window could never receive a keystroke, and pretending otherwise would just be a dead button.
 
 **The Electron shell exists for one Windows API.**
+
 `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` is the only way to keep a window out of a screen share, and Windows refuses the call unless the calling process owns the window. A browser window cannot be excluded. A window we own can. So we own one.
 
 ---
 
 ## What it can do
 
+Not one feature. A range of them — and they share the same brain.
+
 ### Screen — ask, or act
 
-`Ctrl+Alt+S` freezes and dims the screen. You draw a freehand loop. From there:
+`Ctrl+Alt+S` freezes and dims the screen. You draw a freehand loop. From there, two things:
 
 **Circle to Search** decides what you circled and sends it to the *right* Google surface — a product to Shopping with prices, a place to Maps, a face to Images, a question straight to an answer, a stack trace into code reasoning.
 
@@ -164,19 +193,21 @@ The agent chooses among `email.send`, `text.translate`, `memory.save`, `browser.
 
 Press `Esc` to abort a search already in flight. Press the hotkey again mid-search to abort and re-freeze for a fresh circle.
 
-> **Why it stays fast.** Vision models are raced in parallel behind a hard nine-second deadline with a 2.5-second hedge. The first valid answer wins; the losers are aborted. A throttled provider can never cost you its own timeout — the old sequential chain — 30 seconds per model, then three more providers — is exactly how a circle once took 60 to 80 seconds and came back empty.
+> **Why it stays fast.** Vision models are raced in parallel behind a hard nine-second deadline with a 2.5-second hedge. The first valid answer wins; the losers are aborted. A throttled provider can never cost you its own timeout. The old sequential chain — 30 seconds per model, then three more providers — is exactly how a circle once took 60 to 80 seconds and came back empty.
 
 ### Clipboard — intelligence before you break flow
 
 `npm run clipboard` watches what you copy, names it, and offers the verbs that actually apply — a card next to your cursor, never a window that steals focus.
 
-It recognises **14 kinds of clip** from the text itself: question, code, error, website, video, repository, content, message, SQL, image, structured data, command, equation, text. Code gets *Fix · Explain · Optimize · Test*. Errors get *Diagnose*. Links get *Open · Summarize · Research · Extract information*. Content gets *Key points · Analyze · Ask questions*. Questions get *Answer · Explain simply · Exam answer*. Messages get *Reply*.
+It recognises **14 kinds of clip** from the text itself: question, code, error, website, video, repository, content, message, SQL, image, structured data, command, equation, text.
+
+Code gets *Fix · Explain · Optimize · Test*. Errors get *Diagnose*. Links get *Open · Summarize · Research · Extract information*. Content gets *Key points · Analyze · Ask questions*. Questions get *Answer · Explain simply · Exam answer*. Messages get *Reply*.
 
 **Apply on screen** writes the answer back into the app you were working in. **Copy** puts it on the clipboard and suppresses the watcher so it does not re-trigger itself.
 
 ### Overlay — a copilot that can be invisible
 
-An Electron shell that floats over everything and can stay out of a screen share.
+An Electron shell that floats over everything, and can stay out of a screen share.
 
 Seven modes, one key each: `Alt+1` General · `Alt+2` Meeting · `Alt+3` Interview · `Alt+4` Technical · `Alt+5` Study · `Alt+6` Negotiation · `Alt+7` Presentation.
 
@@ -186,7 +217,7 @@ Underneath: a live transcript, a context brain that decides when to speak up, a 
 
 ### Autonomy — a real ReAct loop
 
-The model picks **one** tool per turn, the tool actually runs, and the true output is fed back before the next decision. No simulation, no narration of actions it did not take.
+The model picks **one** tool per turn. The tool actually runs. The true output is fed back before the next decision. No simulation, no narration of actions it did not take.
 
 | Tool | What it really does |
 |---|---|
@@ -204,11 +235,13 @@ Playwright agents with resilience and stealth layers, plus a visible-browser run
 
 ### Research, reports, meetings
 
-Deep research pipelines — plan the queries, search, scrape, extract, synthesise — with reports persisted and re-openable, and follow-ups answered against the stored report. **Meeting Shadow** reads live captions, understands the topic, and puts tactical talking points and counter-arguments on screen in the moment. Meeting bots, structured report views, video-directed briefings.
+Deep research pipelines — plan the queries, search, scrape, extract, synthesise — with reports persisted and re-openable, and follow-ups answered against the stored report.
+
+**Meeting Shadow** reads live captions, understands the topic, and puts tactical talking points and counter-arguments on screen in the moment. Meeting bots, structured report views, video-directed briefings.
 
 ### Memory that accumulates
 
-A knowledge graph of entities and relationships extracted from your conversations, with reinforcement and decay. Second-brain and memory-discussion panels, per-entity timelines, and "what do I know about X" traversal. Facts survive across sessions. Forget requests really delete.
+A knowledge graph of entities and relationships extracted from your conversations, with reinforcement and decay. Second-brain and memory-discussion panels, per-entity timelines, and *"what do I know about X"* traversal. Facts survive across sessions. Forget requests really delete.
 
 ### Communication
 
@@ -224,7 +257,9 @@ Screenshots and screen description, launching apps and URLs, lock, sleep and shu
 
 ### Security, presence, and a few things that are just beautiful
 
-Armed-state sentinel flows, watchers and alerting hooks you arm deliberately. Integrations for GitHub, Notion, Todoist, Google Calendar, Spotify, YouTube, NASA, Firecrawl and Tavily, plus an **MCP hub**. And a cinematic layer — reactor telemetry reacting to your audio, particle and HUD work, widgets, whiteboard OCR, QR teleport to your phone, a room scanner.
+Armed-state sentinel flows, watchers and alerting hooks you arm deliberately. Integrations for GitHub, Notion, Todoist, Google Calendar, Spotify, YouTube, NASA, Firecrawl and Tavily, plus an **MCP hub**.
+
+And a cinematic layer — reactor telemetry that reacts to your audio, particle and HUD work, widgets, whiteboard OCR, QR teleport to your phone, a room scanner.
 
 ---
 
@@ -267,7 +302,7 @@ Jarvis/
 
 ## Quick start
 
-**You need** Node.js 18+ (20+ recommended) and npm. Windows 10/11 for the desktop features — the clipboard watcher, the circle overlay, system control. The web app itself runs anywhere Node runs.
+You need **Node.js 18+** (20+ recommended) and npm. Windows 10/11 for the desktop features — the watcher, the circle overlay, system control. The web app itself runs anywhere Node runs.
 
 ### 1. Get it
 
@@ -276,7 +311,7 @@ git clone https://github.com/juug24btech22417-del/Jarvis.git
 cd Jarvis
 ```
 
-Or **Code → Download ZIP** on GitHub, extract, open a terminal in the folder.
+Or **Code → Download ZIP** on GitHub, extract it, and open a terminal in the folder.
 
 ### 2. Install
 
@@ -317,7 +352,9 @@ Open **http://localhost:3000**.
 2. Open **Connected** and see what is live.
 3. In a second terminal: `npm run clipboard`. Copy any code snippet. Watch the card find you.
 4. Press `Ctrl+Alt+S` and circle something.
-5. Click **Tell JARVIS what to do** and type a real instruction. That one is the point of the whole project.
+5. Click **Tell JARVIS what to do** and type a real instruction.
+
+That fifth one is the point of the whole project.
 
 > Optional: `npm run overlay` for the Electron stealth overlay, `npm run hotkey` for the screen-analysis daemon.
 
@@ -448,8 +485,13 @@ From `jarvis/`:
 
 ## Notes
 
-The repository holds the application (`jarvis/`) and the root utilities — the WhatsApp bridge, the launchers, the debug helpers. Desktop features are Windows-only; the web app and the API surface run anywhere. Integrations are opt-in: an unconfigured provider disables its features cleanly rather than breaking the app. Outbound actions run behind confirmation gates, and anything that changes state is recorded on the action tape.
+The repository holds the application (`jarvis/`) and the root utilities — the WhatsApp bridge, the launchers, the debug helpers. Desktop features are Windows-only; the web app and the API surface run anywhere.
+
+Integrations are opt-in: an unconfigured provider disables its features cleanly rather than breaking the app. Outbound actions run behind confirmation gates, and anything that changes state is recorded on the action tape.
 
 ---
 
-<p align="center"><em>Built to be used, not demoed.</em></p>
+<p align="center">
+  <strong>It answers. It acts. It remembers. It can take it back.</strong><br/>
+  <em>Built to be used, not demoed.</em>
+</p>
