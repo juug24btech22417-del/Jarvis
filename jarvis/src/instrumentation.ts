@@ -85,6 +85,31 @@ export async function register() {
 
   console.log("[WatcherHeartbeat] armed — watchers tick every 10 min, no panel needed");
 
+  // ── Pending-email dispatcher ──
+  // Emails are queued with a 30s cancel window (POST /api/composio/email/send)
+  // and were supposed to be flushed by a ticker in the composio listener
+  // runner — which never started it, so every scheduled email sat at
+  // status="pending" past its fireAt forever. Scheduling still looked healthy
+  // (the composer ran, the row appeared, the cancel window worked), which made
+  // a missing heartbeat look like an outbound-mail failure.
+  //
+  // Driven by an HTTP self-call for the same reason as every other heartbeat in
+  // this file: importing the dispatcher here (it reaches Prisma) pulls node-only
+  // modules into the edge copy of instrumentation.ts and 500s EVERY route
+  // sharing that build — verified: a dynamic import of it here broke all API
+  // routes with "Module not found: Can't resolve 'path'". The route owns the
+  // node-only imports; this file only knocks on the door.
+  const dispatchEmails = async () => {
+    try {
+      await fetch("http://localhost:3000/api/composio/email/dispatch", { method: "POST" });
+    } catch {
+      // Server warming up or restarting — the next tick catches it.
+    }
+  };
+  setTimeout(dispatchEmails, 2_000);
+  setInterval(dispatchEmails, 5_000);
+  console.log("[EmailDispatcher] armed — queued emails fire every 5s");
+
   // ── Route compile warmup (dev only, fire-and-forget) ──
   // In dev, Next.js compiles each route on its FIRST request. A cold
   // /api/chat compile can take 10–20s, which used to land squarely on the

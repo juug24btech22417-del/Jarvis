@@ -6,6 +6,7 @@
 import { callJsonLlm } from "@/lib/llm/fastJson";
 import { searchWebWithFallback } from "@/services/WebSearchFallback";
 import { browserAct } from "@/services/BrowserAgentService";
+import { agentLlm } from "./llm";
 
 const BASE =
   process.env.INTERNAL_BASE_URL ||
@@ -55,6 +56,9 @@ const TOOL_SPECS = `Available tools (call exactly one per turn):
 - github { "action": "get_repo|list_issues|list_pulls|list_commits|list_contents|list_repos", "params": { ... } } — real GitHub data. params.repo must be "owner/name".
 - whatsapp.send { "contact": "mom", "message": "..." } — send a real WhatsApp message to a named contact.
 - browser.act { "task": "what to accomplish", "url": "https://start-url" } — drive a REAL visible browser for things a search cannot do: add to cart, fill a booking form, click through a site.
+- email.send { "to": "name@example.com", "about": "what the email should say", "subject": "optional" } — write and send a REAL email from the user's own connected Gmail. Use whenever the goal is to email / mail / write to / reply to someone. "about" is the intent in plain words, not the literal body.
+- text.translate { "text": "...", "target": "Hindi" } — translate a piece of text. Use when the goal is to translate, or when the thing in front of the user is written in another language.
+- memory.save { "text": "..." } — store a durable fact in JARVIS's long-term memory graph. Use when the user says remember / save / note / don't forget something.
 - finish { "summary": "..." } — end the task, stating exactly what was really accomplished and what still needs the user.`;
 
 const SYSTEM = `You are JARVIS's Autonomous Task Agent. You actually OPERATE tools to accomplish a user's goal — you never pretend to have done something you did not.
@@ -92,7 +96,12 @@ function locationLine(loc?: UserLocation): string {
   return `Live location: ${loc.lat},${loc.lng}${addr}`;
 }
 
-async function decide(goal: string, history: string, loc?: UserLocation): Promise<Decision | null> {
+async function decide(
+  goal: string,
+  history: string,
+  loc?: UserLocation,
+  timeoutMs = 12_000
+): Promise<Decision | null> {
   // Keep the recent trail only — a long history makes small models drift into
   // prose (invalid JSON), which stalls the loop.
   const focused = history.length > 3500 ? history.slice(history.length - 3500) : history;
@@ -102,7 +111,7 @@ async function decide(goal: string, history: string, loc?: UserLocation): Promis
     maxTokens: 900,
     temperature: 0.2,
     label: "TaskAgent",
-    timeoutMs: 12000,
+    timeoutMs,
   });
   if (!raw) return null;
   // Small models occasionally rename keys. Accept the common aliases so a
@@ -119,9 +128,14 @@ async function decide(goal: string, history: string, loc?: UserLocation): Promis
 }
 
 /** One transient provider hiccup must not derail an otherwise-working run. */
-async function decideWithRetry(goal: string, history: string, loc?: UserLocation): Promise<Decision | null> {
+async function decideWithRetry(
+  goal: string,
+  history: string,
+  loc?: UserLocation,
+  timeoutMs = 12_000
+): Promise<Decision | null> {
   for (let attempt = 0; attempt < 2; attempt++) {
-    const d = await decide(goal, history, loc);
+    const d = await decide(goal, history, loc, timeoutMs);
     if (d && d.tool) return d;
     if (attempt === 0) await new Promise((r) => setTimeout(r, 350));
   }
@@ -202,6 +216,66 @@ async function executeTool(
       return { ok: true, output: `Message delivered to ${j.data.recipient} at ${j.data.deliveredAt}.` };
     }
 
+    case "email.send": {
+      const to = String(args.to || args.recipient || args.toEmail || "").trim();
+      if (!to) return { ok: false, output: "email.send needs a 'to' address." };
+      // "about" is the intent in plain words; the endpoint composes the subject
+      // and body in the right tone (with the user's real signature) and sends
+      // it immediately, so the agent can report a completed action.
+      const res = await fetch(`${BASE}/api/composio/email/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          to,
+          about: String(args.about || args.body || args.message || args.topic || "").slice(0, 1500),
+          subject: args.subject,
+          hint: args.hint,
+          immediate: true,
+        }),
+      });
+      const j = (await res.json().catch(() => null)) as
+        | { ok?: boolean; error?: string; subject?: string; to?: { email?: string } }
+        | null;
+      if (!res.ok || !j?.ok) {
+        return { ok: false, output: `Email not sent: ${j?.error || `HTTP ${res.status}`}` };
+      }
+      return {
+        ok: true,
+        output: `Email sent to ${j.to?.email || to} with the subject "${j.subject}".`,
+      };
+    }
+
+    case "text.translate": {
+      const text = String(args.text || args.content || args.query || "");
+      if (!text.trim()) return { ok: false, output: "text.translate needs 'text'." };
+      const target = String(args.target || args.language || args.to || "English");
+      const out = await agentLlm({
+        system:
+          `You are a translator. Translate the user's text into ${target}. Reply with the translation alone — ` +
+          `no notes, no quotes, no explanation, no romanisation. Preserve line breaks and proper nouns.`,
+        user: text.slice(0, 1500),
+        maxTokens: 600,
+        temperature: 0.1,
+        label: "translate",
+        timeoutMs: 12_000,
+      });
+      return { ok: true, output: out.trim() };
+    }
+
+    case "memory.save": {
+      const text = String(args.text || args.fact || args.content || args.note || "");
+      if (!text.trim()) return { ok: false, output: "memory.save needs 'text'." };
+      const { extractAndStoreMemories } = await import("@/lib/memory/extractor");
+      const res = await extractAndStoreMemories(text);
+      const bits = [...res.addedEntities, ...res.updatedEntities];
+      return {
+        ok: true,
+        output: bits.length
+          ? `Saved to long-term memory: ${bits.slice(0, 5).join(", ")}.`
+          : res.message || "Stored.",
+      };
+    }
+
     case "browser.act": {
       const baseTask = args.task || String(args.goal || "accomplish the user's goal");
       const task = loc ? `${baseTask}\n\n(User's current live location: ${loc.lat},${loc.lng}${loc.address ? ` — ${loc.address}` : ""}. Use it as the delivery/booking address where relevant.)` : baseTask;
@@ -234,12 +308,20 @@ async function executeTool(
 export async function runAutonomousTask(
   goal: string,
   emit: Emit,
-  opts?: { userLocation?: UserLocation }
+  opts?: {
+    userLocation?: UserLocation;
+    /** Cap the ReAct rounds. The circle overlay passes a small number so an
+     *  instruction asked over a screen selection stays interactive. */
+    maxRounds?: number;
+    /** Per-decision LLM budget. */
+    decideTimeoutMs?: number;
+  }
 ): Promise<AgentRunResult> {
   const ctx: Ctx = { userLocation: opts?.userLocation };
   const steps: AgentRunResult["steps"] = [];
   const history: string[] = [];
-  const MAX_ROUNDS = 8;
+  const MAX_ROUNDS = opts?.maxRounds ?? 8;
+  const decideTimeoutMs = opts?.decideTimeoutMs ?? 12_000;
 
   emit({
     type: "status",
@@ -249,7 +331,7 @@ export async function runAutonomousTask(
   });
 
   for (let round = 1; round <= MAX_ROUNDS; round++) {
-    const decision = await decideWithRetry(goal, history.join("\n\n"), ctx.userLocation);
+    const decision = await decideWithRetry(goal, history.join("\n\n"), ctx.userLocation, decideTimeoutMs);
     if (!decision || !decision.tool) {
       // Don't throw away the real work already done — report it honestly,
       // leading with the richest results (Maps/WhatsApp) over raw search hits.

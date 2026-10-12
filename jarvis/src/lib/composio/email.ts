@@ -12,6 +12,7 @@
 //      didn't read in the preview.
 
 import { runLlmChain } from "@/services/LlmChain";
+import { callJsonLlm } from "@/lib/llm/fastJson";
 import { USER_PROFILE, emailSignature, identityPromptLine } from "@/lib/userProfile";
 
 export type EmailTone =
@@ -86,9 +87,28 @@ Topic: ${input.about}${hint}
 Output format (strict, no other text):
 SUBJECT: <one-line subject, max 80 chars>
 BODY:
-<the email body, plain text, 3-6 short paragraphs, signed off appropriately>
+<the email body, plain text, 3-5 short paragraphs>
 
-Do NOT use Markdown headings, bullet points, or code fences. Plain text only.`;
+Do NOT use Markdown headings, bullet points, or code fences. Plain text only.
+End with your final sentence: do NOT write a closing or signature block. No
+"Best regards", no name, no phone, no job title, no company — the signature is
+added for you afterwards. Never emit placeholder brackets like [Your Name],
+[Your title], [Company name] or [Contact info].`;
+
+  // JSON first. The SUBJECT:/BODY: text format below is kept as a fallback,
+  // but a model that thinks out loud tore it apart: the "body" that went out
+  // was the model's own working — "No extra text. Let's craft. … We must not
+  // include any placeholder … Now produce final answer." — wrapped around a
+  // quoted draft. Asking for one JSON object, and rejecting a body that looks
+  // like reasoning, is what keeps the mail readable.
+  try {
+    const viaJson = await composeViaJson(input, greeting, hint);
+    if (viaJson) return { ...viaJson, tone: input.tone };
+  } catch (e) {
+    console.warn(
+      `[composio/email] JSON compose failed: ${e instanceof Error ? e.message : String(e)}`
+    );
+  }
 
   try {
     const ac = new AbortController();
@@ -102,7 +122,11 @@ Do NOT use Markdown headings, bullet points, or code fences. Plain text only.`;
     const text = (result?.content ?? "").trim();
     if (text) {
       const parsed = parseComposed(text, greeting);
-      if (parsed) return { ...parsed, tone: input.tone };
+      // A parsed result is not automatically a good one: reject a body that
+      // contains the model's reasoning (or a second SUBJECT:/BODY: header).
+      if (parsed && !looksLikeReasoningLeak(parsed.body)) {
+        return { ...parsed, tone: input.tone };
+      }
       // The model returned something but it didn't follow the strict
       // SUBJECT:/BODY: format. Log so we can see what's happening, and
       // still try to use the model output by extracting a reasonable
@@ -127,23 +151,159 @@ Do NOT use Markdown headings, bullet points, or code fences. Plain text only.`;
   return { subject, body, tone: input.tone };
 }
 
+// Placeholder lines the models invent: [Your Name] / [Your title] /
+// [Company name] / [Contact info] / {{name}} / <Your Name>. One source string,
+// compiled twice — a /g regex used with .test() carries lastIndex between
+// calls, and a non-/g regex given to .replace() only clears the first hit.
+const PLACEHOLDER_SRC = String.raw`^\s*[\[\{<]\s*(?:your|my|the)?\s*(?:full\s+)?(?:name|title|job\s*title|position|role|company|company\s*name|organisation|organization|contact|contact\s*info|phone|email|address|date)\s*[\]\}>]\s*[:.]?\s*$`;
+const PLACEHOLDER_RE = new RegExp(PLACEHOLDER_SRC, "im");
+const PLACEHOLDER_RE_G = new RegExp(PLACEHOLDER_SRC, "gim");
+
+const EMAIL_JSON_SYSTEM = `You write short, natural emails on behalf of a real person.
+
+Reply with STRICT JSON only, no prose around it:
+{ "subject": "<one line, max 80 chars>", "body": "<the email>" }
+
+Rules for "body":
+- Plain text with a greeting line, then 2-4 short paragraphs. Separate paragraphs with \\n\\n.
+- No Markdown, no bullet points, no code fences, no headings.
+- Do NOT write any closing or signature: no "Best regards", no name, no phone
+  number, no job title, no company. The signature is appended automatically.
+- Never emit placeholder brackets such as [Your Name], [Your title],
+  [Company name] or [Contact info].
+- Never explain yourself, never restate these rules, never describe what you are
+  about to write. Output the email itself and nothing else.`;
+
 /**
- * Guarantee the composed body carries the user's identity: if the LLM
- * signed off with a placeholder / wrong / missing name, append the real
- * signature block. Also strips any phone-number-like digits the model
- * invented.
+ * Reasons the composed body is the model's working, not an email. Seen in the
+ * wild on free models: "No extra text. Let's craft. … We must not include any
+ * placeholder. Now produce final answer."
+ */
+function looksLikeReasoningLeak(body: string): boolean {
+  return (
+    /^\s*(?:no extra text|let'?s craft|now produce|okay[,.]?\s+let|we must not|the format|first,?\s+i'?ll)/im.test(
+      body
+    ) ||
+    /\b(?:we must not|as strict json|the output format|now produce final answer|make sure no extra blank lines)\b/i.test(
+      body
+    ) ||
+    // A second SUBJECT:/BODY: header inside the body = the format leaked through.
+    /^\s*(?:subject|body)\s*:\s*$/im.test(body) ||
+    /["“][\s\S]{0,80}Hi[,!]/i.test(body.trim()) // a quoted draft sitting in the body
+  );
+}
+
+/** Strip wrapping quotes a model sometimes puts around the whole body. */
+function unwrapQuotes(body: string): string {
+  let out = body.trim();
+  for (let i = 0; i < 3; i++) {
+    const first = out[0];
+    const last = out[out.length - 1];
+    if ((first === '"' || first === "'") && last === first) {
+      out = out.slice(1, -1).trim();
+    } else {
+      break;
+    }
+  }
+  return out
+    .replace(/\\n/g, "\n")
+    .replace(/\\"|\\'/g, (m) => (m === '\\"' ? '"' : "'"))
+    .trim();
+}
+
+/**
+ * Ask for the whole email as one JSON object. Returns null (never throws) when
+ * no provider answered or the answer does not look like an email — the caller
+ * then falls back to the text format, then to the deterministic skeleton.
+ */
+async function composeViaJson(
+  input: ComposeInput,
+  greeting: string,
+  hint: string
+): Promise<{ subject: string; body: string } | null> {
+  const raw = await callJsonLlm<{ subject?: string; body?: string; email?: string; text?: string }>({
+    system: EMAIL_JSON_SYSTEM,
+    user: `Tone: ${input.tone} — ${TONE_GUIDANCE[input.tone]}\n\n${identityPromptLine()}\n\nRecipient: ${input.toEmail}${input.toName ? ` (${input.toName})` : ""}\nTopic: ${input.about}${hint}\n\nWrite the email now as strict JSON.`,
+    maxTokens: 700,
+    temperature: 0.4,
+    timeoutMs: 12_000,
+    label: "EmailCompose",
+  });
+  if (!raw) return null;
+
+  const subject = String(raw.subject ?? "")
+    .trim()
+    .replace(/^["']|["']$/g, "")
+    .slice(0, 200);
+  let body = String(raw.body ?? raw.email ?? raw.text ?? "").trim();
+  if (!subject || !body) return null;
+
+  body = unwrapQuotes(body);
+  if (looksLikeReasoningLeak(body)) return null;
+  if (PLACEHOLDER_RE.test(body)) body = body.replace(PLACEHOLDER_RE_G, "");
+
+  // Keep one greeting, and only one.
+  const lines = body.split(/\r?\n/);
+  if (lines.length && !/^\s*(?:hi\b|dear\b|hello\b|hey\b)/i.test(lines[0])) {
+    lines.unshift(greeting);
+  }
+  return { subject, body: lines.join("\n").trim() };
+}
+
+/**
+ * Guarantee the composed body ends with EXACTLY ONE signature, and that it is
+ * the user's real one.
+ *
+ * The failure this exists to prevent: free models, told to "sign off
+ * appropriately", emit a template sign-off —
+ *
+ *   Best regards,
+ *   [Your title]
+ *   [Company name]
+ *   [Contact info]
+ *
+ * — and the old code only APPENDED the real signature when the first name was
+ * missing, so the placeholders went out in the mail alongside it. The user saw
+ * literal brackets in a real email.
+ *
+ * So: (1) drop any bracketed placeholder line anywhere in the body, (2) cut the
+ * model's own closing/signature block off the end, (3) append the canonical
+ * signature from USER_PROFILE — name + contact only. No title, no company, and
+ * never a placeholder.
  */
 export function applyIdentity(subject: string, body: string): { subject: string; body: string } {
   let fixed = body
-    .replace(/^\s*\[?(?:your|my)?\s*name\]?\s*$/gim, "")
-    .replace(/\b\d{10}\b/g, USER_PROFILE.phone === "9606571200" ? USER_PROFILE.phone : "");
-  const hasName = new RegExp(USER_PROFILE.name.split(/\s+/)[0], "i").test(fixed);
-  if (!hasName) {
-    fixed = `${fixed.replace(/\s+$/, "")}\n\n${emailSignature()}`;
-  } else if (!fixed.includes(USER_PROFILE.phone)) {
-    fixed = `${fixed.replace(/\s+$/, "")}\nContact: ${USER_PROFILE.phone}`;
+    // Placeholder lines the models like to invent, anywhere in the body.
+    // Covers [Your Name] / [Your title] / [Company name] / [Contact info] /
+    // {{name}} / <Your Name> style fills.
+    .replace(PLACEHOLDER_RE_G, "")
+    .replace(/\{\{\s*(?:name|title|company|contact)\s*\}\}/gim, "")
+    // A phone number the model invented (we only allow the real one through).
+    .replace(/\b\d{10}\b/g, USER_PROFILE.phone);
+
+  fixed = stripSignatureBlock(fixed);
+  return { subject, body: `${fixed.trim()}\n\n${emailSignature()}` };
+}
+
+// The closing phrases a model uses to sign off. Matched as a STANDALONE LINE
+// only — that is what separates a signature from prose. A regex that glued the
+// phrase to following lines swallowed an entire email the moment a body said
+// "Thanks for the update yesterday …" in the middle: the whole message, prose
+// included, disappeared and only the signature was sent.
+const CLOSING_LINE_RE =
+  /^(?:best\s+regards|kind\s+regards|warm\s+regards|regards|sincerely(?:\s+yours)?|yours\s+(?:truly|sincerely|faithfully)|thanks(?:\s+(?:and\s+regards|a\s+lot|so\s+much))?|thank\s+you|many\s+thanks|cheers|best|respectfully|warmly)\s*[,!.]?$/i;
+
+/** Cut the model's own sign-off, and only when it sits in the last few lines. */
+function stripSignatureBlock(body: string): string {
+  const lines = body.split(/\r?\n/);
+  const filled = lines.map((line, i) => ({ line, i })).filter(({ line }) => line.trim() !== "");
+  const tailStart = Math.max(0, filled.length - 8);
+  for (let k = tailStart; k < filled.length; k++) {
+    if (CLOSING_LINE_RE.test(filled[k].line.trim())) {
+      return lines.slice(0, filled[k].i).join("\n");
+    }
   }
-  return { subject, body: fixed.trim() };
+  return body;
 }
 
 function parseComposed(text: string, fallbackGreeting: string): { subject: string; body: string } | null {

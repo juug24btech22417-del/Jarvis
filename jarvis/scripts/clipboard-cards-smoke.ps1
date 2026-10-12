@@ -7,7 +7,8 @@
 # Run:  powershell -ExecutionPolicy Bypass -File scripts/clipboard-cards-smoke.ps1
 # Needs the dev server up for the kind catalog (falls back cleanly if not).
 $src = Get-Content -Raw "scripts/clipboard-watcher.ps1"
-$cut = $src.IndexOf('while ($true) {')
+$cut = $src.IndexOf('# JARVIS-MAIN-LOOP-BELOW')
+if ($cut -lt 0) { Write-Host "FAIL cannot find the JARVIS-MAIN-LOOP-BELOW marker"; exit 1 }
 $head = $src.Substring(0, $cut)
 Invoke-Expression $head
 
@@ -118,5 +119,181 @@ $form3 = $Script:Card
 Check "non-code result hides Apply on screen" ($form3 -and (@($form3.Controls | Where-Object { $_ -is [System.Windows.Forms.Button] } | ForEach-Object { $_.Text }) -notcontains "Apply on screen"))
 Close-Card
 
+# ── Circle to Search ──────────────────────────────────────────────────────
 Write-Host ""
+Write-Host "Circle to Search"
+
+Check "overlay type compiles" ($null -ne [JarvisCircleOverlay])
+Check "hotkey window type compiles" ($null -ne [JarvisHotkeyWindow])
+Check "'s' resolves to VK 83" ((Resolve-Vk "s") -eq 83)
+Check "'F9' resolves to VK 0x78" ((Resolve-Vk "F9") -eq 0x78)
+Check "'space' resolves to VK 0x20" ((Resolve-Vk "space") -eq 0x20)
+Check "an unknown key is rejected" ((Resolve-Vk "banana") -eq 0)
+
+# The crop is what the model actually sees, so verify the geometry that decides
+# whether it looks at the circled thing or at the whole screen: a padded box
+# around the loop, downscaled only when it exceeds CIRCLE_CAPTURE_WIDTH, with
+# everything outside the loop dimmed.
+function New-LoopBitmap([int]$w, [int]$h) {
+    $bmp = New-Object System.Drawing.Bitmap -ArgumentList $w, $h
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.Clear([System.Drawing.Color]::White)
+    $g.Dispose()
+    return $bmp
+}
+
+function Add-Loop($overlay, $points) {
+    $field = $overlay.GetType().GetField("_pts", [System.Reflection.BindingFlags]"NonPublic,Instance")
+    $list = $field.GetValue($overlay)
+    foreach ($pt in $points) {
+        [void]$list.Add($pt)
+    }
+}
+
+function New-Loop([int]$x1, [int]$y1, [int]$x2, [int]$y2) {
+    return @(
+        (New-Object System.Drawing.Point -ArgumentList $x1, $y1),
+        (New-Object System.Drawing.Point -ArgumentList $x2, $y1),
+        (New-Object System.Drawing.Point -ArgumentList $x2, $y2),
+        (New-Object System.Drawing.Point -ArgumentList $x1, $y2)
+    )
+}
+
+$screen = New-Object System.Drawing.Rectangle -ArgumentList 0, 0, 400, 300
+$bmpSmall = New-LoopBitmap 400 300
+$ovSmall = New-Object JarvisCircleOverlay -ArgumentList $bmpSmall, $screen
+Add-Loop $ovSmall (New-Loop 100 100 200 160)
+$bounds = $ovSmall.SelectionBounds
+Check "selection bounds wrap the drawn loop" (($bounds.Left -eq 100) -and ($bounds.Top -eq 100) -and ($bounds.Right -eq 200) -and ($bounds.Bottom -eq 160)) "$bounds"
+
+$cropSmall = $ovSmall.BuildCrop(1024, $true)
+Check "a small loop is cropped with 14px of context" ($cropSmall -and $cropSmall.Width -eq 128 -and $cropSmall.Height -eq 88) "$($cropSmall.Width)x$($cropSmall.Height)"
+$inside = $cropSmall.GetPixel([int]($cropSmall.Width / 2), [int]($cropSmall.Height / 2))
+$outside = $cropSmall.GetPixel(0, 0)
+Check "the circled thing stays bright" ($inside.R -gt 220) "R=$($inside.R)"
+Check "everything outside the loop is dimmed" ($outside.R -lt 200) "R=$($outside.R)"
+$cropSmall.Dispose()
+$ovSmall.Dispose()
+$bmpSmall.Dispose()
+
+$bmpWide = New-LoopBitmap 400 300
+$ovWide = New-Object JarvisCircleOverlay -ArgumentList $bmpWide, $screen
+Add-Loop $ovWide (New-Loop 5 5 395 295)
+$cropWide = $ovWide.BuildCrop(200, $false)
+Check "a crop wider than CIRCLE_CAPTURE_WIDTH is downscaled to 200" ($cropWide -and $cropWide.Width -eq 200) "$($cropWide.Width)x$($cropWide.Height)"
+Check "downscaling keeps the aspect ratio" ($cropWide.Height -eq 150) "$($cropWide.Height)"
+$cropWide.Dispose()
+$ovWide.Dispose()
+$bmpWide.Dispose()
+
+# The result card is the whole feature: what it is, the answer, and clickable
+# Google results that do not run off the card.
+$circle = @{
+    kind = "product"; kindLabel = "Product found"; surface = "shopping"
+    title = "Sony WH-1000XM5"; summary = "Wireless over-ear headphones by Sony."
+    answer = ""; query = "Sony WH-1000XM5"
+    provider = "Gemini/gemini-2.5-flash + Serper/shopping"
+    searchUrl = "https://www.google.com/search?tbm=shop&q=Sony%20WH-1000XM5"
+    items = @(
+        @{ title = "Sony WH-1000XM5"; url = "https://amazon.com/dp/x"; snippet = "amazon.com - 348.00"; source = "amazon.com" },
+        @{ title = "Sony WH-1000XM5 (Renewed)"; url = "https://ebay.com/itm/y"; snippet = "ebay.com - 199.00"; source = "ebay.com" }
+    )
+}
+Show-CircleResultCard $circle
+$circleForm = $Script:Card
+Check "circle result card exists" ($null -ne $circleForm)
+if ($circleForm) {
+    $circleBtns = @($circleForm.Controls | Where-Object { $_ -is [System.Windows.Forms.Button] })
+    $circleNames = @($circleBtns | ForEach-Object { $_.Text })
+    Write-Host ("       buttons: " + ($circleNames -join " | "))
+    Check "circle card offers Search Google" ($circleNames -contains "Search Google")
+    Check "circle card offers Copy + Dismiss" (($circleNames -contains "Copy") -and ($circleNames -contains "Dismiss"))
+    # Circle to Act: the action is whatever the user types, so the card ships one
+    # entry point instead of a menu of fixed actions.
+    Check "circle card offers the natural-language action" ($circleNames -contains "Tell JARVIS what to do")
+    Check "circle card labels the Shopping surface" (@($circleForm.Controls | Where-Object { $_.Text -eq "GOOGLE SHOPPING" }).Count -eq 1)
+    Check "circle card is compact (width $($circleForm.Width))" ($circleForm.Width -le 400)
+    $rows = @($circleBtns | Where-Object { $_.Text -match '^[0-9]+\. ' })
+    Check "circle card lists both results" ($rows.Count -eq 2) "$($rows.Count) rows"
+    Check "result rows stay inside the card" (@($rows | Where-Object { ($_.Left + $_.Width) -gt $circleForm.ClientSize.Width }).Count -eq 0)
+    Check "result rows stack vertically" (@($rows | ForEach-Object { $_.Top } | Select-Object -Unique).Count -eq $rows.Count)
+    $searchBtn = @($circleBtns | Where-Object { $_.Text -eq "Search Google" })[0]
+    Check "Search Google carries the shopping url" ($searchBtn -and ($searchBtn.Tag.url -like "*tbm=shop*"))
+    Check-PillLayout "circle result card footer" $circleForm
+}
+Close-Card
+
+# A question circle is answer-first: the answer pane is the point, and a
+# question with no results must still render (never an empty card).
+$question = @{
+    kind = "question"; kindLabel = "Answered"; surface = "search"
+    title = "Physics question"; summary = "A numerical about gravity."
+    answer = "The acceleration is 9.8 m/s squared."; query = "acceleration due to gravity"
+    provider = "Gemini/gemini-2.5-flash"
+    searchUrl = "https://www.google.com/search?q=acceleration%20due%20to%20gravity"
+    items = @()
+}
+Show-CircleResultCard $question
+$qForm = $Script:Card
+Check "answer-only card renders with no results" ($null -ne $qForm)
+if ($qForm) {
+    $panes = @($qForm.Controls | Where-Object { $_ -is [System.Windows.Forms.TextBox] })
+    Check "answer-only card shows the answer pane" ($panes.Count -eq 1)
+    Check "answer pane holds the answer" ($panes[0].Text -eq $question.answer)
+    Check "answer-only card still offers Search Google" (@($qForm.Controls | Where-Object { $_ -is [System.Windows.Forms.Button] -and $_.Text -eq "Search Google" }).Count -eq 1)
+    Check "answer-only card hides the RESULTS label" (@($qForm.Controls | Where-Object { $_.Text -eq "GOOGLE" }).Count -eq 0)
+}
+Close-Card
+
+# ── Circle to Act: the types, and the card that reports what it did ─────────
+Check "ask box type compiles" ([bool]([System.Management.Automation.PSTypeName]'JarvisAskBox').Type)
+Check "translation panel type compiles" ([bool]([System.Management.Automation.PSTypeName]'JarvisTranslatedPanel').Type)
+
+$ask = New-Object JarvisAskBox -ArgumentList "prompt", "prefill"
+Check "ask box takes a prefill and reports an empty answer until typed" (($ask.Answer -eq "") -and ($ask.Width -gt 300))
+$ask.Dispose()
+
+$anchor = New-Object System.Drawing.Rectangle -ArgumentList 100, 100, 240, 70
+$panel = New-Object JarvisTranslatedPanel -ArgumentList "Bonjour", "Hello", $anchor, 1000
+Check "translation panel anchors over the circled region" (($panel.Left -lt 100) -and ($panel.Top -lt 100) -and ($panel.Width -ge 240))
+$panel.Dispose()
+
+$act = @{
+    ok = $true; title = "email this to rahul"; subject = "an invoice"
+    summary = "Sent the invoice email to rahul@example.com."
+    actions = @(@{ tool = "email.send"; detail = '{"to":"rahul@example.com"}'; output = 'Email sent to rahul@example.com with the subject "Invoice 2026-114".' })
+    failures = @(); translation = $null
+}
+Show-CircleActCard $act
+$actForm = $Script:Card
+Check "act result card exists" ($null -ne $actForm)
+if ($actForm) {
+    $actNames = @($actForm.Controls | Where-Object { $_ -is [System.Windows.Forms.Button] } | ForEach-Object { $_.Text })
+    Write-Host ("       buttons: " + ($actNames -join " | "))
+    Check "act card offers Copy + Dismiss" (($actNames -contains "Copy") -and ($actNames -contains "Dismiss"))
+    Check "act card hides 'Show in place' when there is no translation" ($actNames -notcontains "Show in place")
+    Check "act card shows the tool that ran" (@($actForm.Controls | Where-Object { $_ -is [System.Windows.Forms.TextBox] -and $_.Text -match "email\.send" }).Count -eq 1)
+    Check "act card is compact (width $($actForm.Width))" ($actForm.Width -le 400)
+    Check-PillLayout "act card footer" $actForm
+}
+Close-Card
+
+# A translation result also gets the in-place affordance.
+$trAct = @{
+    ok = $true; title = "translate this"; subject = "a french recipe"
+    summary = "Translated the circled text."
+    actions = @(@{ tool = "text.translate"; detail = "{}"; output = "Une recette de cuisine" })
+    failures = @(); translation = "Une recette de cuisine"
+}
+Show-CircleActCard $trAct
+$trForm = $Script:Card
+if ($trForm) {
+    $trNames = @($trForm.Controls | Where-Object { $_ -is [System.Windows.Forms.Button] } | ForEach-Object { $_.Text })
+    Check "translation result offers Show in place" ($trNames -contains "Show in place")
+    Check-PillLayout "translation card footer" $trForm
+}
+Close-Card
+
+Write-Host ""
+
 if ($fails -gt 0) { Write-Host "$fails FAILED"; exit 1 } else { Write-Host "ALL UI CHECKS PASSED"; exit 0 }

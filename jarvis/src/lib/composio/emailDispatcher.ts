@@ -15,35 +15,59 @@ import { readComposioEnv } from "./client";
 const POLL_INTERVAL_MS = 5_000;
 const MAX_ATTEMPTS = 3;
 
-let stopRequested = false;
-let timer: NodeJS.Timeout | null = null;
+// Pinned to globalThis for the same reason as the Composio client and the
+// Prisma client: Next.js dev recompiles a route module on demand, and a
+// module-local timer would be duplicated (or lost) across recompiles. One
+// timer per server process, whoever asks for it first.
+const STATE_KEY = Symbol.for("jarvis.composio.emailDispatcher");
+type GlobalState = { timer: NodeJS.Timeout | null; stopRequested: boolean };
+const g = globalThis as typeof globalThis & { [STATE_KEY]?: GlobalState };
+const state: GlobalState = g[STATE_KEY] ?? (g[STATE_KEY] = { timer: null, stopRequested: false });
 
 export function requestEmailDispatcherStop(): void {
-  stopRequested = true;
-  if (timer) {
-    clearTimeout(timer);
-    timer = null;
+  state.stopRequested = true;
+  if (state.timer) {
+    clearTimeout(state.timer);
+    state.timer = null;
   }
 }
 
+/**
+ * Start the pending-email ticker. Idempotent: calling it twice in the same
+ * process starts one timer, and it is safe to call from instrumentation.
+ *
+ * NOTE: this had no caller at all for a while, so every scheduled email sat at
+ * status="pending" past its fireAt forever (the composer and the cancel window
+ * both worked, which made it look like an outbound-mail problem rather than a
+ * missing heartbeat). instrumentation.ts now starts it at boot, and
+ * POST /api/composio/email/dispatch can drive a tick on demand.
+ */
 export function startEmailDispatcher(): void {
-  if (timer) return;
-  tick();
+  if (state.timer) return;
+  state.stopRequested = false;
+  void tick();
+}
+
+/** Is the ticker alive in this process? (used by the diagnostics route) */
+export function isEmailDispatcherRunning(): boolean {
+  return state.timer !== null && !state.stopRequested;
 }
 
 async function tick(): Promise<void> {
-  if (stopRequested) return;
+  if (state.stopRequested) return;
   try {
     await processBatch();
   } catch (e) {
     console.error("[composio/emailDispatcher] tick failed:", e);
   }
-  if (!stopRequested) {
-    timer = setTimeout(tick, POLL_INTERVAL_MS);
+  if (!state.stopRequested) {
+    state.timer = setTimeout(tick, POLL_INTERVAL_MS);
   }
 }
 
-async function processBatch(): Promise<void> {
+/** One pass over the due rows. Exported so a route can force a tick (tests,
+ *  and any environment where a background timer is not desirable). */
+export async function processBatch(): Promise<{ processed: number; sent: number; failed: number }> {
   const now = new Date();
   // Atomic-ish claim: find up to 5 due rows, flip to "sending" so
   // concurrent ticks skip them.
@@ -52,9 +76,10 @@ async function processBatch(): Promise<void> {
     orderBy: { fireAt: "asc" },
     take: 5,
   });
-  if (due.length === 0) return;
+  if (due.length === 0) return { processed: 0, sent: 0, failed: 0 };
 
   const { userId } = readComposioEnv();
+  const counts = { processed: 0, sent: 0, failed: 0 };
 
   for (const row of due) {
     // Claim it.
@@ -63,6 +88,7 @@ async function processBatch(): Promise<void> {
       data: { status: "sending" },
     });
     if (claimed.count === 0) continue; // someone else already took it (or user cancelled)
+    counts.processed++;
 
     console.log(
       `[composio/emailDispatcher] sending pendingEmail=${row.id} to=${row.toEmail} subject="${row.subject}"`
@@ -94,10 +120,10 @@ async function processBatch(): Promise<void> {
       console.log(
         `[composio/emailDispatcher] sent pendingEmail=${row.id} (gmail id=${result.messageId})`
       );
-      // Notify the user via Telegram (if we have a chat).
       void notifyOutcome(row.chatId, row.callbackMessageId, true, row.toEmail, row.subject).catch(
         (e) => console.error("[composio/emailDispatcher] outcome notify failed:", e)
       );
+      counts.sent++;
     } else {
       // Failure path — but only retry up to MAX_ATTEMPTS. On the final
       // attempt, mark failed.
@@ -107,6 +133,7 @@ async function processBatch(): Promise<void> {
         return m ? parseInt(m[1], 10) : 0;
       })();
       if (attempts + 1 >= MAX_ATTEMPTS) {
+        counts.failed++;
         await prisma.pendingEmail.update({
           where: { id: row.id },
           data: {
@@ -136,6 +163,8 @@ async function processBatch(): Promise<void> {
       }
     }
   }
+
+  return counts;
 }
 
 async function notifyOutcome(

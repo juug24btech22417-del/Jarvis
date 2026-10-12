@@ -40,7 +40,15 @@ interface RequestBody {
   about?: string;
   tone?: string;
   hint?: string;
+  subject?: string;
   chatId?: number;
+  /**
+   * Skip the 30s review/cancel window and send on the next dispatcher tick.
+   * Used when the request came from an agent acting on the user's instruction
+   * (circle-to-act, the task agent's email.send) where the user is waiting on
+   * a result inside a card, not reviewing a draft in Telegram.
+   */
+  immediate?: boolean;
 }
 
 function parseRecipient(raw: string): { name?: string; email: string } | null {
@@ -115,9 +123,13 @@ export async function POST(req: Request) {
     tone,
     hint: body.hint,
   });
-  const composed = { ...applyIdentity(composedRaw.subject, composedRaw.body), tone: composedRaw.tone };
+  // An explicit subject from the caller (the agent passes one when it knows
+  // it) wins over the composed one.
+  const chosenSubject = body.subject?.trim() || composedRaw.subject;
+  const composed = { ...applyIdentity(chosenSubject, composedRaw.body), tone: composedRaw.tone };
 
-  const fireAt = new Date(Date.now() + CANCEL_WINDOW_SEC * 1000);
+  const immediate = body.immediate === true;
+  const fireAt = immediate ? new Date() : new Date(Date.now() + CANCEL_WINDOW_SEC * 1000);
 
   // Persist PendingEmail row.
   const row = await prisma.pendingEmail.create({
@@ -137,8 +149,9 @@ export async function POST(req: Request) {
 
   // Fire-and-forget: post the Telegram cancel message. We don't want to
   // block the chat response on this. If Telegram is not configured or
-  // chatId wasn't passed, skip silently.
-  if (body.chatId) {
+  // chatId wasn't passed, skip silently. Skipped for an immediate send —
+  // there is no cancel window to advertise.
+  if (body.chatId && !immediate) {
     void postTelegramCancelPrompt(body.chatId, row.id, composed, fireAt).catch(
       (e) => console.error("[composio/email/send] telegram prompt failed:", e)
     );
@@ -148,7 +161,7 @@ export async function POST(req: Request) {
     ok: true,
     pendingId: row.id,
     fireAt: fireAt.toISOString(),
-    cancelWindowSec: CANCEL_WINDOW_SEC,
+    cancelWindowSec: immediate ? 0 : CANCEL_WINDOW_SEC,
     subject: composed.subject,
     body: composed.body,
     tone: composed.tone,

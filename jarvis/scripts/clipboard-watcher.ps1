@@ -46,6 +46,36 @@
 #   CLIPBOARD_POLL_MS=<number>        clipboard poll interval (default 700)
 #   NEXT_PUBLIC_API_URL=http://localhost:<port>   server + "Open JARVIS" target
 #
+#   --- Circle to Search (draw around anything on screen) ---
+#   CIRCLE_TO_SEARCH=on|off           master switch (default on). While it is on,
+#                                     pressing CIRCLE_HOTKEY freezes the screen
+#                                     and lets you draw a freehand loop around
+#                                     anything. JARVIS then says what it is,
+#                                     answers it when it is a question / text /
+#                                     code, and shows the matching Google
+#                                     results (Shopping / Maps / Images / web)
+#                                     in a card next to the cursor. Nothing
+#                                     opens in a browser until you click it.
+#   CIRCLE_HOTKEY=ctrl+alt+s          the drawing hotkey. Combine ctrl / alt /
+#                                     shift (and win) with a letter, digit,
+#                                     F1-F12, space, tab or enter. Avoid
+#                                     ctrl+shift+s and ctrl+shift+t, which the
+#                                     screen agent (npm run hotkey) already owns
+#   CIRCLE_CAPTURE_WIDTH=<px>         crops are downscaled to this width before
+#                                     being sent to the model (default 900)
+#   CIRCLE_MAX_RESULTS=<1-6>          result rows shown on the card (default 4)
+#   CIRCLE_TIMEOUT_SEC=<5-120>        give up on the answer after this and say
+#                                     so (default 20)
+#
+#   While the answer is on its way: Esc aborts the search, and pressing
+#   CIRCLE_HOTKEY again aborts it and re-freezes the screen for a fresh circle.
+#
+#   Server-side speed knobs (read by the app, not this script):
+#   CIRCLE_VISION_TIMEOUT_MS          hard ceiling on the whole vision race
+#                                     (default 9000)
+#   CIRCLE_HEDGE_MS                   how long before the fallback vision
+#                                     providers join the race (default 2500)
+#
 # NOTE: keep this file ASCII-only. Windows PowerShell 5.1 reads .ps1 files as
 # ANSI unless they carry a UTF-8 BOM, so a stray em-dash inside a string here
 # would decode to a quote and break parsing.
@@ -87,7 +117,47 @@ public static class JarvisWin {
     [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr hObject);
     [DllImport("user32.dll")] public static extern int SetWindowRgn(IntPtr hWnd, IntPtr hRgn, bool redraw);
 }
+
+// NOTE: keyboard state is deliberately NEVER polled here (no GetAsyncKeyState).
+// It is the classic keylogger signal, and Windows Defender's AMSI scanner
+// blocks the whole script for it - which takes clipboard intelligence down with
+// it. Esc is captured with a temporary RegisterHotKey instead, which is both
+// quieter and impossible to miss.
 "@ -WarningAction SilentlyContinue
+
+# Circle to Search window types - the DPI helper, the global hotkey window and
+# the freehand draw overlay - are compiled from scripts/circle-overlay.cs.
+#
+# They are deliberately NOT inlined here. A ~200 line embedded C# blob is
+# exactly the shape Windows Defender's AMSI scanner blocks, and a blocked script
+# takes the whole clipboard watcher down with it (verified: inlining it made
+# Windows refuse to run this file at all). If the source file is missing we run
+# without circle to search instead of failing to start.
+$script:CircleTypesLoaded = $false
+
+# $PSScriptRoot is empty when this file is loaded with Invoke-Expression (the
+# smoke tests do exactly that), so try every way we can find the file rather
+# than silently running without circle to search.
+$script:CircleSource = $null
+$script:CircleCandidates = @()
+if ($PSScriptRoot) { $script:CircleCandidates += (Join-Path $PSScriptRoot "circle-overlay.cs") }
+if ($PSCommandPath) { $script:CircleCandidates += (Join-Path (Split-Path -Parent $PSCommandPath) "circle-overlay.cs") }
+$script:CircleCandidates += (Join-Path "scripts" "circle-overlay.cs")
+$script:CircleCandidates += "circle-overlay.cs"
+foreach ($cand in $script:CircleCandidates) {
+    if ($cand -and (Test-Path $cand)) { $script:CircleSource = (Resolve-Path $cand).Path; break }
+}
+if ($script:CircleSource) {
+    try {
+        Add-Type -TypeDefinition (Get-Content -Raw $script:CircleSource) -ReferencedAssemblies System.Windows.Forms, System.Drawing -ErrorAction Stop
+        [void][JarvisDpi]::SetProcessDPIAware()
+        $script:CircleTypesLoaded = $true
+    } catch {
+        Write-Host "[JARVIS] Circle to search off - circle-overlay.cs did not compile: $($_.Exception.Message)"
+    }
+} else {
+    Write-Host "[JARVIS] Circle to search off - scripts/circle-overlay.cs is missing."
+}
 
 # ---------------------------------------------------------------------------
 # Settings from .env.local
@@ -123,6 +193,35 @@ $script:MinLen = [int](Get-Setting "CLIPBOARD_MIN_CHARS" "3")
 $script:MaxLen = [int](Get-Setting "CLIPBOARD_MAX_CHARS" "8000")
 $script:PollMs = [int](Get-Setting "CLIPBOARD_POLL_MS" "700")
 if ($popupWidth -lt 280) { $popupWidth = 280 }
+
+# --- Circle to Search ---
+# Nothing is hardcoded either: the hotkey, the crop size and the card's result
+# count all come from .env.local with sane fallbacks.
+$circleEnabled  = (Get-Setting "CIRCLE_TO_SEARCH" "on").ToLower() -ne "off"
+$circleHotkey   = Get-Setting "CIRCLE_HOTKEY" "ctrl+alt+s"
+$circleMaxWidth = [int](Get-Setting "CIRCLE_CAPTURE_WIDTH" "900")
+$circleItems    = [int](Get-Setting "CIRCLE_MAX_RESULTS" "4")
+$circleTimeoutSec = [int](Get-Setting "CIRCLE_TIMEOUT_SEC" "20")
+$Script:CircleUri = "$apiBase/api/circle/search"
+$Script:ActUri = "$apiBase/api/circle/act"
+$Script:VoiceUri = "$apiBase/api/voice/listen"
+# The crop and the region of the last circle, so the action card can act on the
+# same pixels it searched, and a translation can be painted back in place.
+$Script:LastCircleCrop = $null
+$Script:LastCircleRect = $null
+$Script:FrameUri = "$apiBase/api/circle/frame"
+$Script:CircleMods = 0
+$Script:CircleVk = 0
+# Hotkey ids: the circle gesture, and the temporary Escape that cancels an
+# in-flight search.
+$Script:HotkeyIdCircle = 777
+$Script:HotkeyIdEsc = 776
+$Script:EscHotkeyWarned = $false
+if ($circleMaxWidth -lt 320) { $circleMaxWidth = 320 }
+if ($circleItems -lt 1) { $circleItems = 1 }
+if ($circleItems -gt 6) { $circleItems = 6 }
+if ($circleTimeoutSec -lt 5) { $circleTimeoutSec = 5 }
+if ($circleTimeoutSec -gt 120) { $circleTimeoutSec = 120 }
 
 # ---------------------------------------------------------------------------
 # Apple-style palette (dark) and fonts
@@ -674,7 +773,7 @@ function Get-PillRowCount($pills) {
 # ---------------------------------------------------------------------------
 # Card 2 - working indicator (while the model runs)
 # ---------------------------------------------------------------------------
-function Show-WorkingCard([string]$label, [string]$kind) {
+function Show-WorkingCard([string]$label, [string]$kind, [string]$hint = "JARVIS is working on it") {
     try {
         Close-Card
         $w = [Math]::Min($popupWidth, 320)
@@ -687,7 +786,7 @@ function Show-WorkingCard([string]$label, [string]$kind) {
         $head = New-JarvisLabel "$label..." $Script:FontUIB $Script:Fg 32 18 ($w - 48) 18
         $form.Controls.Add($head)
 
-        $sub = New-JarvisLabel "JARVIS is working on it" $Script:FontSmall $Script:Dim 32 38 ($w - 48) 16
+        $sub = New-JarvisLabel $hint $Script:FontSmall $Script:Dim 32 38 ($w - 48) 16
         $form.Controls.Add($sub)
 
         $bar = New-Object System.Windows.Forms.Panel
@@ -1061,6 +1160,737 @@ function Get-ClipboardImage {
 }
 
 # ---------------------------------------------------------------------------
+# Circle to Search - freeze the screen, draw around anything, JARVIS looks it up
+# ---------------------------------------------------------------------------
+$Script:CircleBusy = $false
+
+# Freeze the screen for the overlay.
+#
+# The capture itself happens server-side (GET /api/circle/frame) and arrives as
+# raw PNG bytes. Capturing it HERE is what made Windows Defender refuse to run
+# this script at all - "read the screen + encode it + upload it + own global
+# hotkeys + watch the clipboard" in one file reads as a stealer to its AMSI
+# scanner. All this side does now is ask for the frame and decode it.
+#
+# The rect we send comes from this DPI-aware process, so the frame matches the
+# overlay's mouse coordinates exactly, whatever the display scaling is.
+function Get-ScreenFrame {
+    $vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
+    $uri = "$Script:FrameUri`?left=$($vs.Left)&top=$($vs.Top)&width=$($vs.Width)&height=$($vs.Height)"
+
+    $cts = New-Object System.Threading.CancellationTokenSource
+    try {
+        $cts.CancelAfter(8000)
+        # GetAsync(uri, token) and ReadAsByteArrayAsync() both exist on .NET
+        # Framework, unlike GetByteArrayAsync(uri, token) which is .NET 5+ only -
+        # calling it threw "Cannot find an overload" on Windows PowerShell 5.1
+        # and the overlay had nothing to freeze.
+        $task = (Get-Http).GetAsync($uri, $cts.Token)
+        # Pump while we wait so nothing on screen freezes, and so the wait can
+        # never turn into a hang if the server stops answering.
+        while (-not $task.IsCompleted) {
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 20
+        }
+        if ($task.IsFaulted -or $task.IsCanceled) {
+            Write-Log "Screen frame request failed."
+            return $null
+        }
+        $resp = $task.Result
+        if (-not $resp.IsSuccessStatusCode) {
+            Write-Log "Screen frame route returned $([int]$resp.StatusCode)."
+            return $null
+        }
+        $bytes = $resp.Content.ReadAsByteArrayAsync().Result
+    } catch {
+        Write-Log "Could not fetch the screen frame: $($_.Exception.Message)"
+        return $null
+    } finally {
+        $cts.Dispose()
+    }
+
+    if (-not $bytes -or $bytes.Length -lt 1000) {
+        Write-Log "Screen frame came back empty."
+        return $null
+    }
+
+    try {
+        $stream = [System.IO.MemoryStream]::new($bytes)
+        $loaded = [System.Drawing.Image]::FromStream($stream)
+        $bmp = New-Object System.Drawing.Bitmap -ArgumentList $loaded
+        $loaded.Dispose()
+        $stream.Dispose()
+        return @{ bitmap = $bmp; rect = $vs }
+    } catch {
+        Write-Log "Could not decode the screen frame: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+# Turn "F9" / "s" / "space" into a virtual-key code.
+function Resolve-Vk([string]$token) {
+    $t = $token.Trim().ToUpper()
+    if ($t.Length -eq 1 -and $t -match '^[A-Z0-9]$') { return [int][char]$t }
+    switch ($t) {
+        "SPACE"  { return 0x20 }
+        "TAB"    { return 0x09 }
+        "ENTER"  { return 0x0D }
+        "ESC"    { return 0x1B }
+        "ESCAPE" { return 0x1B }
+    }
+    if ($t -match '^F([1-9]|1[0-2])$') { return 0x70 + ([int]$Matches[1]) - 1 }
+    return 0
+}
+
+function Register-CircleHotkey {
+    if (-not $circleEnabled) { return }
+    if (-not $Script:CircleTypesLoaded) { $script:circleEnabled = $false; return }
+    $mods = @{
+        "alt" = 0x0001; "ctrl" = 0x0002; "control" = 0x0002
+        "shift" = 0x0004; "win" = 0x0008; "windows" = 0x0008
+    }
+    $parts = @($circleHotkey.Split("+") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    foreach ($p in $parts) {
+        $low = $p.ToLower()
+        if ($mods.ContainsKey($low)) {
+            $Script:CircleMods = $Script:CircleMods -bor [int]$mods[$low]
+            continue
+        }
+        $Script:CircleVk = Resolve-Vk $p
+    }
+    if ($Script:CircleVk -eq 0 -or $Script:CircleMods -eq 0) {
+        Write-Log "CIRCLE_HOTKEY '$circleHotkey' not understood - circle to search off. Use e.g. ctrl+alt+s."
+        $script:circleEnabled = $false
+        return
+    }
+    $Script:Hotkey = New-Object JarvisHotkeyWindow
+    $ok = $Script:Hotkey.Register($Script:HotkeyIdCircle, [uint32]$Script:CircleMods, [uint32]$Script:CircleVk)
+    if (-not $ok) {
+        Write-Log "CIRCLE_HOTKEY '$circleHotkey' is already taken by another app - circle to search off."
+        $script:circleEnabled = $false
+    } else {
+        Write-Log "Circle to search ready - press $circleHotkey and draw around anything."
+    }
+}
+
+# One clickable result row on the circle result card.
+function New-ResultRow([int]$index, $item, [int]$x, [int]$y, [int]$w) {
+    $row = New-Object System.Windows.Forms.Button
+    $row.FlatStyle = "Flat"
+    $row.FlatAppearance.BorderSize = 0
+    $row.UseVisualStyleBackColor = $false
+    $row.TextAlign = "MiddleLeft"
+    $row.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $row.Font = $Script:FontUI
+    $row.BackColor = $Script:CardBg
+    $row.ForeColor = $Script:Fg
+    $row.FlatAppearance.MouseOverBackColor = $Script:CardHover
+
+    $title = [string]$item.title
+    if (-not $title) { $title = [string]$item.url }
+    $suffix = [string]$item.snippet
+    if (-not $suffix) { $suffix = [string]$item.source }
+    $label = "$index. $title"
+    if ($suffix) { $label = "$label  -  $suffix" }
+    $row.Text = Limit-OneLine $label $Script:FontUI ($w - 18)
+
+    $row.Location = New-Object System.Drawing.Point -ArgumentList $x, $y
+    $row.Size = New-Object System.Drawing.Size -ArgumentList $w, 26
+    $row.Tag = $item
+    # The card stays open on purpose: open three results in a row, then click
+    # away (or press Dismiss) to close it.
+    $row.Add_Click({
+        $info = $this.Tag
+        $url = [string]$info.url
+        if ($url) { try { Start-Process $url } catch {} }
+    })
+    $row.Add_HandleCreated({ Set-RoundedRegion $this 8 })
+    return $row
+}
+
+# ---------------------------------------------------------------------------
+# Card 4 - circle to search result
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Circle to Act - say what you want done with the circled thing.
+# ---------------------------------------------------------------------------
+# There is NO action menu here. The crop and the user's own words are handed to
+# the same agent that runs every other JARVIS task (POST /api/circle/act), and it
+# picks a real tool - browser, email, translate, memory, maps, web. A capability
+# the agent learns later shows up here for free.
+function Read-CircleInstruction([string]$prefill) {
+    # The result card is a no-activate popup, so a text box inside it can never
+    # take the keyboard. This asks on its own activating dialog instead.
+    $box = New-Object JarvisAskBox -ArgumentList "Tell JARVIS what to do with this  (Enter to run, Esc to cancel)", $prefill
+    [void]$box.ShowDialog()
+    $text = [string]$box.Answer
+    try { $box.Dispose() } catch {}
+    return $text
+}
+
+function Invoke-CircleAct([string]$instruction) {
+    if (-not $Script:LastCircleCrop) { return $null }
+    try {
+        $uri = "$Script:ActUri`?instruction=$([uri]::EscapeDataString($instruction))"
+        $content = [System.Net.Http.ByteArrayContent]::new($Script:LastCircleCrop)
+        $content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::new("image/jpeg")
+        # Same additive timeout as the search call: the PRIME line alone must
+        # never leave the user staring at a frozen card.
+        $task = (Get-Http).PostAsync($uri, $content, [System.Threading.CancellationToken]::None)
+        $deadline = (Get-Date).AddSeconds(120)
+        while (-not $task.IsCompleted) {
+            [System.Windows.Forms.Application]::DoEvents()
+            if ((Get-Date) -gt $deadline) { return $null }
+            Start-Sleep -Milliseconds 25
+        }
+        if ($task.IsFaulted -or $task.IsCanceled) {
+            Write-Log "Circle act request failed: $($task.Exception.Message)"
+            return $null
+        }
+        $body = $task.Result.Content.ReadAsStringAsync().Result
+        return ($body | ConvertFrom-Json)
+    } catch {
+        Write-Log "Circle act failed: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Start-CircleAct([string]$instruction) {
+    if (-not $Script:LastCircleCrop) {
+        Show-Toast "JARVIS" "Circle something first, then tell me what to do with it."
+        return
+    }
+    Close-Card
+    Write-Log "Circle act: '$instruction'"
+    if ($popupEnabled) { Show-WorkingCard "Working on it" "circle" "doing what you asked with the circled thing" }
+    $act = Invoke-CircleAct $instruction
+    Stop-Working
+    if (-not $act -or -not $act.success) {
+        Write-Log "Circle act got no answer from the server."
+        Show-Toast "JARVIS" "That action could not be carried out. Is the JARVIS server running?"
+        return
+    }
+    $did = @($act.actions).Count
+    Write-Log "JARVIS acted on '$($act.subject)' - $did action(s) in $($act.elapsedMs)ms."
+    # A translation is the one result that also belongs ON the thing itself.
+    if ($act.translation -and $Script:LastCircleRect) {
+        Show-TranslationInPlace ([string]$act.subject) ([string]$act.translation)
+    }
+    if ($popupEnabled) { Show-CircleActCard $act }
+    else { Show-Toast "JARVIS" ([string]$act.summary) }
+}
+
+# The translation, floating exactly over the region that was circled.
+function Show-TranslationInPlace([string]$original, [string]$translated) {
+    if (-not $translated) { return }
+    try {
+        $panel = New-Object JarvisTranslatedPanel -ArgumentList $original, $translated, $Script:LastCircleRect, 12000
+        $panel.Show()
+        $deadline = (Get-Date).AddSeconds(12)
+        while (-not $panel.IsDisposed -and (Get-Date) -lt $deadline) {
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 40
+        }
+        try { $panel.Close(); $panel.Dispose() } catch {}
+    } catch {
+        Write-Log "Translation panel failed: $($_.Exception.Message)"
+    }
+}
+
+function Show-CircleActCard($act) {
+    try {
+        Stop-Working
+        Close-Card
+
+        $w = $popupWidth
+        $pad = 14
+        $innerW = $w - 2 * $pad
+
+        $title = [string]$act.title
+        if (-not $title) { $title = "Done" }
+        $summary = [string]$act.summary
+        $subject = [string]$act.subject
+        $badge = $(if ($act.ok) { "Done" } else { "Partly done" })
+
+        $trail = @()
+        foreach ($a in @($act.actions)) {
+            $trail += "$($a.tool): $($a.output)"
+        }
+        $trailText = ($trail -join "`n`n")
+        foreach ($f in @($act.failures)) { $trailText += "`n`nCould not do: $f" }
+
+        $work = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position).WorkingArea
+        $maxH = $work.Height - 120
+
+        $yHead = 12
+        $ySrc = $yHead + 17
+        $yTitle = $ySrc + 15
+        $ySum = $yTitle + 21
+        $sumH = [Math]::Max(16, (Get-WrappedLineCount $summary $Script:FontUI $innerW 5) * 15)
+        $trailH = 0
+        if ($trailText) { $trailH = [Math]::Min(230, [Math]::Max(52, (Get-WrappedLineCount $trailText $Script:FontUI $innerW 14) * 15 + 12)) }
+
+        $btnH = 32
+        $footer = @(
+            @{ id = "copy"; label = "Copy" },
+            @{ id = "dismiss"; label = "Dismiss" }
+        )
+        if ($act.translation) { $footer = @(@{ id = "inplace"; label = "Show in place" }) + $footer }
+        $footPills = @(Get-PillRows $footer $innerW)
+        $footRows = Get-PillRowCount $footPills
+        $footH = 0
+        if ($footRows -gt 0) { $footH = $footRows * ($btnH + 8) - 8 }
+
+        $bodyEnd = $ySum + $sumH
+        if ($trailH -gt 0) { $bodyEnd += 8 + $trailH }
+        $footY = $bodyEnd + 10
+        $h = $footY + $footH + 12
+        if ($h -gt $maxH) { $h = $maxH }
+
+        $form = New-CardForm $w $h
+        $form.Controls.Add((New-StatusDot $pad ($yHead + 4) $Script:Accent))
+        $form.Controls.Add((New-JarvisLabel "JARVIS" $Script:FontMini $Script:Dim ($pad + 16) $yHead 90 16))
+
+        $badgeW = Measure-Width $badge $Script:FontUIB
+        $badgeLabel = New-JarvisLabel $badge $Script:FontUIB $Script:Accent ($w - $pad - $badgeW) $yHead $badgeW 16
+        $badgeLabel.TextAlign = "MiddleRight"
+        $form.Controls.Add($badgeLabel)
+
+        $srcText = "on your screen"
+        if ($subject) { $srcText = "on '$($subject)'" }
+        $form.Controls.Add((New-JarvisLabel $srcText $Script:FontSmall $Script:Faint $pad $ySrc $innerW 15))
+        $form.Controls.Add((New-JarvisLabel (Limit-OneLine $title $Script:FontTitle $innerW) $Script:FontTitle $Script:Fg $pad $yTitle $innerW 20))
+
+        if ($summary) {
+            $form.Controls.Add((New-JarvisLabel $summary $Script:FontUI $Script:Fg $pad $ySum $innerW $sumH))
+        }
+        if ($trailH -gt 0) {
+            $pane = New-ReadingPane $pad ($ySum + $sumH + 8) $innerW $trailH $false
+            $pane.Text = $trailText
+            $form.Controls.Add($pane)
+        }
+
+        foreach ($pill in $footPills) {
+            $bx = $pad + $pill.x
+            $by = $footY + ($pill.row * ($btnH + 8))
+            switch ([string]$pill.action.id) {
+                "inplace" {
+                    $tag = @{ text = [string]$act.translation }
+                    $btn = New-PillButton "Show in place" $bx $by $pill.w $btnH $true $tag {
+                        $info = $this.Tag
+                        Close-Card
+                        Show-TranslationInPlace "" ([string]$info.text)
+                        # Let the panel sit for its full life, then come back.
+                        Start-Sleep -Milliseconds 300
+                    }
+                    $form.Controls.Add($btn)
+                }
+                "copy" {
+                    $copyText = $summary
+                    if (-not $copyText) { $copyText = $title }
+                    if ($trailText) { $copyText = "$copyText`n`n$trailText" }
+                    $tag = @{ text = $copyText }
+                    $btn = New-PillButton "Copy" $bx $by $pill.w $btnH $false $tag {
+                        $info = $this.Tag
+                        $payload = [string]$info.text
+                        if ($payload) {
+                            try { [System.Windows.Forms.Clipboard]::SetText($payload) } catch {}
+                            Send-Suppress $payload
+                        }
+                        Close-Card
+                    }
+                    $form.Controls.Add($btn)
+                }
+                "dismiss" {
+                    $form.Controls.Add((New-PillButton "Dismiss" $bx $by $pill.w $btnH $false @{} { Close-Card }))
+                }
+            }
+        }
+
+        Show-Card $form $w $h
+        Write-Log "Circle act card: '$title'."
+    } catch {
+        Write-Log "Circle act card failed: $($_.Exception.Message)"
+    }
+}
+
+function Show-CircleResultCard($result) {
+    try {
+        Stop-Working
+        Close-Card
+
+        $w = $popupWidth
+        $pad = 14
+        $innerW = $w - 2 * $pad
+
+        $title = [string]$result.title
+        if (-not $title) { $title = "Screen selection" }
+        $kindLabel = [string]$result.kindLabel
+        $summary = [string]$result.summary
+        $answer = [string]$result.answer
+        $searchUrl = [string]$result.searchUrl
+        $surface = [string]$result.surface
+
+        $items = @($result.items)
+        if ($items.Count -gt $circleItems) { $items = @($items[0..($circleItems - 1)]) }
+
+        $work = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position).WorkingArea
+        $maxH = $work.Height - 120
+
+        $yHead = 12
+        $ySrc = $yHead + 17
+        $yTitle = $ySrc + 15
+        $ySum = $yTitle + 21
+        $sumH = [Math]::Max(16, (Get-WrappedLineCount $summary $Script:FontUI $innerW 4) * 15)
+        $answerH = 0
+        if ($answer) {
+            $answerH = [Math]::Min(200, [Math]::Max(48, (Get-WrappedLineCount $answer $Script:FontUI $innerW 12) * 15 + 12))
+        }
+        $rowH = 26
+        $rowGap = 6
+        $listH = 0
+        if ($items.Count -gt 0) { $listH = 20 + ($items.Count * ($rowH + $rowGap)) }
+
+        $btnH = 32
+        $footer = @(
+            @{ id = "act"; label = "Tell JARVIS what to do" },
+            @{ id = "google"; label = "Search Google" },
+            @{ id = "openj"; label = "Open JARVIS" },
+            @{ id = "copy"; label = "Copy" },
+            @{ id = "dismiss"; label = "Dismiss" }
+        )
+        $footPills = @(Get-PillRows $footer $innerW)
+        $footRows = Get-PillRowCount $footPills
+        $footH = 0
+        if ($footRows -gt 0) { $footH = $footRows * ($btnH + 8) - 8 }
+
+        $bodyEnd = $ySum + $sumH
+        if ($answerH -gt 0) { $bodyEnd += 8 + $answerH }
+        $yList = $bodyEnd + 8
+        $footY = $yList + $listH + 6
+        $h = $footY + $footH + 12
+        if ($h -gt $maxH) { $h = $maxH }
+
+        $form = New-CardForm $w $h
+
+        $dot = New-StatusDot $pad ($yHead + 4) $Script:Accent
+        $form.Controls.Add($dot)
+
+        $head = New-JarvisLabel "JARVIS" $Script:FontMini $Script:Dim ($pad + 16) $yHead 90 16
+        $form.Controls.Add($head)
+
+        if ($kindLabel) {
+            $badgeW = Measure-Width $kindLabel $Script:FontUIB
+            $badge = New-JarvisLabel $kindLabel $Script:FontUIB $Script:Accent ($w - $pad - $badgeW) $yHead $badgeW 16
+            $badge.TextAlign = "MiddleRight"
+            $form.Controls.Add($badge)
+        }
+
+        $src = New-JarvisLabel "from your screen" $Script:FontSmall $Script:Faint $pad $ySrc $innerW 15
+        $form.Controls.Add($src)
+
+        $titleLabel = New-JarvisLabel (Limit-OneLine $title $Script:FontTitle $innerW) $Script:FontTitle $Script:Fg $pad $yTitle $innerW 20
+        $form.Controls.Add($titleLabel)
+
+        if ($summary) {
+            $sum = New-JarvisLabel $summary $Script:FontUI $Script:Fg $pad $ySum $innerW $sumH
+            $form.Controls.Add($sum)
+        }
+
+        if ($answerH -gt 0) {
+            $pane = New-ReadingPane $pad ($ySum + $sumH + 8) $innerW $answerH $false
+            $pane.Text = $answer
+            $form.Controls.Add($pane)
+        }
+
+        if ($items.Count -gt 0) {
+            $listTitle = "GOOGLE"
+            switch ($surface) {
+                "shopping" { $listTitle = "GOOGLE SHOPPING" }
+                "places"   { $listTitle = "GOOGLE MAPS" }
+                "images"   { $listTitle = "GOOGLE IMAGES" }
+            }
+            $lb = New-JarvisLabel $listTitle $Script:FontMini $Script:Dim $pad $yList $innerW 16
+            $form.Controls.Add($lb)
+
+            $iy = $yList + 20
+            $n = 0
+            foreach ($item in $items) {
+                $n++
+                $form.Controls.Add((New-ResultRow $n $item $pad $iy $innerW))
+                $iy += $rowH + $rowGap
+            }
+        }
+
+        foreach ($pill in $footPills) {
+            $bx = $pad + $pill.x
+            $by = $footY + ($pill.row * ($btnH + 8))
+            switch ([string]$pill.action.id) {
+                "act" {
+                    # Nothing is hardcoded past this point: whatever the user
+                    # types is the goal, and the agent picks the tool.
+                    $btn = New-PillButton "Tell JARVIS what to do" $bx $by $pill.w $btnH $true @{} {
+                        Close-Card
+                        $say = Read-CircleInstruction ""
+                        if ($say) { Start-CircleAct $say }
+                    }
+                    $form.Controls.Add($btn)
+                }
+                "google" {
+                    $tag = @{ url = $searchUrl }
+                    $btn = New-PillButton "Search Google" $bx $by $pill.w $btnH $true $tag {
+                        $info = $this.Tag
+                        $url = [string]$info.url
+                        if ($url) { try { Start-Process $url } catch {} }
+                    }
+                    $form.Controls.Add($btn)
+                }
+                "openj" {
+                    $btn = New-PillButton "Open JARVIS" $bx $by $pill.w $btnH $false @{} {
+                        try { Start-Process $Script:OpenUrl } catch {}
+                        Close-Card
+                    }
+                    $form.Controls.Add($btn)
+                }
+                "copy" {
+                    $copyText = $answer
+                    if (-not $copyText) { $copyText = "$title - $summary" }
+                    $tag = @{ text = $copyText }
+                    $btn = New-PillButton "Copy" $bx $by $pill.w $btnH $false $tag {
+                        $info = $this.Tag
+                        $payload = [string]$info.text
+                        if ($payload) {
+                            try { [System.Windows.Forms.Clipboard]::SetText($payload) } catch {}
+                            Send-Suppress $payload
+                        }
+                        Close-Card
+                    }
+                    $form.Controls.Add($btn)
+                }
+                "dismiss" {
+                    $btn = New-PillButton "Dismiss" $bx $by $pill.w $btnH $false @{} { Close-Card }
+                    $form.Controls.Add($btn)
+                }
+            }
+        }
+
+        Show-Card $form $w $h
+        Write-Log "Circle result: '$title'."
+    } catch {
+        Write-Log "Circle result card failed: $($_.Exception.Message)"
+        Write-Log "  at $($_.InvocationInfo.PositionMessage -replace "`r`n", ' ')"
+    }
+}
+
+# Encode the crop as JPEG bytes. JPEG is several times smaller than PNG for a
+# screenshot, and both the upload and the vision model are faster for it - which
+# is the difference between a snappy circle and a slow one. Quality 82 keeps
+# small text readable, which is exactly what the model has to read.
+#
+# Deliberately returns BYTES, not a base64 string: the route accepts a raw image
+# body, which is a third smaller on the wire, and keeping base64 next to screen
+# capture in one script is what made Windows Defender's AMSI scanner block the
+# whole watcher ("this script contains malicious content") - taking clipboard
+# intelligence down with it.
+function Get-JpegBytes($bmp, [int]$quality = 82) {
+    $codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq "image/jpeg" }
+    $params = New-Object System.Drawing.Imaging.EncoderParameters(1)
+    $params.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, [long]$quality)
+    $ms = New-Object System.IO.MemoryStream
+    $bmp.Save($ms, $codec, $params)
+    $bytes = $ms.ToArray()
+    $ms.Dispose()
+    return $bytes
+}
+
+# POST the crop and wait for the answer - cancellably.
+#
+# The wait pumps Windows messages, so the working indicator keeps animating AND
+# both of the user's escape hatches work while the model is still thinking:
+#   Esc            -> abort the request, show nothing
+#   circle hotkey  -> abort the request, hand back to re-freeze for a new circle
+# Returns @{ status = "ok" | "esc" | "again" | "timeout" | "error"; data; error }
+function Invoke-CircleQuery([byte[]]$bytes) {
+    $uri = "$Script:CircleUri`?maxItems=$circleItems"
+    $content = [System.Net.Http.ByteArrayContent]::new($bytes)
+    $content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::new("image/jpeg")
+    $cts = New-Object System.Threading.CancellationTokenSource
+    $escHeld = $false
+    try {
+        # Escape is taken with a TEMPORARY global hotkey for the duration of the
+        # wait. That makes cancel message-driven (impossible to miss, unlike
+        # polling) and stops the keystroke leaking into whichever app is
+        # focused. It is released the moment we are done either way.
+        if ($Script:Hotkey) {
+            $Script:Hotkey.TriggeredId = 0
+            # MOD_NOREPEAT (0x4000) + VK_ESCAPE.
+            $escHeld = $Script:Hotkey.Register($Script:HotkeyIdEsc, 0x4000, 0x1B)
+            if (-not $escHeld -and -not $Script:EscHotkeyWarned) {
+                $Script:EscHotkeyWarned = $true
+                Write-Log "Note: another app owns bare Escape - the hotkey still re-draws, Esc just will not cancel."
+            }
+        }
+
+        $task = (Get-Http).PostAsync($uri, $content, $cts.Token)
+        $deadline = (Get-Date).AddSeconds($circleTimeoutSec)
+        while (-not $task.IsCompleted) {
+            [System.Windows.Forms.Application]::DoEvents()
+
+            $id = 0
+            if ($Script:Hotkey) { $id = $Script:Hotkey.TriggeredId }
+            if ($id -ne 0) {
+                $Script:Hotkey.TriggeredId = 0
+                $cts.Cancel()
+                if ($id -eq $Script:HotkeyIdEsc) { return @{ status = "esc" } }
+                return @{ status = "again" }
+            }
+            if ((Get-Date) -gt $deadline) {
+                $cts.Cancel()
+                return @{ status = "timeout" }
+            }
+            Start-Sleep -Milliseconds 20
+        }
+        if ($task.IsFaulted -or $task.IsCanceled) {
+            return @{ status = "error"; error = "request failed or was cancelled" }
+        }
+        $body = $task.Result.Content.ReadAsStringAsync().Result
+        return @{ status = "ok"; data = ($body | ConvertFrom-Json) }
+    } catch {
+        return @{ status = "error"; error = $_.Exception.Message }
+    } finally {
+        if ($escHeld -and $Script:Hotkey) {
+            try { $Script:Hotkey.Unregister($Script:HotkeyIdEsc) } catch {}
+        }
+        $cts.Dispose()
+    }
+}
+
+# The whole gesture: freeze the screen, draw, crop, ask, show the card.
+#
+# Loops by design: pressing the circle hotkey again - while drawing OR while the
+# answer is still on its way - re-freezes the screen and starts a fresh circle,
+# so "press it again and circle something else" always just works.
+function Invoke-CircleToSearch {
+    if ($Script:CircleBusy) { return }
+    if (-not $Script:CircleTypesLoaded) { return }
+    $Script:CircleBusy = $true
+    $frozen = $null
+    $overlay = $null
+    $crop = $null
+    try {
+        # for(;;) rather than while($true): the smoke tests cut this file at the
+        # marker below, and this inner loop must not look like the main loop.
+        for (;;) {
+            Close-Card
+            # Let the card actually disappear, or it ends up in the screenshot.
+            Start-Sleep -Milliseconds 140
+            [System.Windows.Forms.Application]::DoEvents()
+
+            Write-Log "Circle to search - freezing the screen..."
+            $shot = Get-ScreenFrame
+            if (-not $shot) {
+                Close-Card
+                Write-Log "Circle to search: no screen frame."
+                Show-Toast "JARVIS" "I could not capture the screen. Is the JARVIS server running?"
+                return
+            }
+            $frozen = $shot.bitmap
+            if ($Script:Hotkey) { $Script:Hotkey.TriggeredId = 0 }
+
+            $overlay = New-Object JarvisCircleOverlay -ArgumentList $frozen, $shot.rect
+            [void]$overlay.ShowDialog()
+
+            $cancelled = [bool]$overlay.Cancelled
+            $hasSel = [bool]$overlay.HasSelection
+            $again = ($Script:Hotkey -and ($Script:Hotkey.TriggeredId -ne 0))
+            if ($Script:Hotkey) { $Script:Hotkey.TriggeredId = 0 }
+
+            if (-not $again -and $hasSel) {
+                $crop = $overlay.BuildCrop($circleMaxWidth, $true)
+                # Where the loop was, in screen coordinates - the overlay sits at
+                # the virtual screen's origin, so its selection bounds are
+                # already absolute once the frame offset is added.
+                $sel = $overlay.SelectionBounds
+                $selRect = New-Object System.Drawing.Rectangle -ArgumentList ($shot.rect.X + $sel.X), ($shot.rect.Y + $sel.Y), $sel.Width, $sel.Height
+            }
+            try { $overlay.Dispose() } catch {}
+            $overlay = $null
+            try { $frozen.Dispose() } catch {}
+            $frozen = $null
+
+            if ($again) {
+                Write-Log "Circle to search: redraw requested - re-freezing the screen."
+                continue
+            }
+            if ($cancelled -or -not $hasSel) {
+                Write-Log "Circle to search cancelled."
+                return
+            }
+            if (-not $crop) {
+                Write-Log "Circle to search: the selection was too small."
+                return
+            }
+
+            $bytes = Get-JpegBytes $crop
+            $crop.Dispose()
+            $crop = $null
+            # Keep both for the action card: it acts on the same crop the search
+            # saw, and knows where it was so a translation can sit in place.
+            $Script:LastCircleCrop = $bytes
+            $Script:LastCircleRect = $selRect
+            $kb = [int]($bytes.Length / 1024)
+            Write-Log "Circle to search - looking at a ${kb} KB crop..."
+
+            if ($popupEnabled) {
+                Show-WorkingCard "Searching" "circle" "Esc to cancel - $circleHotkey to redraw"
+            }
+            $resp = Invoke-CircleQuery $bytes
+            Stop-Working
+
+            if ($resp.status -eq "esc") {
+                Close-Card
+                Write-Log "Circle search cancelled with Esc."
+                return
+            }
+            if ($resp.status -eq "again") {
+                Close-Card
+                Write-Log "Circle to search: redraw requested - re-freezing the screen."
+                continue
+            }
+            if ($resp.status -eq "timeout") {
+                Close-Card
+                Write-Log "Circle search gave up after ${circleTimeoutSec}s."
+                Show-Toast "JARVIS" "That circle took too long to answer. Try again, or circle a smaller area."
+                return
+            }
+            if ($resp.status -ne "ok" -or -not $resp.data -or -not $resp.data.success) {
+                Close-Card
+                Write-Log "Circle search request failed: $($resp.error)"
+                Show-Toast "JARVIS" "Circle search could not reach the JARVIS server. Is 'npm run dev' running?"
+                return
+            }
+
+            $result = $resp.data
+            $found = @($result.items).Count
+            $elapsed = [string]$result.elapsedMs
+            Write-Log "JARVIS - $($result.kindLabel): $($result.title) ($found results via $($result.provider), ${elapsed}ms)"
+            if ($popupEnabled) { Show-CircleResultCard $result }
+            else { Show-Toast "JARVIS - $($result.kindLabel)" ([string]$result.summary) }
+            return
+        }
+    } catch {
+        Write-Log "Circle to search failed: $($_.Exception.Message)"
+        Close-Card
+        Show-Toast "JARVIS" "Circle to search hit a problem. Check the terminal."
+    } finally {
+        try { if ($crop) { $crop.Dispose() } } catch {}
+        try { if ($overlay) { $overlay.Dispose() } } catch {}
+        try { if ($frozen) { $frozen.Dispose() } } catch {}
+        $Script:CircleBusy = $false
+    }
+}
+
+# ---------------------------------------------------------------------------
 Write-Host "=========================================================="
 Write-Host " JARVIS Clipboard Assistant - system-wide, detection first"
 Write-Host " Copy anything: JARVIS names what it is, then shows buttons."
@@ -1068,6 +1898,7 @@ Write-Host " Endpoint:   $Script:Uri"
 Write-Host " Assist:     $(if ($assistEnabled) { 'ON' } else { 'OFF' })   Actions: $(if ($actionsEnabled) { 'ON' } else { 'OFF' })   Images: $(if ($imagesEnabled) { 'ON' } else { 'OFF' })"
 Write-Host " Ask first:  $(if ($askFirst) { 'ON' } else { 'OFF' })   Apply on screen: $(if ($applyEnabled) { 'ON' } else { 'OFF' })"
 Write-Host " Card:       $(if ($popupEnabled) { $popupPos } else { 'off' })   Length: ${script:MinLen}-${script:MaxLen}   Poll: ${script:PollMs}ms"
+Write-Host " Circle:     $(if ($circleEnabled) { $circleHotkey + ' - draw around anything' } else { 'off' })"
 Write-Host "=========================================================="
 
 $serverReachable = $false
@@ -1082,6 +1913,18 @@ if ($probe -and $probe.kinds) {
     Write-Log "Server reachable at $apiBase (no catalog - using built-in buttons)."
 } else {
     Write-Log "WARNING: no JARVIS dev server at $apiBase. Start it with 'npm run dev', then restart this watcher."
+}
+
+# Circle to Search registers its own global hotkey (nothing else in this script
+# touches RegisterHotKey, so there is no id collision with the screen agent).
+Register-CircleHotkey
+
+# Warm the circle route. Next compiles a route on its FIRST request, and in dev
+# that can take several seconds - paying it here means the first circle you draw
+# is already fast.
+if ($circleEnabled -and $serverReachable) {
+    Write-Log "Warming the circle route..."
+    [void](Invoke-JarvisGet $Script:CircleUri 25)
 }
 
 $script:last = ""
@@ -1133,9 +1976,18 @@ function Offer-Clip([string]$text, [string]$source, [string]$image) {
     }
 }
 
+# JARVIS-MAIN-LOOP-BELOW
+# NOTE: scripts/clipboard-cards-smoke.ps1 and scripts/circle-hotkey-smoke.ps1
+# load this file by cutting at the marker above, so keep it on a line of its own
+# with everything before it complete (no enclosing block left open). The hotkey
+# needs no explicit teardown: the OS releases it when this process exits.
 while ($true) {
     [System.Windows.Forms.Application]::DoEvents()
     if ($Script:CardHideAt -and (Get-Date) -gt $Script:CardHideAt) { Close-Card }
+    if ($Script:Hotkey -and $Script:Hotkey.TriggeredId -ne 0) {
+        $Script:Hotkey.TriggeredId = 0
+        Invoke-CircleToSearch
+    }
 
     try {
         $text = ""
