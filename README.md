@@ -1,251 +1,455 @@
 # J.A.R.V.I.S.
+
 ### Just A Rather Very Intelligent System
 
-A cinematic, modular AI assistant platform built with **Next.js + TypeScript**. JARVIS combines a rich interactive UI, API-driven automations, local system controls, and multi-service integrations (LLMs, messaging, web automation, and more).
+**Point at anything. Say what you want. Watch it happen.**
+
+A local AI assistant that does not stop at the answer.
+
+<p>
+  <img alt="Next.js" src="https://img.shields.io/badge/Next.js-14-000?logo=nextdotjs&logoColor=white">
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white">
+  <img alt="Prisma" src="https://img.shields.io/badge/Prisma-SQLite-2D3748?logo=prisma&logoColor=white">
+  <img alt="Tests" src="https://img.shields.io/badge/verified-21%20suites%20%2B%204%20live%20checks-3fb950">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-Windows--first-0078D4?logo=windows&logoColor=white">
+</p>
 
 ---
 
-## Table of Contents
-- [Overview](#overview)
-- [Capabilities at a Glance](#capabilities-at-a-glance)
-- [Capability Availability](#capability-availability)
-- [Project Architecture](#project-architecture)
-- [Directory Structure](#directory-structure)
-- [How to Clone or Download](#how-to-clone-or-download)
-- [Local Setup](#local-setup)
-- [Environment Variables](#environment-variables)
-- [Available Scripts](#available-scripts)
-- [Tech Stack](#tech-stack)
-- [Notes](#notes)
+**[The idea](#the-whole-idea)** · **[Three promises](#three-promises)** · **[Architecture](#architecture)** · **[What it can do](#what-it-can-do)** · **[Directory structure](#directory-structure)** · **[Quick start](#quick-start)** · **[Using JARVIS](#using-jarvis)** · **[Verification](#verification)** · **[Environment variables](#environment-variables)** · **[Scripts](#scripts)** · **[Troubleshooting](#troubleshooting)** · **[Tech stack](#tech-stack)**
 
 ---
 
-## Overview
-JARVIS is organized as a main repository with a dedicated app workspace in `jarvis/`.
+## The whole idea
 
-It includes:
-- A futuristic React/Next.js frontend with multiple operational panels
-- A large set of server routes under `src/app/api/*` for assistant features
-- Service and integration layers for research, browser automation, scheduling, and messaging
-- Prisma + SQLite persistence for memory, tasks, reports, reminders, and automations
-- Optional WhatsApp server bridge for persistent messaging connectivity
-- A system-wide clipboard assistant (`npm run clipboard`) that detects copied content and offers the right actions
+Most assistants are a chat box with a large model behind it. You ask. They answer. Then you go and do the work.
 
----
+JARVIS is built for the part **after** the answer.
 
-## Capabilities at a Glance
-JARVIS is designed as an operations-grade AI copilot: conversational, multimodal, and automation-ready. It blends premium command-center UX with practical execution across research, messaging, browser workflows, and local system control.
+One keystroke freezes your screen. You draw a loop around anything — a paragraph, an invoice, an error, a product, a chart — and then you just say what you want.
 
-- **🧠 AI Workflows + Mission Orchestration**
-  - Conversational workflows across OpenAI, Gemini, Anthropic, and Hugging Face, with mission-style planning, checkpoints, and follow-up execution.
-  - Mission Control as a true orchestration surface for chaining multi-step browser, research, messaging, and system actions.
-  - Compound missions can coordinate outcomes in one flow (for example: find top-rated nearby options, open directions, and message a contact), depending on enabled integrations.
+```text
+    Ctrl+Alt+S          draw a loop around the invoice
+    "email this to rahul asking him to pay by the 30th"
 
-- **🔎 Research, Reporting, and Meeting Intelligence**
-  - Deep research pipelines: query planning, web search/scrape/extract, synthesis, report persistence, and follow-up retrieval.
-  - Real-time **Meeting Shadow** assistance: transcript-snippet analysis with meeting-topic context, concise tactical talking points, counter-arguments, and optional private whisper-style voice playback.
-  - Meeting workflows include live caption capture/sync and structured post-meeting outputs where integrations are configured.
+    → email.send   ·  composed in context  ·  delivered
+      "Sent email to rahul@example.com with the subject 'Invoice 2026-114 Payment Due'."
+```
 
-- **🎙️ Voice, Persona, and Communication Surfaces**
-  - Voice interaction with transcription + text-to-speech, plus persona/tone controls (language, rate, pitch, style).
-  - Telegram command operations for voice/text/media/reminders/briefings, with optional WhatsApp bridge workflows.
-  - AI-assisted email composition with tone control, plus sending via configured email integrations.
+```text
+    Ctrl+Alt+S          draw a loop around the French paragraph
+    "translate this into Hindi"
 
-- **🌐 Browser Automation + Record-and-Repeat Runtime**
-  - Autonomous browser execution for real web tasks (forms, sign-ins, extraction, comparisons, checkout-prep flows).
-  - Entertainment/navigation automation for scroll-style feeds (such as reels/shorts-style experiences) where browser/session conditions allow.
-  - Record-and-repeat automation across browser and desktop: recording, replay, parameterized steps, screenshots, form-fill history, and analytics surfaces.
-  - Commerce and task automation can drive supported shopping/ordering journeys through browser automation, with user configuration, permissions, and confirmation gates.
+    → text.translate  ·  6.7s end to end
+      the Hindi sits over the paragraph you circled, in place.
+```
 
-- **💻 Desktop, Filesystem, and Context Intelligence**
-  - System controls and telemetry where supported: screenshots, app/URL launch, lock/sleep/shutdown, audio/brightness, and hardware/network status.
-  - Network-awareness workflows can incorporate connectivity context and IP/location-aware provider responses when supporting integrations are configured.
-  - Clipboard intelligence includes background capture/watch flows and context-aware assistance pipelines (with platform/runtime qualification).
-  - Filesystem integration supports local read/write/search workflows within configured and permitted boundaries.
-  - Persistent memory/task/report state via Prisma + SQLite for continuity across sessions.
-
-- **🧩 Integrations for Developer + Productivity Work**
-  - GitHub integration paths for repository exploration and developer workflows (repos, code, issues, PRs, commits, and related actions where authorized).
-  - Notion and Todoist integrations for research delivery, notes, action-item sync, and productivity execution.
-  - NASA integration for APOD and related astronomy/space imagery experiences.
-  - CAD/design workflow support via MCP CAD tooling and generated parametric model flows (integration capability, not a full standalone CAD engine).
-
-- **👁️ Sensor-Driven Interaction + Cinematic UX**
-  - Hand and eye interaction where supported: gaze-based cursor control, gesture/air-mouse control, and gesture-based media controls.
-  - Sentinel/security command surfaces for armed-state flows, alerts, and monitoring hooks where configured.
-  - Cinematic command-center UI with HUD panels, motion/3D layers, live status rails, and operator feedback loops.
+There is no action menu. There is no list of supported intents hidden somewhere in the code that you have to discover. The region is described by a vision model, your sentence becomes the goal, and an agent picks a real tool and runs it. When a capability is added later, it is available from a circle immediately — because nothing was hardcoded to begin with.
 
 ---
 
-## Capability Availability
-- **Core by default:** command-center UI, core assistant routing, API surfaces, and local persistence.
-- **Optional integrations:** services such as WhatsApp, GitHub, Notion, Todoist, NASA, advanced email, maps, and CAD flows require setup, credentials, and/or external providers.
-- **Platform and permission dependent:** desktop controls, clipboard watcher behavior, hand/eye controls, and some media/security features depend on OS support plus camera/microphone/browser permissions.
-- **Safety and confirmation:** execution on live websites and outbound actions (including commerce or email flows) may require explicit user confirmation, authenticated sessions, and configured safeguards.
+## Three promises
 
-## Project Architecture
-The system is organized in layered modules with a shared integration surface:
+**It tells you the truth.**
+Every card shows the tool that actually ran and its actual output. When it cannot do something, it says so, in as many words:
+
+> *"I could not read the text in the circled region (vision timeout). Please press Ctrl+Alt+S, circle a tighter area, and ask me again."*
+
+That is a real answer from this system, on a day when every vision provider was rate-limited. It arrived in nine seconds. The version before it would have hung for eighty and then shown you an empty card. Honesty that fast is the feature.
+
+**It can take it back.**
+Every side-effecting action — a file move, a write, a send, a clipboard overwrite, a browser navigation — is recorded on an **action tape** with enough payload to reverse it. *Undo what you did ten minutes ago* is an operation, not a promise.
+
+**It proves what it claims.**
+21 unit suites and four live checks that drive the real gesture, the real routes, and a real email send. The numbers are [at the bottom](#verification). Nothing in this document is a guess.
+
+---
+
+## Architecture
+
+Layered, so the desktop features and the web features share one brain: the same agent runtime that answers a chat message is the one that executes a circled instruction, and the same memory graph feeds both.
 
 ```mermaid
 flowchart TD
-  U[User / Operator] --> UI[Presentation Layer\n`jarvis/src/components`\nHUD, panels, widgets, cinematic UI]
-  UI --> APP[App Router Layer\n`jarvis/src/app`\nPages + API routes]
-  APP --> SRV[Service Orchestration Layer\n`jarvis/src/services`\nResearch, automation, mission, media]
-  SRV --> LIB[Core Library Layer\n`jarvis/src/lib`\nMemory, agent/runtime logic, OS bridges,\nsecurity, messaging, integrations]
-  UI <--> ST[Client State Layer\n`jarvis/src/store`\nZustand]
-  APP --> DATA[Data Layer\n`jarvis/prisma`\nPrisma schema + SQLite]
-  LIB --> EXT[External Systems\nLLM providers, Telegram, WhatsApp,\nSpotify, browser/desktop tooling]
-  ROOT[Root Runtime Utilities\n`*.js` / `*.bat` at repo root] --> APP
-  ROOT --> EXT
+  U["You"] --> SURF["Surfaces<br/>Command Center · Clipboard card · Circle overlay<br/>Electron stealth overlay · Telegram"]
+
+  SURF --> APP["App Router · jarvis/src/app<br/>pages + 160 API route handlers"]
+  APP --> SVC["Services · jarvis/src/services<br/>research · browser · macro · meeting · scheduler"]
+  SVC --> CORE["Core Library · jarvis/src/lib<br/>agent · overlay · memory · os · security · composio · mcp"]
+
+  SURF <--> STATE["Client State · jarvis/src/store<br/>Zustand"]
+  SVC <--> STATE
+
+  CORE --> DATA["Data · jarvis/prisma<br/>Prisma + SQLite"]
+  CORE --> EXT["Outside World<br/>model providers · web intelligence<br/>Gmail and Composio · Telegram · WhatsApp<br/>a real Playwright browser"]
+
+  SHELL["Desktop Shells · jarvis/scripts + jarvis/overlay<br/>PowerShell watcher · C# overlay windows · Electron"] --> APP
+  SHELL --> OS["Windows<br/>global hotkeys · screen capture · audio devices"]
 ```
 
-### Architecture Mapping
-- **Presentation Layer**: `jarvis/src/components/*` (reactor, panels, cinematic surfaces, control overlays)
-- **Routing + API Layer**: `jarvis/src/app/*` (UI routes + `api/*/route.ts` server handlers)
-- **Service Layer**: `jarvis/src/services/*` (orchestration and workflow composition)
-- **Core Library Layer**: `jarvis/src/lib/*` (shared domain modules and integration clients)
-- **State Layer**: `jarvis/src/store/jarvis.store.ts`
-- **Data Layer**: `jarvis/prisma/schema.prisma` + migrations
-- **Runtime Utility Layer**: root scripts and helper entry points (server bridges, debug/bootstrap scripts)
+### Circle to Act, end to end
+
+Every screen-level feature has the same shape: a thin desktop shell captures the input, the server does the thinking, the answer returns as a card next to your cursor.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor U as You
+  participant W as Watcher (PowerShell)
+  participant F as /api/circle/frame
+  participant A as /api/circle/act
+  participant V as Vision race
+  participant G as ReAct agent
+  participant T as a real tool
+
+  U->>W: Ctrl+Alt+S, draw a loop
+  W->>F: ask for the frozen frame
+  F-->>W: PNG of the region
+  U->>W: "email this to rahul asking for payment"
+  W->>A: POST the raw JPEG crop
+  A->>V: what was circled? (9s hard deadline)
+  V-->>A: the subject
+  A->>G: goal = subject + your words
+  G->>T: picks ONE tool
+  T-->>G: real output
+  G-->>A: summary + step trail
+  A-->>W: card payload
+  W-->>U: result card, or the translation in place
+```
+
+### The layers
+
+| Layer | Where it lives | What it owns |
+|---|---|---|
+| Surfaces | `jarvis/src/components/{hud,panels,reactor,cinematic,widgets,overlay,mcp}` | Command center, HUD rails, the operational panel grid, motion layers |
+| App Router | `jarvis/src/app` | Pages and 160 API route handlers — every capability has an HTTP surface |
+| Services | `jarvis/src/services` | Research pipelines, Playwright and browser agents, macros, meeting bot, scheduler, LLM chain |
+| Core library | `jarvis/src/lib` | The runtime: `agent/`, `overlay/`, `memory/`, `composio/`, `os/`, `security/`, `mcp/`, `persona/` |
+| Desktop shells | `jarvis/scripts/*.ps1`, `jarvis/overlay/` | The watcher, the C# overlay window types, the Electron stealth shell |
+| Client state | `jarvis/src/store` | Zustand store shared by every panel |
+| Data | `jarvis/prisma` | Memory, tasks, reports, reminders, the mail queue, the action tape |
+
+### Three decisions worth knowing
+
+**Screen capture lives on the server, not in the watcher.**
+Reading the screen, encoding it, uploading it, owning global hotkeys and watching the clipboard — all in one PowerShell file — is precisely the shape Windows Defender's AMSI scanner refuses to run. It blocked the watcher outright and took clipboard intelligence down with it. Now the server writes a throwaway capture script per call, and the watcher only asks for a frame and decodes it.
+
+**The result cards cannot take the keyboard — and that is intentional.**
+They are no-activate windows, so they never steal focus from what you are working in. That is also why the natural-language input opens its own small activating ask box. A text field inside a no-activate window could never receive a keystroke, and pretending otherwise would just be a dead button.
+
+**The Electron shell exists for one Windows API.**
+`SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` is the only way to keep a window out of a screen share, and Windows refuses the call unless the calling process owns the window. A browser window cannot be excluded. A window we own can. So we own one.
 
 ---
 
-## Directory Structure
+## What it can do
+
+### Screen — ask, or act
+
+`Ctrl+Alt+S` freezes and dims the screen. You draw a freehand loop. From there:
+
+**Circle to Search** decides what you circled and sends it to the *right* Google surface — a product to Shopping with prices, a place to Maps, a face to Images, a question straight to an answer, a stack trace into code reasoning.
+
+**Circle to Act** takes your sentence and goes to work:
+
+```text
+email this to rahul@example.com asking him to pay the invoice by the 30th
+translate this into Hindi
+remember that this is the laptop I want to buy
+find the cheapest place to buy this near me
+add this to my cart on amazon
+```
+
+The agent chooses among `email.send`, `text.translate`, `memory.save`, `browser.act`, `maps.search`, `maps.directions`, `web.search`, `github` and `whatsapp.send`.
+
+Press `Esc` to abort a search already in flight. Press the hotkey again mid-search to abort and re-freeze for a fresh circle.
+
+> **Why it stays fast.** Vision models are raced in parallel behind a hard nine-second deadline with a 2.5-second hedge. The first valid answer wins; the losers are aborted. A throttled provider can never cost you its own timeout — the old sequential chain — 30 seconds per model, then three more providers — is exactly how a circle once took 60 to 80 seconds and came back empty.
+
+### Clipboard — intelligence before you break flow
+
+`npm run clipboard` watches what you copy, names it, and offers the verbs that actually apply — a card next to your cursor, never a window that steals focus.
+
+It recognises **14 kinds of clip** from the text itself: question, code, error, website, video, repository, content, message, SQL, image, structured data, command, equation, text. Code gets *Fix · Explain · Optimize · Test*. Errors get *Diagnose*. Links get *Open · Summarize · Research · Extract information*. Content gets *Key points · Analyze · Ask questions*. Questions get *Answer · Explain simply · Exam answer*. Messages get *Reply*.
+
+**Apply on screen** writes the answer back into the app you were working in. **Copy** puts it on the clipboard and suppresses the watcher so it does not re-trigger itself.
+
+### Overlay — a copilot that can be invisible
+
+An Electron shell that floats over everything and can stay out of a screen share.
+
+Seven modes, one key each: `Alt+1` General · `Alt+2` Meeting · `Alt+3` Interview · `Alt+4` Technical · `Alt+5` Study · `Alt+6` Negotiation · `Alt+7` Presentation.
+
+Then the keyboard does the rest — `Alt+A` answer now, `Alt+S` summarise, `Alt+E` go deeper, `Alt+R` repeat, `Alt+D` change length, `Alt+M` mute, `Alt+P` privacy, `Alt+C` context, `Alt+X` forget everything, `Ctrl+Enter` send, `Esc` hide. `Alt+K` shows every binding.
+
+Underneath: a live transcript, a context brain that decides when to speak up, a queue, and streaming answers.
+
+### Autonomy — a real ReAct loop
+
+The model picks **one** tool per turn, the tool actually runs, and the true output is fed back before the next decision. No simulation, no narration of actions it did not take.
+
+| Tool | What it really does |
+|---|---|
+| `browser.act` | Opens a **visible** browser and works the page — carts, forms, bookings |
+| `email.send` | Composes in the right tone and sends from your connected Gmail |
+| `web.search` | Live search with a Serper → Brave → Firecrawl fallback chain |
+| `maps.search` · `maps.directions` | Real places and real routes, anchored to your live location |
+| `github` | Live GitHub REST — repos, issues, pulls, commits, contents |
+| `whatsapp.send` | A real message to a named contact through the bridge |
+| `text.translate` · `memory.save` | Translation, and durable facts into the memory graph |
+
+### Browser, macros, proxies
+
+Playwright agents with resilience and stealth layers, plus a visible-browser runner for things that must be seen. **Record and repeat**: record a session, replay it parameterized, with screenshots, form-fill history and analytics. Proxy browser profiles and a login-assist path for workflows that need a real session.
+
+### Research, reports, meetings
+
+Deep research pipelines — plan the queries, search, scrape, extract, synthesise — with reports persisted and re-openable, and follow-ups answered against the stored report. **Meeting Shadow** reads live captions, understands the topic, and puts tactical talking points and counter-arguments on screen in the moment. Meeting bots, structured report views, video-directed briefings.
+
+### Memory that accumulates
+
+A knowledge graph of entities and relationships extracted from your conversations, with reinforcement and decay. Second-brain and memory-discussion panels, per-entity timelines, and "what do I know about X" traversal. Facts survive across sessions. Forget requests really delete.
+
+### Communication
+
+**Email** composes with inferred tone and sends with a 30-second cancel window — or immediately when an agent is acting on your instruction. A dispatcher flushes the queue, and a diagnostics route shows exactly what is queued, sent, or failed, with the Gmail message id.
+
+**Telegram** gets the full command surface: voice notes, media, reminders, briefings, inline cancel buttons. **WhatsApp** runs through a bridge server with real sessions.
+
+### Desktop, system, sensors
+
+Screenshots and screen description, launching apps and URLs, lock, sleep and shutdown, audio and brightness, volume metering, hardware and network telemetry, weather, timers, tasks, notes, a vault.
+
+**Hand control** (MediaPipe) for gesture-driven browsing and media. **Eye control** with gaze cursor, calibration and smoothing. **Face recognition** and presence lock, so it can adapt to who is at the machine.
+
+### Security, presence, and a few things that are just beautiful
+
+Armed-state sentinel flows, watchers and alerting hooks you arm deliberately. Integrations for GitHub, Notion, Todoist, Google Calendar, Spotify, YouTube, NASA, Firecrawl and Tavily, plus an **MCP hub**. And a cinematic layer — reactor telemetry reacting to your audio, particle and HUD work, widgets, whiteboard OCR, QR teleport to your phone, a room scanner.
+
+---
+
+## Directory structure
+
 ```text
 Jarvis/
-├─ .agents/                     # Local agent skills and support assets
-├─ README.md
-├─ .env.example
-├─ package.json
-├─ package-lock.json
-├─ prisma/                      # Root-level Prisma schema/assets
-├─ whatsapp-server.js           # Optional WhatsApp bridge server
-├─ *.bat                        # Windows bootstrap and workflow helpers
-├─ test-*.js                    # Root integration/debug test scripts
-├─ jarvis/                      # Main Next.js application workspace
-│  ├─ package.json
-│  ├─ next.config.mjs
-│  ├─ docs/                     # App-specific design/ops notes
-│  ├─ scripts/                  # App automation/e2e helper scripts
-│  ├─ scratch/                  # Local experiments and diagnostics
-│  ├─ notes/                    # User notes and generated text artifacts
-│  ├─ prisma/
-│  │  ├─ schema.prisma
-│  │  └─ migrations/
-│  ├─ public/                   # Static assets, vision/model artifacts
-│  ├─ src/
-│  │  ├─ app/                   # App Router pages + API route handlers
-│  │  ├─ components/            # UI panels, HUD, reactor, cinematic modules
-│  │  ├─ hooks/                 # Client hooks (voice, gesture, sentinel, etc.)
-│  │  ├─ lib/                   # Core runtime logic and integrations
-│  │  ├─ services/              # Feature orchestration services
-│  │  ├─ store/                 # Zustand state
-│  │  └─ types/
-│  ├─ tests/                    # App-level test suites
-│  └─ tsconfig.json
-└─ debug and integration helpers at repository root
+├─ .agents/skills/               # local agent skills
+├─ .env.example                  # environment template
+├─ whatsapp-server.js            # optional WhatsApp bridge
+├─ prisma/schema.prisma          # root schema asset
+├─ *.bat                         # Windows launchers
+├─ debug-*.js, test-*.js         # root integration and debug helpers
+│
+└─ jarvis/                       # the application
+   ├─ docs/                      # test playbooks and design notes
+   ├─ overlay/                   # Electron shell — main.js, preload.js
+   ├─ prisma/                    # schema.prisma, migrations/, dev.db
+   ├─ public/                    # static assets, overlay VAD worklet, models
+   ├─ scripts/                   # the desktop shells and the live checks
+   │  ├─ clipboard-watcher.ps1   #   clipboard + circle runtime
+   │  ├─ circle-overlay.cs       #   overlay window types (C#)
+   │  ├─ hotkey-listener.ps1     #   Ctrl+Shift+S / Ctrl+Shift+T snipping
+   │  ├─ install-electron.mjs    #   Electron install and repair
+   │  └─ e2e-*.mjs, *-smoke.ps1  #   live end-to-end and UI checks
+   ├─ src/
+   │  ├─ app/                    # pages + api/*/route.ts (160 handlers)
+   │  ├─ components/             # hud, panels, reactor, cinematic, overlay, widgets, mcp
+   │  ├─ hooks/                  # voice, gaze, hand, gesture, sentinel, presence
+   │  ├─ lib/                    # agent, overlay, memory, composio, os, security, mcp, persona
+   │  ├─ services/               # research, browser, macro, meeting, scheduler, llm chain
+   │  ├─ store/                  # Zustand client state
+   │  └─ types/
+   ├─ tests/                     # the suites npm test runs
+   ├─ next.config.mjs
+   └─ tsconfig.json
 ```
 
 ---
 
-## How to Clone or Download
-### Option A — Clone with Git (recommended)
+## Quick start
+
+**You need** Node.js 18+ (20+ recommended) and npm. Windows 10/11 for the desktop features — the clipboard watcher, the circle overlay, system control. The web app itself runs anywhere Node runs.
+
+### 1. Get it
+
 ```bash
 git clone https://github.com/juug24btech22417-del/Jarvis.git
 cd Jarvis
 ```
 
-### Option B — Download ZIP
-1. Open the repository on GitHub.
-2. Click **Code** → **Download ZIP**.
-3. Extract the archive.
-4. Open a terminal in the extracted `Jarvis` folder.
+Or **Code → Download ZIP** on GitHub, extract, open a terminal in the folder.
 
----
+### 2. Install
 
-## Local Setup
-> Main app commands run from the `jarvis/` directory.
-
-1. Install root dependencies (for root utilities):
 ```bash
-npm install
-```
-
-2. Move into the app workspace and install app dependencies:
-```bash
+npm install            # root utilities
 cd jarvis
-npm install
+npm install            # the application
 ```
 
-3. Create local environment file:
+### 3. Configure
+
 ```bash
-cp ../.env.example .env.local
+cp ../.env.example .env.local          # macOS / Linux / Git Bash
 ```
-> On Windows PowerShell:
 ```powershell
-Copy-Item ..\.env.example .env.local
+Copy-Item ..\.env.example .env.local   # Windows PowerShell
 ```
 
-4. Configure `.env.local` with your API keys and credentials.
+A database URL and at least one model provider are all you strictly need. Each integration you add lights up the features that depend on it. See [Environment variables](#environment-variables).
 
-5. Initialize database:
+### 4. Create the database
+
 ```bash
 npx prisma db push
 ```
 
-6. Start development server:
+### 5. Run
+
 ```bash
 npm run dev
 ```
 
-7. Open:
-- `http://localhost:3000` (default Next.js dev port)
+Open **http://localhost:3000**.
+
+### 6. Your first five minutes
+
+1. Walk the command center. Press the panels.
+2. Open **Connected** and see what is live.
+3. In a second terminal: `npm run clipboard`. Copy any code snippet. Watch the card find you.
+4. Press `Ctrl+Alt+S` and circle something.
+5. Click **Tell JARVIS what to do** and type a real instruction. That one is the point of the whole project.
+
+> Optional: `npm run overlay` for the Electron stealth overlay, `npm run hotkey` for the screen-analysis daemon.
 
 ---
 
-## Environment Variables
-The template is in `.env.example` (repository root).
+## Using JARVIS
 
-Key groups:
-- **Core**: app URL
-- **Web Intelligence**: Firecrawl, Tavily
-- **AI Models**: OpenAI, Gemini, Anthropic, Hugging Face
-- **Communication**: WhatsApp, Telegram
-- **Services**: Spotify, Instagram
-- **Database**: `DATABASE_URL` (SQLite)
+### Keys worth memorising
 
-Never commit real secrets.
+| Keys | Scope | What it does |
+|---|---|---|
+| `Ctrl+Alt+S` | Global | Circle to Search / Circle to Act |
+| `Esc` | Circle overlay | Abort a search already in flight |
+| `Ctrl+Alt+S` mid-search | Global | Abort and re-freeze for a fresh circle |
+| `Alt+1 … Alt+7` | Overlay | Pick a mode — General through Presentation |
+| `Alt+A S E R D M P C X` | Overlay | Answer · Summarise · Deeper · Repeat · Length · Mute · Privacy · Context · Forget |
+| `Ctrl+Enter` / `Esc` | Overlay | Send / hide |
+| `Alt+K` | Overlay | Show every binding |
+| `Ctrl+Shift+S` · `Ctrl+Shift+T` | Global (`npm run hotkey`) | Region capture with vision analysis · region OCR to clipboard |
+
+### Surfaces
+
+**Command Center** (`/`) — the HUD, the panels, the reactor.
+**Inbox** (`/inbox`) — notifications and events in one place.
+**Stealth overlay** (`/stealth`, `npm run overlay`) — the copilot that survives a screen share.
+**Teleport** (`/teleport`) — QR handoff to your phone.
+**Spotify setup** (`/spotify-setup`) — the auth flow.
 
 ---
 
-## Available Scripts
+## Verification
+
+The project ships with checks that fail loudly instead of quietly flattering themselves. Run them from `jarvis/`.
+
+| Command | What it proves | Checks |
+|---|---|---|
+| `npm test` | Agent planning and routing, memory, sensors, overlay runtime, clipboard detection, the circle router, email identity | **21 suites** |
+| `npm run smoke:cards` | Cards actually render: crop padding and dimming, downscaling, result rows inside the card, action pills on level rows — no diagonals, nothing off the edge | **67** |
+| `npm run smoke:circle` | The real gesture end to end: hotkey → freeze → draw → answer → `Esc` cancels → hotkey re-dims | **10** |
+| `npm run e2e:circle` | Live vision and live Serper through the real route | **18** |
+| `npm run e2e:circle:act` | Live agent choosing tools from natural language, including a real email send | **14** |
+
+```bash
+npm test
+npm run smoke:cards
+npm run smoke:circle      # close any running watcher first — one owner per hotkey
+npm run e2e:circle
+npm run e2e:circle:act -- --to you@example.com
+```
+
+The vision checks need provider quota available. When it is exhausted, they report the honest degradation path instead of passing — which is the behaviour we want to see.
+
+---
+
+## Environment variables
+
+Template: `.env.example`, copied to `jarvis/.env.local`. **Never commit real secrets.**
+
+<details>
+<summary>All keys, by group</summary>
+
+| Group | Keys |
+|---|---|
+| Core | `NEXT_PUBLIC_APP_URL`, `DATABASE_URL` |
+| Models | `OPENAI_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `ANTHROPIC_API_KEY`, `HUGGINGFACE_API_KEY` |
+| Web intelligence | `FIRECRAWL_API_KEY`, `TAVILY_API_KEY` |
+| Messaging | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `WHATSAPP_PHONE_NUMBER` |
+| Media | `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, `INSTAGRAM_USERNAME`, `INSTAGRAM_PASSWORD` |
+| Browser | `JARVIS_BROWSER_VISIBLE`, `JARVIS_LOGIN_WAIT_MS` |
+| Identity | `JARVIS_PROFILE_NAME`, `JARVIS_PROFILE_PHONE`, `JARVIS_PROFILE_EMAIL`, `JARVIS_PROFILE_ADDRESS`, `JARVIS_PROFILE_CITY`, `JARVIS_PROFILE_STATE`, `JARVIS_PROFILE_PINCODE` |
+| Clipboard watcher | `CLIPBOARD_ASSIST`, `CLIPBOARD_ACTIONS`, `CLIPBOARD_ASK_FIRST`, `CLIPBOARD_IMAGES`, `CLIPBOARD_APPLY_ON_SCREEN`, `CLIPBOARD_POPUP`, `CLIPBOARD_POPUP_POS`, `CLIPBOARD_POPUP_WIDTH`, `CLIPBOARD_POPUP_TIMEOUT_MS`, `CLIPBOARD_POPUP_OFFSET`, `CLIPBOARD_MIN_CHARS`, `CLIPBOARD_MAX_CHARS`, `CLIPBOARD_POLL_MS` |
+
+The identity keys are not decoration. They are what the email signature is built from, so outbound mail signs with your real name and contact instead of something a model invented.
+</details>
+
+---
+
+## Scripts
+
 From `jarvis/`:
-- `npm run dev` — start dev server
-- `npm run build` — production build
-- `npm run start` — run production build
-- `npm run lint` — run lint checks
-- `npm run test` — run test suites
-- `npm run hotkey` — start PowerShell hotkey listener
-- `npm run clipboard` — start clipboard watcher
-- `npm run whatsapp:server` — launch root WhatsApp bridge (`../whatsapp-server.js`)
+
+| Script | Purpose |
+|---|---|
+| `npm run dev` · `npm run build` · `npm run start` | Develop, build, serve |
+| `npm run lint` | Lint |
+| `npm test` | All unit suites |
+| `npm run clipboard` | Clipboard watcher and circle runtime |
+| `npm run hotkey` | Global `Ctrl+Shift+S` / `Ctrl+Shift+T` snipping daemon |
+| `npm run overlay` | Electron stealth overlay |
+| `npm run electron:repair` | Reinstall or repair Electron |
+| `npm run smoke:cards` · `npm run smoke:circle` | UI and gesture checks |
+| `npm run e2e:circle` · `npm run e2e:circle:act` | Live end-to-end checks |
+| `npm run whatsapp:server` | Root WhatsApp bridge |
 
 ---
 
-## Tech Stack
-- **Frontend/App**: Next.js 14, React 18, TypeScript
-- **Styling/UX**: Tailwind CSS, Framer Motion, Three.js / React Three Fiber
-- **State**: Zustand
-- **Data**: Prisma + SQLite
-- **Automation/Integrations**: Playwright, Firecrawl, Telegram, WhatsApp Web
-- **AI Integrations**: OpenAI, Gemini, Anthropic, Hugging Face
+## Troubleshooting
+
+<details>
+<summary>When something fights you</summary>
+
+| Symptom | Cause and fix |
+|---|---|
+| Windows refuses to run the watcher — "malicious content" | Defender's AMSI scan. Keep screen capture on the server side, which is why it lives in `/api/circle/frame` — never inline capture plus base64 into the PowerShell file. |
+| Circle mode says the hotkey is taken and turns itself off | Only one process can own `Ctrl+Alt+S`. Close the other watcher, or set `CIRCLE_HOTKEY` to something else. |
+| "Couldn't read that one", every time | Every vision provider is rate-limited. Check the free-tier quota on your Gemini key. It fails in nine seconds by design, rather than hanging. |
+| Clicking a card's text field does nothing | Result cards are no-activate by design. Use **Tell JARVIS what to do** — it opens its own activating input. |
+| Voice reports no microphone | The route is honest when Windows has no recording device (`waveInGetNumDevs()` is 0). Fix it on the OS side; the card stays typed-first either way. |
+| 500s and "Module not found: Can't resolve 'path'" after a restart | A killed dev server can leave `.next` half-written. Stop it, delete `.next`, start again. |
+| Email never arrives | `GET /api/composio/email/dispatch` lists the queue with status, Gmail message id and error. Rows stuck at `pending` mean the dispatcher ticker is not running. |
+
+</details>
+
+---
+
+## Tech stack
+
+**App** Next.js 14 (App Router) · React 18 · TypeScript 5
+**UI** Tailwind CSS · Framer Motion · Three.js / React Three Fiber
+**State** Zustand
+**Data** Prisma + SQLite
+**Automation** Playwright with stealth and resilience layers · Firecrawl · Tavily · MCP
+**Models** Google Gemini · OpenAI · Anthropic · Hugging Face · Groq · OpenRouter · NVIDIA NIM · Serper
+**Desktop** PowerShell + C# (WinForms/GDI+) · Electron · MediaPipe
+**Messaging** Telegram Bot API · WhatsApp Web
 
 ---
 
 ## Notes
-- This repository contains both the main app (`jarvis/`) and root-level integration scripts.
-- Some integrations require platform-specific tools (especially certain Windows/PowerShell flows).
-- If optional integrations are not configured, core UI/dev workflows can still run.
+
+The repository holds the application (`jarvis/`) and the root utilities — the WhatsApp bridge, the launchers, the debug helpers. Desktop features are Windows-only; the web app and the API surface run anywhere. Integrations are opt-in: an unconfigured provider disables its features cleanly rather than breaking the app. Outbound actions run behind confirmation gates, and anything that changes state is recorded on the action tape.
 
 ---
 
-Built for an ambitious, modular AI assistant experience.
+<p align="center"><em>Built to be used, not demoed.</em></p>
