@@ -249,6 +249,13 @@ function startGazeEngine(): () => void {
   let crashed = false;
   let consecutiveErrors = 0;
   let useDelegate: "GPU" | "CPU" = "GPU";
+  // Single-flight: this loop is pumped by TWO clocks — its own setTimeout chain
+  // and the background ticker. Without this flag every ticker tick (60/s) called
+  // loop() directly and each of those calls armed ANOTHER self-perpetuating
+  // chain, so the number of concurrent inference chains grew by one every 16ms
+  // and saturated the main thread within seconds. Now however many clocks pump
+  // it, there is only ever one inference in flight.
+  let tickPending = false;
 
   const setError = (msg: string | null) => {
     if (gazeTelemetry.error === msg) return;
@@ -324,13 +331,21 @@ function startGazeEngine(): () => void {
       const pick = (cats: { categoryName: string; score: number }[], name: string) =>
         cats.find((c) => c.categoryName === name)?.score ?? 0;
 
+      /** Arm the next tick, unless one is already armed or running. */
+      const schedule = (delay = 0) => {
+        if (cancelled || tickPending) return;
+        tickPending = true;
+        timer = setTimeout(loop, delay);
+      };
+
       const loop = () => {
+        tickPending = false; // this tick consumes the slot
         if (cancelled) return;
         // Engine rebuilding after a wasm crash — keep polling until it's
         // back instead of giving up (a dead loop used to freeze the cursor
         // until the feature was toggled off and on).
         if (!video || !landmarkerSingleton) {
-          timer = setTimeout(loop, 120);
+          schedule(120);
           return;
         }
         // Continuous background tracking: do NOT pause on document.hidden so
@@ -402,7 +417,7 @@ function startGazeEngine(): () => void {
                 !Number.isFinite(yaw0) || !Number.isFinite(pitch0) ||
                 !Number.isFinite(openness)
               ) {
-                timer = setTimeout(loop, 0);
+                schedule();
                 return;
               }
 
@@ -459,12 +474,12 @@ function startGazeEngine(): () => void {
             // frame skipped (video resize etc.)
           }
         }
-        timer = setTimeout(loop, 0);
+        schedule();
       };
       unsubTicker = backgroundTicker.subscribe(() => {
-        if (!cancelled && video && landmarkerSingleton) loop();
+        if (!cancelled && video && landmarkerSingleton) schedule();
       });
-      timer = setTimeout(loop, 0);
+      schedule();
     } catch (err) {
       console.error("[EyeControl] init failed:", err);
       // Release the stream + element on a failed boot (a rejected play()

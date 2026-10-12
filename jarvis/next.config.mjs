@@ -35,8 +35,25 @@ const nextConfig = {
       headers: [
         {
           key: 'Content-Security-Policy',
-          value: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https: ws: wss:;",
+          // worker-src blob: is load-bearing. The background ticker builds its
+          // worker from a Blob URL (src/lib/backgroundTicker.ts) so air-mouse
+          // and eye control keep running when the tab is not focused — the
+          // browser throttles setTimeout to 1Hz in a background tab, which
+          // silently stops tracking the moment you switch to Word or a game.
+          // Without this directive Chrome refuses the worker and the ticker
+          // quietly falls back to throttled timers.
+          value: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https: ws: wss:; worker-src 'self' blob:;",
         },
+      ],
+    },
+    {
+      // The MediaPipe runtime and models are ~23MB (11.7MB wasm + 3.7MB face +
+      // 7.8MB hand). Served from `public/` they default to `max-age=0`, so every
+      // reload re-downloads all of it before eye control / air-mouse can start.
+      // These files are content-addressed by version — cache them hard.
+      source: '/mediapipe/:path*',
+      headers: [
+        { key: 'Cache-Control', value: 'public, max-age=31536000, immutable' },
       ],
     },
   ],

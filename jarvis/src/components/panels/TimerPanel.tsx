@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Timer, Bell, X, Clock } from "lucide-react";
 
@@ -19,12 +19,19 @@ interface TimerPanelProps {
 
 export default function TimerPanel({ onTimerComplete }: TimerPanelProps) {
   const [timers, setTimers] = useState<TimerData[]>([]);
-  const [completedTimers, setCompletedTimers] = useState<string[]>([]);
+
+  // Already-announced completions live in a ref: as state it was a dependency of
+  // the polling effect, so every alarm re-subscribed the loop.
+  const announced = useRef<Set<string>>(new Set());
+  const onTimerCompleteRef = useRef(onTimerComplete);
+  useEffect(() => {
+    onTimerCompleteRef.current = onTimerComplete;
+  }, [onTimerComplete]);
 
   // Fetch active timers
   const fetchTimers = useCallback(async () => {
     try {
-      const response = await fetch("/api/timer");
+      const response = await fetch("/api/timer", { cache: "no-store" });
       const data = await response.json();
       if (data.success) {
         setTimers(data.timers || []);
@@ -33,29 +40,6 @@ export default function TimerPanel({ onTimerComplete }: TimerPanelProps) {
       console.error("[TimerPanel] Failed to fetch timers:", error);
     }
   }, []);
-
-  // Check for completed timers
-  const checkCompleted = useCallback(async () => {
-    try {
-      const response = await fetch("/api/timer", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "check" }),
-      });
-      const data = await response.json();
-      if (data.success && data.triggered && data.triggered.length > 0) {
-        // Notify for each completed timer
-        data.triggered.forEach((label: string) => {
-          if (!completedTimers.includes(label)) {
-            setCompletedTimers(prev => [...prev, label]);
-            onTimerComplete?.(label);
-          }
-        });
-      }
-    } catch (error) {
-      console.error("[TimerPanel] Failed to check timers:", error);
-    }
-  }, [completedTimers, onTimerComplete]);
 
   // Cancel a timer
   const cancelTimer = async (timerId: string) => {
@@ -82,15 +66,56 @@ export default function TimerPanel({ onTimerComplete }: TimerPanelProps) {
     return `${mins}:${secs.toString().padStart(2, "0")}`;
   };
 
-  // Polling for timers
+  // ── Polling for timers ───────────────────────────────────────────────────
+  // ONE self-limiting round at a time. The old loop fired every 1s AND depended
+  // on [fetchTimers, checkCompleted]; checkCompleted changed identity with the
+  // parent's inline onTimerComplete prop, so the effect re-subscribed on every
+  // Jarvis re-render and launched a fresh GET+POST pair each time. Measured in
+  // the running app: ~6 /api/timer requests per second, 85+ requests in flight
+  // and still climbing. Those held every one of the browser's ~6 connections to
+  // the origin, so the MediaPipe wasm and the face/hand models — and /api/chat —
+  // never got a socket. That is the whole "loading model… forever" bug: fix the
+  // loop, not the tracker.
   useEffect(() => {
-    fetchTimers();
-    const interval = setInterval(() => {
-      fetchTimers();
-      checkCompleted();
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [fetchTimers, checkCompleted]);
+    let cancelled = false;
+    let inFlight = false;
+
+    const poll = async () => {
+      // Latency can be longer than the interval; never stack a second round on
+      // top of one that is still open.
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      try {
+        await fetchTimers();
+        const response = await fetch("/api/timer", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "check" }),
+          cache: "no-store",
+        });
+        const data = await response.json();
+        if (cancelled || !data?.success || !Array.isArray(data.triggered)) return;
+        for (const label of data.triggered as string[]) {
+          if (announced.current.has(label)) continue;
+          announced.current.add(label);
+          onTimerCompleteRef.current?.(label);
+        }
+      } catch (error) {
+        console.error("[TimerPanel] Failed to check timers:", error);
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void poll();
+    // 2s keeps alarms prompt; the in-flight guard above is what makes the
+    // cadence safe, so latency can never grow the queue.
+    const interval = setInterval(poll, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [fetchTimers]);
 
   if (timers.length === 0) return null;
 

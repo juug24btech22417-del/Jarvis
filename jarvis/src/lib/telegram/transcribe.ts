@@ -15,7 +15,7 @@ export interface TranscriptionResult {
 
 export async function transcribeOggOpus(
   buff: Buffer,
-  opts: { model?: string; mimeHint?: string } = {}
+  opts: { model?: string; mimeHint?: string; prompt?: string } = {}
 ): Promise<TranscriptionResult> {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey || apiKey === "your_groq_api_key_here") {
@@ -31,6 +31,10 @@ export async function transcribeOggOpus(
   form.append("file", blob, "voice.ogg");
   form.append("model", opts.model ?? DEFAULT_MODEL);
   form.append("response_format", "verbose_json");
+  // A vocabulary hint materially improves domain words ("Kubernetes", "OIDC",
+  // "ARR") that Whisper otherwise spells phonetically. Optional so the Telegram
+  // path is unchanged.
+  if (opts.prompt) form.append("prompt", opts.prompt.slice(0, 220));
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 30_000); // 30s cap

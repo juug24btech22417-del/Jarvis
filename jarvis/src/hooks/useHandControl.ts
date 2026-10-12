@@ -218,6 +218,13 @@ function startHandEngine(): () => void {
   let crashed = false;
   let consecutiveErrors = 0;
   let useDelegate: "GPU" | "CPU" = "GPU";
+  // Single-flight: this loop is pumped by TWO clocks — its own setTimeout chain
+  // and the background ticker. Without this flag every ticker tick (60/s) called
+  // loop() directly and each of those calls armed ANOTHER self-perpetuating
+  // chain, so the number of concurrent inference chains grew by one every 16ms
+  // and saturated the main thread within seconds. Now however many clocks pump
+  // it, there is only ever one inference in flight.
+  let tickPending = false;
   let smoothFps = 0;
   let lastStamp = performance.now();
 
@@ -293,12 +300,20 @@ function startHandEngine(): () => void {
       // used to overwrite each other's finger states.
       const prevFingers = { thumb: false, index: false, middle: false, ring: false, pinky: false };
 
+      /** Arm the next tick, unless one is already armed or running. */
+      const schedule = (delay = 0) => {
+        if (cancelled || tickPending) return;
+        tickPending = true;
+        timer = setTimeout(loop, delay);
+      };
+
       const loop = () => {
+        tickPending = false; // this tick consumes the slot
         if (cancelled) return;
         // Engine rebuilding after a wasm crash — keep polling until it's
         // back instead of giving up and freezing the feature.
         if (!video || !landmarkerSingleton) {
-          timer = setTimeout(loop, 120);
+          schedule(120);
           return;
         }
         // Continuous background tracking: do NOT pause on document.hidden so
@@ -456,12 +471,12 @@ function startHandEngine(): () => void {
         const dt = now - lastStamp;
         lastStamp = now;
         if (dt > 0) smoothFps = smoothFps ? smoothFps * 0.9 + (1000 / dt) * 0.1 : 1000 / dt;
-        timer = setTimeout(loop, 0);
+        schedule();
       };
       unsubTicker = backgroundTicker.subscribe(() => {
-        if (!cancelled && video && landmarkerSingleton) loop();
+        if (!cancelled && video && landmarkerSingleton) schedule();
       });
-      timer = setTimeout(loop, 0);
+      schedule();
     } catch (err) {
       console.error("[HandControl] init failed:", err);
       teardown();

@@ -75,6 +75,44 @@ import { useJarvisStore } from "@/store/jarvis.store";
 import { playRepulsor } from "@/lib/sounds";
 import { primeScore } from "@/lib/cinematic/score";
 import { useTextToSpeech } from "@/hooks/useVoice";
+import { installFetchGate } from "@/lib/fetchGate";
+import { prefetchVisionAssets } from "@/lib/visionPrefetch";
+
+// Install the same-origin request gate at module scope, before any poller or
+// camera/model request can go out. See src/lib/fetchGate.ts for why.
+installFetchGate();
+
+// Start pulling the MediaPipe assets straight away — the earliest point in the
+// app's life, before the heavy UI mounts — so the 12MB wasm is already in the
+// HTTP cache by the time a vision feature asks for it. See visionPrefetch.ts:
+// cold, that fetch measured 17.9–53.3s on this machine, all of it the page
+// being too busy to drain the response.
+prefetchVisionAssets();
+
+/**
+ * Warm both vision engines. Shared by EVERY way in — power-on, Enter/Space,
+ * Escape and the skip button — because the skip paths used to skip the warmup
+ * entirely, so the first air-mouse/eye toggle paid the full wasm + model +
+ * camera cost while the app was still booting, which is how a feature ends up
+ * saying "loading model…" for a minute.
+ *
+ * Staggered, not parallel: both engines sit on the same wasm runtime, so
+ * warming them at once just means two concurrent 12MB loads racing the boot.
+ */
+let visionWarmupStarted = false;
+function warmVisionEngines(): void {
+  if (visionWarmupStarted || typeof window === "undefined") return;
+  visionWarmupStarted = true;
+  prefetchVisionAssets();
+  void import("@/hooks/useHandControl")
+    .then((m) => m.warmHandEngine())
+    .catch(() => {})
+    .finally(() => {
+      void import("@/hooks/useEyeControl")
+        .then((m) => m.warmEyeEngine())
+        .catch(() => {});
+    });
+}
 
 // Boot sequence — power gate. Pure black screen; one press starts the
 // reactor assembly, the soundtrack, and the greeting in a single gesture.
@@ -104,8 +142,7 @@ function BootSequence({ greeting }: { greeting?: string | null } = {}) {
         window.speechSynthesis.speak(new SpeechSynthesisUtterance(""));
       }
     } catch {}
-    import("@/hooks/useHandControl").then((m) => m.warmHandEngine()).catch(() => {});
-    import("@/hooks/useEyeControl").then((m) => m.warmEyeEngine()).catch(() => {});
+    warmVisionEngines();
     primeScore();
     useJarvisStore.getState().startAssembly();
     window.dispatchEvent(new Event("jarvis:power-gate"));
@@ -121,6 +158,7 @@ function BootSequence({ greeting }: { greeting?: string | null } = {}) {
         setUserInteracted(true);
         useJarvisStore.getState().setBootComplete(true);
         setBootFinished(true);
+        warmVisionEngines();
       }
     };
     window.addEventListener("keydown", handleKey);
@@ -133,6 +171,7 @@ function BootSequence({ greeting }: { greeting?: string | null } = {}) {
     setUserInteracted(true);
     useJarvisStore.getState().setBootComplete(true);
     setBootFinished(true);
+    warmVisionEngines();
   };
 
   return (
