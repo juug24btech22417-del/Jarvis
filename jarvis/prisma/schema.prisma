@@ -496,3 +496,43 @@ model PendingEmail {
   @@index([status, fireAt])
   @@index([chatId, status])
 }
+
+// ── Price tracker (server-owned) ─────────────────────────────────────
+// The tracker used to keep its products in a module-level array inside the
+// route handler, so a dev-server restart wiped them and prices only refreshed
+// while the panel was open. These rows are the durable source of truth; the
+// tick loop in src/services/PriceTrackerService samples them with no UI
+// attached (driven by the instrumentation heartbeat).
+model PriceProduct {
+  id            String    @id @default(cuid())
+  asin          String    @unique
+  title         String
+  imageUrl      String?
+  currency      String    @default("USD")
+  url           String
+  targetPrice   Float?
+  currentPrice  Float?
+  lowestPrice   Float?
+  highestPrice  Float?
+  source        String    @default("scrape") // keepa | scrape
+  active        Boolean   @default(true)
+  lastCheckedAt DateTime?
+  lastAlertAt   DateTime?
+  lastError     String?
+  checkCount    Int       @default(0)
+  intervalMin   Int       @default(30)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([active, lastCheckedAt])
+}
+
+// Price history per product — powers the sparkline and "down from Tuesday".
+model PriceSample {
+  id        String   @id @default(cuid())
+  productId String
+  price     Float
+  takenAt   DateTime @default(now())
+
+  @@index([productId, takenAt])
+}

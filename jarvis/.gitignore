@@ -69,6 +69,11 @@ next-env.d.ts
 /dev-out.log
 /dev-err.log
 
+# Auto-provisioned local service runtimes (Docling venv + its ~GB of model
+# weights). JARVIS creates and manages these itself; they are machine-specific
+# and must never be committed.
+/.jarvis-services/
+
 # live sqlite database — holds memories, emails and queued messages
 /prisma/dev.db
 /prisma/dev.db-wal

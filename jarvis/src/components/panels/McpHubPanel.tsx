@@ -35,12 +35,30 @@ import {
   Plus,
   Radio,
   Box,
+  Database,
+  FileText,
+  BookOpen,
+  Bug,
 } from "lucide-react";
 import DiplomatTab from "@/components/mcp/DiplomatTab";
 import CadTab from "@/components/mcp/CadTab";
+import DuckDbTab from "@/components/mcp/DuckDbTab";
+import DocumentsTab from "@/components/mcp/DocumentsTab";
+import ZoteroTab from "@/components/mcp/ZoteroTab";
+import DevToolsTab from "@/components/mcp/DevToolsTab";
 import { useJarvisStore } from "@/store/jarvis.store";
 
-type McpKey = "whatsapp" | "diplomat" | "markprototype" | "github" | "filesystem" | "googlemaps";
+type McpKey =
+  | "whatsapp"
+  | "diplomat"
+  | "markprototype"
+  | "github"
+  | "filesystem"
+  | "googlemaps"
+  | "duckdb"
+  | "documents"
+  | "zotero"
+  | "devtools";
 
 async function postMcp(body: any): Promise<any> {
   const send = () =>
@@ -516,6 +534,10 @@ export default function McpHubPanel() {
     { id: "github", label: "GitHub", icon: <GitBranch className="h-4 w-4 text-purple-400" />, blurb: "Any repo" },
     { id: "filesystem", label: "Filesystem", icon: <FolderTree className="h-4 w-4 text-blue-400" />, blurb: "Read · write" },
     { id: "googlemaps", label: "Maps", icon: <MapPin className="h-4 w-4 text-emerald-400" />, blurb: "Live places" },
+    { id: "duckdb", label: "DuckDB", icon: <Database className="h-4 w-4 text-cyan-400" />, blurb: "SQL over local data" },
+    { id: "documents", label: "Documents", icon: <FileText className="h-4 w-4 text-amber-400" />, blurb: "Docling · tables + OCR" },
+    { id: "zotero", label: "Zotero", icon: <BookOpen className="h-4 w-4 text-rose-400" />, blurb: "Library + highlights" },
+    { id: "devtools", label: "DevTools", icon: <Bug className="h-4 w-4 text-purple-400" />, blurb: "Console · network · perf" },
   ];
 
   const crumbs = fsPath ? fsPath.split(/[\\/]/).filter(Boolean) : [];
@@ -544,7 +566,7 @@ export default function McpHubPanel() {
       </div>
 
       {/* Tabs */}
-      <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 lg:grid-cols-7">
+      <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 lg:grid-cols-5">
         {tabs.map((t) => {
           const active = activeMcp === t.id;
           return (
@@ -587,6 +609,18 @@ export default function McpHubPanel() {
 
           {/* ═══════════ MARK PROTOTYPE 3D CAD ═══════════ */}
           {activeMcp === "markprototype" && <CadTab />}
+
+          {/* ═══════════ DUCKDB ═══════════ */}
+          {activeMcp === "duckdb" && <DuckDbTab />}
+
+          {/* ═══════════ DOCUMENTS (DOCLING) ═══════════ */}
+          {activeMcp === "documents" && <DocumentsTab />}
+
+          {/* ═══════════ ZOTERO ═══════════ */}
+          {activeMcp === "zotero" && <ZoteroTab />}
+
+          {/* ═══════════ CHROME DEVTOOLS ═══════════ */}
+          {activeMcp === "devtools" && <DevToolsTab />}
 
           {/* ═══════════ WHATSAPP ═══════════ */}
           {activeMcp === "whatsapp" && (

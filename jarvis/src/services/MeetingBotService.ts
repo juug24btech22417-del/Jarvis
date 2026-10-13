@@ -1565,6 +1565,11 @@ public class ChromeFocusHelper {
     }
 
     console.log("JARVIS: Leaving the meeting...");
+    // Who asked us to leave? The panel's Leave button is the only caller we
+    // expect. Logging the stack turns an accidental teardown (a stale close
+    // handler, a second panel instance) into a visible line instead of a
+    // meeting that quietly ends.
+    console.log("JARVIS: leaveMeeting caller:", new Error().stack?.split("\n").slice(1, 5).join(" | "));
     const captionLog = [...(this.state.captionLog || [])];
     const platform = this.state.meetingPlatform;
     const meetingUrl = this.state.meetingUrl;

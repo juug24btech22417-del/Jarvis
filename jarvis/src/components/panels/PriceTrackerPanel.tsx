@@ -24,15 +24,37 @@ interface TrackedProduct {
   id: string;
   asin: string;
   title: string;
-  imageUrl: string;
-  currentPrice: number;
-  lowestPrice: number;
-  highestPrice: number;
-  targetPrice: number;
+  imageUrl: string | null;
+  currentPrice: number | null;
+  lowestPrice: number | null;
+  highestPrice: number | null;
+  targetPrice: number | null;
   currency: string;
-  lastUpdated: string;
   url: string;
   priceHistory: PriceHistory[];
+  // Added when tracking moved server-side: the loop keeps sampling with the
+  // panel closed, and per-product errors are surfaced instead of swallowed.
+  source: string;
+  active: boolean;
+  checkCount: number;
+  intervalMin: number;
+  lastCheckedAt: string | null;
+  lastError: string | null;
+  hitTarget: boolean;
+}
+
+interface TrackerStatus {
+  running: boolean;
+  intervalMin: number;
+  lastTickAt: string | null;
+  nextTickAt: string | null;
+  lastTickDurationMs: number | null;
+  tickCount: number;
+  lastError: string | null;
+  engine: string;
+  keepaConfigured: boolean;
+  amazonDomain: string;
+  note: string;
 }
 
 export default function PriceTrackerPanel() {
@@ -44,7 +66,13 @@ export default function PriceTrackerPanel() {
   const [newTargetPrice, setNewTargetPrice] = useState("");
   const [adding, setAdding] = useState(false);
   const [alerts, setAlerts] = useState<{ product: string; currentPrice: number; targetPrice: number }[]>([]);
-  const [demo, setDemo] = useState(false);
+  const [status, setStatus] = useState<TrackerStatus | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<
+    { asin: string; title: string; priceText: string | null; price: number | null; imageUrl: string | null; url: string }[]
+  >([]);
+  const [searching, setSearching] = useState(false);
 
   const fetchProducts = useCallback(async () => {
     try {
@@ -53,7 +81,7 @@ export default function PriceTrackerPanel() {
 
       if (data.success) {
         setProducts(data.products);
-        setDemo(data.demo || false);
+        setStatus(data.status ?? null);
       } else {
         setError(data.error || "Failed to fetch products");
       }
@@ -63,6 +91,30 @@ export default function PriceTrackerPanel() {
       setLoading(false);
     }
   }, []);
+
+  // Refresh every product now (server-side, so this works with the panel
+  // closed too — the button is a nudge, not the mechanism).
+  const refreshAll = async () => {
+    setRefreshing(true);
+    try {
+      const res = await fetch("/api/price-tracker", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "update" }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setProducts(data.products ?? []);
+        setStatus(data.status ?? null);
+      } else {
+        setError(data.error || "Refresh failed");
+      }
+    } catch {
+      setError("Refresh failed");
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const checkAlerts = useCallback(async () => {
     try {
@@ -113,6 +165,56 @@ export default function PriceTrackerPanel() {
     }
   };
 
+  // Search by name. Amazon serves a reduced layout to automated browsers on
+  // its results page (titles yes, prices no), so results are candidates — the
+  // authoritative price is read from the product page when one is added.
+  const handleSearch = async () => {
+    if (!searchQuery.trim()) return;
+    setSearching(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/price-tracker", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "search", query: searchQuery.trim() }),
+      });
+      const data = await res.json();
+      if (data.success) setSearchResults(data.products ?? []);
+      else {
+        setSearchResults([]);
+        setError(data.error || "Search failed");
+      }
+    } catch {
+      setError("Search failed");
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const handleAddResult = async (asin: string, targetPrice?: number) => {
+    setAdding(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/price-tracker", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "add", asin, targetPrice }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setSearchResults((prev) => prev.filter((p) => p.asin !== asin));
+        await fetchProducts();
+        if (data.warning) setError(data.warning);
+      } else {
+        setError(data.error || "Failed to add product");
+      }
+    } catch {
+      setError("Failed to add product");
+    } finally {
+      setAdding(false);
+    }
+  };
+
   const handleRemoveProduct = async (asin: string) => {
     try {
       await fetch("/api/price-tracker", {
@@ -134,11 +236,17 @@ export default function PriceTrackerPanel() {
   };
 
   const getPriceChange = (product: TrackedProduct) => {
-    if (product.priceHistory.length < 2) return 0;
+    if (product.priceHistory.length < 2 || product.currentPrice === null) return 0;
     const current = product.currentPrice;
     const previous = product.priceHistory[product.priceHistory.length - 2].price;
+    if (!previous) return 0;
     return ((current - previous) / previous) * 100;
   };
+
+  // A price the server could not read is null, not zero — showing "$0.00" for
+  // an unreachable product would look like the deal of the century.
+  const formatMaybePrice = (price: number | null, currency: string) =>
+    price === null ? "—" : formatPrice(price, currency);
 
   if (loading) {
     return (
@@ -185,11 +293,46 @@ export default function PriceTrackerPanel() {
           </button>
         </div>
 
-        {demo && (
-          <div className="mt-4 p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 backdrop-blur-sm">
-            <p className="text-xs text-amber-300/80 flex items-center gap-2">
-              <AlertCircle className="w-4 h-4" />
-              Demo mode - Add KEEPA_API_KEY to .env.local for real tracking
+        {status && (
+          <div className="mt-4 flex flex-wrap items-center gap-3 p-3 rounded-xl bg-white/5 border border-white/10 backdrop-blur-sm">
+            <span
+              className={`flex items-center gap-1.5 text-xs font-medium ${
+                status.running ? "text-emerald-300" : "text-rose-300"
+              }`}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${status.running ? "bg-emerald-400" : "bg-rose-400"}`} />
+              {status.running ? "Background loop running" : "Background loop stopped"}
+            </span>
+            <span className="text-xs text-white/50">
+              engine: <span className="text-white/80">{status.engine}</span>
+            </span>
+            <span className="text-xs text-white/50">
+              every {status.intervalMin} min
+            </span>
+            {status.lastTickAt && (
+              <span className="text-xs text-white/40">last check {new Date(status.lastTickAt).toLocaleTimeString()}</span>
+            )}
+            <span className="ml-auto text-[11px] text-white/40">Keeps running with this panel closed</span>
+            <button
+              onClick={refreshAll}
+              disabled={refreshing}
+              className="px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs text-white flex items-center gap-1.5 disabled:opacity-50 transition"
+            >
+              <RefreshCw className={`w-3 h-3 ${refreshing ? "animate-spin" : ""}`} />
+              Check now
+            </button>
+          </div>
+        )}
+
+        {status && !status.keepaConfigured && (
+          <div className="mt-3 p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 backdrop-blur-sm">
+            <p className="text-xs text-amber-300/80 flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+              <span>
+                Prices are read from the live {status.amazonDomain} product page. Amazon sometimes serves a bot wall — a
+                blocked check is recorded as an error on the product, never replaced with a made-up price. Add
+                KEEPA_API_KEY to .env.local for reliable history.
+              </span>
             </p>
           </div>
         )}
@@ -233,12 +376,66 @@ export default function PriceTrackerPanel() {
                   <Package className="w-4 h-4 text-emerald-400" />
                   Add Amazon Product
                 </h4>
+
+                {/* Search by name — the ASIN field alone is where the old
+                    tracker felt broken (a dead ASIN silently produced no price). */}
+                <div className="mb-3">
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void handleSearch();
+                      }}
+                      placeholder={'Search by name, e.g. "anker usb c cable"'}
+                      className="flex-1 px-4 py-3 bg-black/20 border border-white/10 rounded-xl text-white placeholder-white/30 focus:border-white/30 focus:outline-none text-sm transition-all"
+                    />
+                    <button
+                      onClick={handleSearch}
+                      disabled={searching || !searchQuery.trim()}
+                      className="px-4 py-3 rounded-xl bg-white/10 hover:bg-white/20 text-white text-sm flex items-center gap-2 disabled:opacity-50 transition-all"
+                    >
+                      <RefreshCw className={`w-4 h-4 ${searching ? "animate-spin" : ""}`} />
+                      Search
+                    </button>
+                  </div>
+                  <p className="mt-2 text-[11px] text-white/40">
+                    Results are candidates with live ASINs; the price is read from the product page when you add one.
+                  </p>
+                  {searchResults.length > 0 && (
+                    <div className="mt-3 max-h-64 space-y-2 overflow-auto pr-1">
+                      {searchResults.map((r) => (
+                        <div key={r.asin} className="flex items-center gap-3 rounded-xl border border-white/10 bg-black/20 p-2.5">
+                          {r.imageUrl && (
+                            <img src={r.imageUrl} alt="" className="h-10 w-10 shrink-0 rounded-lg object-cover" />
+                          )}
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-xs text-white/85">{r.title}</p>
+                            <p className="text-[10px] text-white/40">
+                              {r.asin}
+                              {r.priceText ? ` · ${r.priceText}` : " · price read on add"}
+                            </p>
+                          </div>
+                          <button
+                            onClick={() => handleAddResult(r.asin)}
+                            disabled={adding}
+                            className="shrink-0 rounded-lg bg-emerald-500/90 px-3 py-1.5 text-[11px] font-medium text-white hover:bg-emerald-400 disabled:opacity-50 transition"
+                          >
+                            Track
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
                 <div className="space-y-3">
                   <input
                     type="text"
                     value={newAsin}
                     onChange={(e) => setNewAsin(e.target.value)}
-                    placeholder="ASIN (e.g., B08N5WRWNW)"
+                    placeholder="…or paste an ASIN / Amazon product URL"
                     className="w-full px-4 py-3 bg-black/20 border border-white/10 rounded-xl text-white placeholder-white/30 focus:border-white/30 focus:outline-none text-sm transition-all"
                   />
                   <input
@@ -291,7 +488,8 @@ export default function PriceTrackerPanel() {
             ) : (
               products.map((product) => {
                 const priceChange = getPriceChange(product);
-                const isAlert = product.currentPrice <= product.targetPrice;
+                const isAlert =
+                  product.currentPrice !== null && product.targetPrice !== null && product.currentPrice <= product.targetPrice;
 
                 return (
                   <motion.div
@@ -334,7 +532,7 @@ export default function PriceTrackerPanel() {
 
                         <div className="mt-2 flex items-baseline gap-2">
                           <span className="text-2xl font-bold text-white">
-                            {formatPrice(product.currentPrice, product.currency)}
+                            {formatMaybePrice(product.currentPrice, product.currency)}
                           </span>
                           {priceChange !== 0 && (
                             <span
@@ -358,11 +556,11 @@ export default function PriceTrackerPanel() {
                         <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-white/50">
                           <span className="flex items-center gap-1">
                             <TrendingDown className="w-3 h-3" />
-                            Low: {formatPrice(product.lowestPrice, product.currency)}
+                            Low: {formatMaybePrice(product.lowestPrice, product.currency)}
                           </span>
                           <span className="flex items-center gap-1">
                             <TrendingUp className="w-3 h-3" />
-                            High: {formatPrice(product.highestPrice, product.currency)}
+                            High: {formatMaybePrice(product.highestPrice, product.currency)}
                           </span>
                           <span
                             className={`flex items-center gap-1 ${
@@ -370,10 +568,21 @@ export default function PriceTrackerPanel() {
                             }`}
                           >
                             <Target className="w-3 h-3" />
-                            Target: {formatPrice(product.targetPrice, product.currency)}
+                            Target: {formatMaybePrice(product.targetPrice, product.currency)}
                             {isAlert && " ✓"}
                           </span>
                         </div>
+
+                        {/* Last check failed — say so instead of showing a stale number as if it were fresh. */}
+                        {product.lastError && (
+                          <p className="mt-2 flex items-start gap-1.5 text-[11px] text-amber-300/80">
+                            <AlertCircle className="w-3 h-3 mt-0.5 shrink-0" />
+                            {product.lastError}
+                            {product.lastCheckedAt && (
+                              <span className="text-white/30">· {new Date(product.lastCheckedAt).toLocaleTimeString()}</span>
+                            )}
+                          </p>
+                        )}
 
                         {/* Mini Price Chart */}
                         {product.priceHistory.length > 1 && (

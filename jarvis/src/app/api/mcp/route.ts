@@ -1036,6 +1036,27 @@ export async function POST(req: NextRequest) {
         const res = await handleCad(action, params || {});
         return NextResponse.json(res);
       }
+      // ── Providers backed by local engines, not HTTP APIs ──
+      // duckdb   — in-process analytical SQL (no server, no setup)
+      // documents— Docling, supervised as a child process by the server
+      // zotero   — the user's library, via Zotero's local API when available
+      // devtools — the Chrome DevTools MCP server over a managed stdio client
+      case "duckdb": {
+        const { handleDuckDb } = await import("@/lib/mcp/duckdbHandler");
+        return NextResponse.json(await handleDuckDb(action, params || {}));
+      }
+      case "documents": {
+        const { handleDocuments } = await import("@/lib/mcp/documentsHandler");
+        return NextResponse.json(await handleDocuments(action, params || {}));
+      }
+      case "zotero": {
+        const { handleZotero } = await import("@/lib/mcp/zoteroHandler");
+        return NextResponse.json(await handleZotero(action, params || {}));
+      }
+      case "devtools": {
+        const { handleDevtools } = await import("@/lib/mcp/devtoolsHandler");
+        return NextResponse.json(await handleDevtools(action, params || {}));
+      }
       default:
         return fail(`Unknown mcp provider '${mcp}'`, 400);
     }
@@ -1048,7 +1069,18 @@ export async function POST(req: NextRequest) {
 export async function GET() {
   return NextResponse.json({
     success: true,
-    providers: ["github", "filesystem", "googlemaps", "whatsapp", "diplomat", "cad"],
+    providers: [
+      "github",
+      "filesystem",
+      "googlemaps",
+      "whatsapp",
+      "diplomat",
+      "cad",
+      "duckdb",
+      "documents",
+      "zotero",
+      "devtools",
+    ],
     projectRoot: PROJECT_ROOT,
   });
 }

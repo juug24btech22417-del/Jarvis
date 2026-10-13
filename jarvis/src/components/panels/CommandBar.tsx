@@ -20,6 +20,7 @@ import {
   feedScrollIntent,
   isMissionControlOpen,
   liveBrowseIntent,
+  matchWidgetCommand,
   mentionsLiveSite,
   namedSiteUrl,
 } from "@/lib/jarvis/commandRouting";
@@ -161,35 +162,6 @@ function matchMissionCommand(text: string): string | null {
   if (/^(?:please\s+|can you\s+|could you\s+|i want you to\s+)?(?:research|analyse|analyze|investigate|summari[sz]e|draft|compile|deep[- ]?dive into)\b/i.test(t) && t.length > 18)
     return t;
 
-  return null;
-}
-
-/**
- * Natural-language widget requests → the Widgets surface.
- * Returns the build prompt when the user wants a widget/panel/tracker made,
- * or "" when they just want the existing widgets opened.
- */
-function matchWidgetCommand(text: string): string | null {
-  const t = text.trim().replace(/^(?:hey\s+)?jarvis[,:]?\s*/i, "").trim();
-  // "widget"/"dashboard"/"tracker" are unambiguous; a bare "panel" only
-  // counts when the sentence is obviously about tracking something, so
-  // "open the settings panel" never lands here.
-  const strong = /\b(?:widgets?|mini[- ]?panels?|dashboards?|trackers?|tracking panel|hud (?:widget|panel)s?)\b/i;
-  const weak = /\bpanels?\b/i;
-  const build = /\b(?:build|make|create|add|generate|set ?up|give me|i want|i need|need)\b/i;
-  const open = /\b(?:show|open|view|list|display|my|pull up)\b/i;
-  const track = /\b(?:track(?:s|ing)?|monitor(?:s|ing)?|watch(?:ing)?|count(?:s|ing)?|log(?:s|ging)?|follow(?:s|ing)?|keep (?:an )?eye on|remind me)\b/i;
-
-  if (strong.test(t)) {
-    if (build.test(t)) return t;
-    if (open.test(t)) return "";
-    if (track.test(t)) return t;
-    return null;
-  }
-  // "build me a panel that tracks my assignments and crypto"
-  if (weak.test(t) && (track.test(t) || build.test(t))) return t;
-  // "show my panel"
-  if (weak.test(t) && open.test(t)) return "";
   return null;
 }
 
@@ -1905,7 +1877,7 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
     }
 
     // PRICE TRACKER - Open price tracker panel
-    if (lower.match(/\b(price tracker|track prices|amazon deals|price drop|track this product)\b/)) {
+    if (lower.match(/\b(price\s*track(?:er|ing)|track prices|amazon deals|price drop|track this product)\b/)) {
       if (lower.includes("open") || lower.includes("show") || lower.includes("check")) {
         setActivePanel("price-tracker");
         return "Opening Price Tracker. Monitoring deals, Boss.";

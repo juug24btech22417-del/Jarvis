@@ -113,10 +113,30 @@ const LIVE_MEDIA_BRAND_RE =
 const LIVE_ACTION_RE =
   /\b(?:add\b[^.]{0,50}?\bto\s+(?:the\s+|my\s+)?(?:cart|bag|basket)\b|buy|purchase|order|check ?out|proceed to (?:buy|checkout|pay|payment)|place an? order|fill)\b/i;
 
-/** The https URL for the first dotted host named in the text, or undefined. */
+const BRAND_URLS: Record<string, string> = {
+  amazon: "https://www.amazon.in",
+  flipkart: "https://www.flipkart.com",
+  myntra: "https://www.myntra.com",
+  ebay: "https://www.ebay.com",
+  github: "https://github.com",
+  wikipedia: "https://en.wikipedia.org",
+  reddit: "https://www.reddit.com",
+  imdb: "https://www.imdb.com",
+  nasa: "https://www.nasa.gov",
+  google: "https://www.google.com",
+};
+
+/** The https URL for the first dotted host named in the text, or well-known brand. */
 export function namedSiteUrl(text: string): string | undefined {
-  const m = String(text || "").match(LIVE_HOST_RE);
-  return m ? `https://${m[1].toLowerCase()}` : undefined;
+  const t = String(text || "");
+  const m = t.match(LIVE_HOST_RE);
+  if (m) return `https://${m[1].toLowerCase()}`;
+  for (const [brand, url] of Object.entries(BRAND_URLS)) {
+    if (new RegExp(`\\b${brand}\\b`, "i").test(t)) {
+      return url;
+    }
+  }
+  return undefined;
 }
 
 /** Whether the text names a real site, by host or by well-known brand. */
@@ -201,6 +221,58 @@ export function isMissionControlOpen(command: string): boolean {
   if (/^mission\s*control\s*[:\u2014-]\s*\S/i.test(t)) return false;
   if (/^(?:the\s+)?mission\s*control$/i.test(t)) return true;
   return /^(?:please\s+)?(?:open|show|launch|bring\s+up|pull\s+up|view|display|go\s+to|take\s+me\s+to|start)\b/i.test(t);
+}
+
+/**
+ * Surfaces that already have their own router in the command bar.
+ *
+ * The widget matcher reads "tracker" as a request to build something, so
+ * "open price tracker" was swallowed by the Widgets surface and opened the
+ * wrong panel. A command that names a surface which already exists must fall
+ * through to that surface's handler, so the widget matcher declines it.
+ * Keep this list to surfaces a user would name, not to keyword fragments —
+ * "build me a widget that tracks prices" must still build a widget.
+ */
+const EXISTING_SURFACE_RE = /\bprice\s*track(?:er|ing)\b/i;
+
+/**
+ * Natural-language widget requests → the Widgets surface.
+ *
+ * Returns the build prompt when the user wants a widget/panel/tracker made, an
+ * empty string when they just want the existing widgets opened, or null when
+ * this command is not about widgets at all (including commands naming a surface
+ * that already exists, such as the price tracker).
+ */
+export function matchWidgetCommand(text: string): string | null {
+  const t = (text || "")
+    .trim()
+    .replace(/^(?:hey\s+)?jarvis[,:]?\s*/i, "")
+    .trim();
+
+  if (EXISTING_SURFACE_RE.test(t)) return null;
+
+  // "widget"/"dashboard"/"tracker" are unambiguous. A bare "panel" only
+  // becomes a BUILD request when the sentence is about tracking something, so
+  // "open the settings panel" opens the widgets surface rather than being sent
+  // to the widget builder as a prompt. Surfaces that already exist are declined
+  // above, before any of this.
+  const strong = /\b(?:widgets?|mini[- ]?panels?|dashboards?|trackers?|tracking panel|hud (?:widget|panel)s?)\b/i;
+  const weak = /\bpanels?\b/i;
+  const build = /\b(?:build|make|create|add|generate|set ?up|give me|i want|i need|need)\b/i;
+  const open = /\b(?:show|open|view|list|display|my|pull up)\b/i;
+  const track = /\b(?:track(?:s|ing)?|monitor(?:s|ing)?|watch(?:ing)?|count(?:s|ing)?|log(?:s|ging)?|follow(?:s|ing)?|keep (?:an )?eye on|remind me)\b/i;
+
+  if (strong.test(t)) {
+    if (build.test(t)) return t;
+    if (open.test(t)) return "";
+    if (track.test(t)) return t;
+    return null;
+  }
+  // "build me a panel that tracks my assignments and crypto"
+  if (weak.test(t) && (track.test(t) || build.test(t))) return t;
+  // "show my panel"
+  if (weak.test(t) && open.test(t)) return "";
+  return null;
 }
 
 /** The feed URL for an explicitly named site, or null when we have none. */

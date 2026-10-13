@@ -13,6 +13,7 @@ import {
   feedScrollIntent,
   isMissionControlOpen,
   liveBrowseIntent,
+  matchWidgetCommand,
 } from "../src/lib/jarvis/commandRouting";
 import { detectBrowserTask } from "../src/lib/jarvis/personality";
 import { getShopperProfile, describeShopperProfile } from "../src/lib/agent/shopperProfile";
@@ -282,6 +283,41 @@ check("unset fields are not invented", !described.includes("Street address"), de
 for (const [k, v] of Object.entries(saved)) {
   if (v === undefined) delete process.env[k];
   else process.env[k] = v;
+}
+
+section("matchWidgetCommand — a named existing surface must not be swallowed");
+
+// Regression guard: the widget matcher reads "tracker" as a build request, so
+// "open price tracker" opened the Widgets surface instead of the tracker panel.
+for (const cmd of [
+  "open price tracker",
+  "show price tracker",
+  "open the price tracker",
+  "price tracker",
+  "open price tracking",
+  "Jarvis, open price tracker",
+]) {
+  check(`not a widget request: ${JSON.stringify(cmd)}`, matchWidgetCommand(cmd) === null, String(matchWidgetCommand(cmd)));
+}
+
+section("matchWidgetCommand — real widget requests still work");
+
+check("build request returns the prompt", matchWidgetCommand("build me a widget that tracks my crypto") !== null);
+check("explicit widget open returns empty string", matchWidgetCommand("open my widgets") === "");
+check("dashboard build returns the prompt", matchWidgetCommand("make me a dashboard for my tasks") !== null);
+check("bare panel open returns empty string", matchWidgetCommand("show my panel") === "");
+check("tracking panel is a widget request", matchWidgetCommand("build a tracking panel for flights") !== null);
+check("unrelated command is not a widget request", matchWidgetCommand("what is the weather") === null);
+// A panel we do not have a surface for must never be turned into a new widget —
+// "open the settings panel" opens the widgets surface, but it does not invent
+// one (a returned string would be handed to the widget builder as a prompt).
+check("a named panel is not turned into a widget build request", typeof matchWidgetCommand("open the settings panel") === "string" && matchWidgetCommand("open the settings panel") === "");
+
+// The price-tracker handler in the command bar must accept the same wording
+// the widget matcher now declines, or the command would open nothing at all.
+const PRICE_TRACKER_RE = /\b(price\s*track(?:er|ing)|track prices|amazon deals|price drop|track this product)\b/;
+for (const cmd of ["open price tracker", "open price tracking", "track prices"]) {
+  check(`price tracker handler matches: ${JSON.stringify(cmd)}`, PRICE_TRACKER_RE.test(cmd.toLowerCase()));
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

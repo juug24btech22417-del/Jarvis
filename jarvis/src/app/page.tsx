@@ -29,6 +29,7 @@ import GesturePractice from "@/components/ui/GesturePractice";
 import ScreenNarratorToast from "@/components/ui/ScreenNarratorToast";
 import ConnectedPanel from "@/components/panels/ConnectedPanel";
 import AppDeck, { type DeckId } from "@/components/hud/AppDeck";
+import MeetingStatusPill from "@/components/hud/MeetingStatusPill";
 import CommunicationHub from "@/components/panels/CommunicationHub";
 import SecurityPanel from "@/components/panels/SecurityPanel";
 import { useSentinelWatcher } from "@/hooks/useSentinelWatcher";
@@ -53,7 +54,7 @@ import IFTTTPanel from "@/components/panels/IFTTTPanel";
 import BrowserAutomationPanel from "@/components/panels/BrowserAutomationPanel";
 import LocalLLMPanel from "@/components/panels/LocalLLMPanel";
 import VisionPanel from "@/components/panels/VisionPanel";
-import AutomationPanel from "@/components/panels/AutomationPanel";
+import AutomationPanel, { type AutomationTabId } from "@/components/panels/AutomationPanel";
 import PriceTrackerPanel from "@/components/panels/PriceTrackerPanel";
 import PlaywrightPanel from "@/components/panels/PlaywrightPanel";
 import TranscriptionPanel from "@/components/panels/TranscriptionPanel";
@@ -764,6 +765,8 @@ export default function Home() {
 
   // Direct API Automation
   const [automationOpen, setAutomationOpen] = useState(false);
+  // Landing tab for the panel — the in-meeting pill opens it on the Bot tab.
+  const [automationTab, setAutomationTab] = useState<AutomationTabId>("notion");
 
   // Price Tracker
   const [priceTrackerOpen, setPriceTrackerOpen] = useState(false);
@@ -1048,6 +1051,17 @@ export default function Home() {
         <>
           {/* Sentinel arm/disarm — consolidated into the top-left app dock */}
           <StatusHUD />
+          {/* Way back into a running meeting: the bot stays in the call when the
+              automation panel is closed, so this pill reopens that view in one
+              tap while a session is live (and hides itself once it is not). */}
+          <MeetingStatusPill
+            hidden={automationOpen}
+            onOpen={() => {
+              setAutomationTab("meeting");
+              recordPanelOpen("automation");
+              setAutomationOpen(true);
+            }}
+          />
           <ReactorTelemetry />
           <TimerPanel onTimerComplete={handleTimerComplete} />
           <AnimatePresence>
@@ -1486,10 +1500,16 @@ export default function Home() {
                 className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
               >
                 <div className="w-full max-w-lg h-[80vh]">
-                  <AutomationPanel />
+                  <AutomationPanel initialTab={automationTab} />
                 </div>
                 <button
-                  onClick={() => setAutomationOpen(false)}
+                  onClick={() => {
+                    // Reset the landing tab so any later open starts on the
+                    // default. The mounted panel ignores this while it plays
+                    // its exit animation.
+                    setAutomationTab("notion");
+                    setAutomationOpen(false);
+                  }}
                   className="absolute top-4 right-4 p-2 text-white/60 hover:text-white"
                 >
                   ✕

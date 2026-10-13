@@ -85,6 +85,33 @@ export async function register() {
 
   console.log("[WatcherHeartbeat] armed — watchers tick every 10 min, no panel needed");
 
+  // ── Price tracker heartbeat ──
+  // The tracker used to be driven by the panel: closing the tab stopped every
+  // price check and a dev-server restart reset the list to demo data. The
+  // service owns its own interval, but that interval only exists once the
+  // service module has been loaded — which, in a fresh server process, only
+  // happened if someone opened the panel. This self-call loads it at boot, so
+  // tracking is genuinely independent of the UI.
+  //
+  // The route's tick is unforced: it samples only products past their own
+  // intervalMin, so a 5-minute heartbeat can never out-pace a retailer.
+  const tickPriceTracker = async () => {
+    try {
+      const res = await fetch("http://localhost:3000/api/price-tracker", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "tick" }),
+      });
+      const data = await res.json().catch(() => null);
+      if (data?.checked) console.log(`[PriceTracker] sampled ${data.checked} product(s)`);
+    } catch {
+      // Server warming up or restarting — the next tick catches it.
+    }
+  };
+  setTimeout(tickPriceTracker, 20_000);
+  setInterval(tickPriceTracker, 5 * 60_000);
+  console.log("[PriceTracker] armed — price checks run with no panel open");
+
   // ── Pending-email dispatcher ──
   // Emails are queued with a 30s cancel window (POST /api/composio/email/send)
   // and were supposed to be flushed by a ticker in the composio listener
@@ -130,6 +157,7 @@ export async function register() {
       "/api/clipboard/capture",
       "/api/meeting/shadow",
       "/api/sentinel/analyze",
+      "/api/price-tracker",
     ];
     setTimeout(() => {
       for (const r of warmRoutes) {

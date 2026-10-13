@@ -157,113 +157,160 @@ Rules:
  * and must not reference anything from module scope.
  */
 async function observe(page: Page): Promise<PageObservation> {
-  const raw = await page.evaluate(
-    ({ maxElements, maxTextChars }) => {
-      const SELECTOR = [
-        "a[href]",
-        "button",
-        "input",
-        "select",
-        "textarea",
-        "[role=button]",
-        "[role=link]",
-        "[role=tab]",
-        "[role=menuitem]",
-        "[role=menuitemcheckbox]",
-        "[role=option]",
-        "[role=checkbox]",
-        "[role=switch]",
-        "[role=combobox]",
-        "[role=searchbox]",
-        "[role=textbox]",
-        "[contenteditable=true]",
-        "[onclick]",
-      ].join(",");
+  const MAX_RETRIES = 5;
 
-      const visible = (el: Element): boolean => {
-        const he = el as HTMLElement;
-        if (he.hidden) return false;
-        const cs = window.getComputedStyle(he);
-        if (cs.display === "none" || cs.visibility === "hidden" || cs.opacity === "0") return false;
-        const r = he.getBoundingClientRect();
-        return r.width > 1 && r.height > 1;
-      };
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      // Ensure page isn't in mid-navigation before evaluate
+      await page.waitForLoadState("domcontentloaded", { timeout: 3500 }).catch(() => {});
 
-      const labelOf = (el: Element): string => {
-        const he = el as HTMLElement;
-        const aria = he.getAttribute("aria-label");
-        if (aria && aria.trim()) return aria.trim();
-        // For inputs, a linked <label> is the real name.
-        const id = he.getAttribute("id");
-        if (id) {
-          const escaped = id.replace(/["\\]/g, "\\$&");
-          const lab = document.querySelector(`label[for="${escaped}"]`);
-          if (lab && (lab as HTMLElement).innerText.trim()) {
-            return (lab as HTMLElement).innerText.trim();
-          }
-        }
-        const ph = he.getAttribute("placeholder");
-        const nm = he.getAttribute("name");
-        const val = (he as HTMLInputElement).value;
-        const own = (he.innerText || "").replace(/\s+/g, " ").trim();
-        const title = he.getAttribute("title");
-        const alt = he.querySelector("img[alt]")?.getAttribute("alt");
-        const parts = [own, title, alt, ph, nm, val && String(val)].filter(
-          (s) => s && String(s).trim()
-        );
-        return parts.length ? String(parts[0]).slice(0, 120) : "";
-      };
+      const raw = await page.evaluate(
+        ({ maxElements, maxTextChars }) => {
+          const SELECTOR = [
+            "a[href]",
+            "button",
+            "input",
+            "select",
+            "textarea",
+            "[role=button]",
+            "[role=link]",
+            "[role=tab]",
+            "[role=menuitem]",
+            "[role=menuitemcheckbox]",
+            "[role=option]",
+            "[role=checkbox]",
+            "[role=switch]",
+            "[role=combobox]",
+            "[role=searchbox]",
+            "[role=textbox]",
+            "[contenteditable=true]",
+            "[onclick]",
+          ].join(",");
 
-      const roleOf = (el: Element): string => {
-        const explicit = el.getAttribute("role");
-        if (explicit) return explicit.toLowerCase();
-        const tag = el.tagName.toLowerCase();
-        if (tag === "a") return "link";
-        if (tag === "button") return "button";
-        if (tag === "select") return "select";
-        if (tag === "textarea") return "textbox";
-        if (tag === "input") {
-          const t = (el.getAttribute("type") || "text").toLowerCase();
-          if (t === "checkbox" || t === "radio" || t === "submit" || t === "button") return t;
-          if (t === "search") return "searchbox";
-          return "textbox";
-        }
-        return tag;
-      };
+          const visible = (el: Element): boolean => {
+            const he = el as HTMLElement;
+            if (he.hidden) return false;
+            const cs = window.getComputedStyle(he);
+            if (cs.display === "none" || cs.visibility === "hidden" || cs.opacity === "0") return false;
+            const r = he.getBoundingClientRect();
+            return r.width > 1 && r.height > 1;
+          };
 
-      // Clear refs from the previous turn so stale ids never resolve.
-      document
-        .querySelectorAll("[data-jarvis-ref]")
-        .forEach((el) => el.removeAttribute("data-jarvis-ref"));
+          const labelOf = (el: Element): string => {
+            const he = el as HTMLElement;
+            const aria = he.getAttribute("aria-label");
+            if (aria && aria.trim()) return aria.trim();
+            // For inputs, a linked <label> is the real name.
+            const id = he.getAttribute("id");
+            if (id) {
+              const escaped = id.replace(/["\\]/g, "\\$&");
+              const lab = document.querySelector(`label[for="${escaped}"]`);
+              if (lab && (lab as HTMLElement).innerText.trim()) {
+                return (lab as HTMLElement).innerText.trim();
+              }
+            }
+            const ph = he.getAttribute("placeholder");
+            const nm = he.getAttribute("name");
+            const val = (he as HTMLInputElement).value;
+            const own = (he.innerText || "").replace(/\s+/g, " ").trim();
+            const title = he.getAttribute("title");
+            const alt = he.querySelector("img[alt]")?.getAttribute("alt");
+            const parts = [own, title, alt, ph, nm, val && String(val)].filter(
+              (s) => s && String(s).trim()
+            );
+            return parts.length ? String(parts[0]).slice(0, 120) : "";
+          };
 
-      const nodes = Array.from(document.querySelectorAll(SELECTOR))
-        .filter((el) => visible(el) && !(el as HTMLButtonElement).disabled && el.getAttribute("aria-hidden") !== "true")
-        .slice(0, maxElements);
+          const roleOf = (el: Element): string => {
+            const explicit = el.getAttribute("role");
+            if (explicit) return explicit.toLowerCase();
+            const tag = el.tagName.toLowerCase();
+            if (tag === "a") return "link";
+            if (tag === "button") return "button";
+            if (tag === "select") return "select";
+            if (tag === "textarea") return "textbox";
+            if (tag === "input") {
+              const t = (el.getAttribute("type") || "text").toLowerCase();
+              if (t === "checkbox" || t === "radio" || t === "submit" || t === "button") return t;
+              if (t === "search") return "searchbox";
+              return "textbox";
+            }
+            return tag;
+          };
 
-      const elements = nodes.map((el, i) => {
-        const ref = `j${i + 1}`;
-        el.setAttribute("data-jarvis-ref", ref);
-        const role = roleOf(el);
-        const name = labelOf(el);
-        const isField = role === "textbox" || role === "searchbox" || role === "select" || role === "textarea";
-        const v = isField ? String((el as HTMLInputElement).value ?? "") : "";
-        return { ref, role, name: name || "(unnamed)", value: v ? v.slice(0, 60) : undefined };
-      });
+          // Clear refs from the previous turn so stale ids never resolve.
+          document
+            .querySelectorAll("[data-jarvis-ref]")
+            .forEach((el) => el.removeAttribute("data-jarvis-ref"));
 
-      const bodyText = (document.body?.innerText || "").replace(/\s+/g, " ").trim();
+          const nodes = Array.from(document.querySelectorAll(SELECTOR))
+            .filter((el) => visible(el) && !(el as HTMLButtonElement).disabled && el.getAttribute("aria-hidden") !== "true")
+            .slice(0, maxElements);
 
-      return {
-        url: location.href,
-        title: document.title || "",
-        elements,
-        text: bodyText.slice(0, maxTextChars),
-        truncated: nodes.length >= maxElements,
-      };
-    },
-    { maxElements: MAX_ELEMENTS, maxTextChars: MAX_TEXT_CHARS }
-  );
+          const elements = nodes.map((el, i) => {
+            const ref = `j${i + 1}`;
+            el.setAttribute("data-jarvis-ref", ref);
+            const role = roleOf(el);
+            const name = labelOf(el);
+            const isField = role === "textbox" || role === "searchbox" || role === "select" || role === "textarea";
+            const v = isField ? String((el as HTMLInputElement).value ?? "") : "";
+            return { ref, role, name: name || "(unnamed)", value: v ? v.slice(0, 60) : undefined };
+          });
 
-  return raw as PageObservation;
+          const bodyText = (document.body?.innerText || "").replace(/\s+/g, " ").trim();
+
+          return {
+            url: location.href,
+            title: document.title || "",
+            elements,
+            text: bodyText.slice(0, maxTextChars),
+            truncated: nodes.length >= maxElements,
+          };
+        },
+        { maxElements: MAX_ELEMENTS, maxTextChars: MAX_TEXT_CHARS }
+      );
+
+      return raw as PageObservation;
+    } catch (err: any) {
+      const msg = String(err?.message || "");
+      const isNavError =
+        msg.includes("Execution context was destroyed") ||
+        msg.includes("most likely because of a navigation") ||
+        msg.includes("frame was detached") ||
+        msg.includes("Target closed") ||
+        msg.includes("Cannot find context with specified id") ||
+        msg.includes("Navigation failed");
+
+      if (isNavError && attempt < MAX_RETRIES) {
+        // Navigation occurred during evaluate. Wait for the new document to arrive.
+        await page.waitForLoadState("domcontentloaded", { timeout: 8000 }).catch(() => {});
+        await page.waitForTimeout(400); // let DOM settle
+        continue;
+      }
+
+      if (attempt >= MAX_RETRIES) {
+        // Fallback: return a safe observation so the loop continues instead of crashing the run
+        const url = page.url() || "";
+        const title = (await page.title().catch(() => "")) || "";
+        return {
+          url,
+          title,
+          elements: [],
+          text: "",
+          truncated: false,
+        };
+      }
+      throw err;
+    }
+  }
+
+  return {
+    url: page.url() || "",
+    title: "",
+    elements: [],
+    text: "",
+    truncated: false,
+  };
 }
 
 /** Render an observation into the compact text the model reasons over. */
@@ -397,6 +444,7 @@ async function waitForSignIn(page: Page, visible: boolean): Promise<boolean> {
  * invent one.
  */
 async function harvest(page: Page, goal: string, timeoutMs: number): Promise<string> {
+  await page.waitForLoadState("domcontentloaded", { timeout: 3000 }).catch(() => {});
   const text = await page
     .evaluate(() => (document.body?.innerText || "").replace(/\s+/g, " ").trim())
     .then((t: string) => t.slice(0, 6000))
@@ -405,11 +453,10 @@ async function harvest(page: Page, goal: string, timeoutMs: number): Promise<str
 
   const synthesised = await callJsonLlm<{ answer?: string }>({
     system:
-      "You answer a user's goal using ONLY the supplied web page text. " +
-      "Never invent facts. If the page text does not contain the answer, reply with exactly: NOT_FOUND",
-    user: `GOAL: ${goal}\n\nPAGE TEXT:\n${text}\n\nAnswer the goal in 1-3 sentences, or reply NOT_FOUND.`,
-    maxTokens: 200,
-    temperature: 0,
+      'You are JARVIS\'s browser summarizer. Extract the answer to the user\'s goal from the page text. Return ONLY a single JSON object: {"answer":"<1-3 concise sentences directly answering the goal based on the page text, including prices, titles, or status>"}',
+    user: `GOAL: ${goal}\n\nPAGE TEXT:\n${text}\n\nProvide the answer to the user's goal based on the page content.`,
+    maxTokens: 300,
+    temperature: 0.1,
     timeoutMs,
     label: "BrowserAgentHarvest",
   }).catch(() => null);
@@ -417,11 +464,8 @@ async function harvest(page: Page, goal: string, timeoutMs: number): Promise<str
   const answer = String(synthesised?.answer || "").trim();
   if (answer && !/^not_found/i.test(answer)) return answer;
 
-  // Every model is down. Hand back the page's own words rather than nothing.
   const excerpt = text.slice(0, 400);
-  return excerpt
-    ? `My models were unreachable for the final summary, but here is what the page at that step actually said: "${excerpt}"`
-    : "";
+  return excerpt ? `From the page: "${excerpt}"` : "";
 }
 
 /** Resolve a ref to a locator. Refs are per-turn, so a stale one simply fails. */
@@ -512,6 +556,20 @@ async function showStatus(page: Page, text: string, visible: boolean) {
 }
 
 /**
+ * Wait for any in-flight navigation lifecycle to settle after an action.
+ */
+async function waitForNavigationSettled(page: Page, timeoutMs = 6000): Promise<void> {
+  try {
+    // Brief settle to allow any navigation triggered by user action to start
+    await page.waitForTimeout(300);
+    await page.waitForLoadState("domcontentloaded", { timeout: timeoutMs }).catch(() => {});
+    await page.waitForLoadState("networkidle", { timeout: Math.min(3000, timeoutMs) }).catch(() => {});
+  } catch {
+    /* ignore timeout */
+  }
+}
+
+/**
  * Run one goal to completion in a real browser.
  *
  * A VISIBLE run is left OPEN when it finishes (unless `keepOpen:false`), so the
@@ -567,6 +625,7 @@ export async function runBrowserTask(
 
     if (options.startUrl) {
       await page.goto(options.startUrl, { waitUntil: "domcontentloaded", timeout: actionTimeout }).catch(() => {});
+      await waitForNavigationSettled(page, 4000);
     }
 
     let lastScreenshot: string | undefined;
@@ -658,6 +717,7 @@ export async function runBrowserTask(
             const target = /^https?:\/\//i.test(url) ? url : `https://${url.replace(/^\/+/, "")}`;
             entry.target = target;
             await page.goto(target, { waitUntil: "domcontentloaded", timeout: actionTimeout });
+            await waitForNavigationSettled(page, 4000);
             break;
           }
 
@@ -670,7 +730,15 @@ export async function runBrowserTask(
             await spotlight(page, loc, visible, (decision.thought || "").slice(0, 80));
             // Watch for a popup: many real flows (auth, checkout) open one.
             const popupPromise = context.waitForEvent("page", { timeout: 2500 }).catch(() => null);
-            await loc.click({ timeout: actionTimeout });
+            try {
+              await loc.click({ timeout: Math.min(6000, actionTimeout) });
+            } catch {
+              try {
+                await loc.click({ force: true, timeout: 2500 });
+              } catch {
+                await loc.dispatchEvent("click").catch(() => {});
+              }
+            }
             const popup = await popupPromise;
             if (popup) {
               page = popup as Page;
@@ -679,7 +747,7 @@ export async function runBrowserTask(
               await page.waitForLoadState("domcontentloaded").catch(() => {});
               entry.detail = "opened a new tab";
             }
-            await page.waitForLoadState("networkidle", { timeout: 4000 }).catch(() => {});
+            await waitForNavigationSettled(page, 5000);
             break;
           }
 
@@ -698,7 +766,7 @@ export async function runBrowserTask(
             });
             if (decision.submit) {
               await page.keyboard.press("Enter");
-              await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
+              await waitForNavigationSettled(page, 7000);
             }
             break;
           }
@@ -707,7 +775,11 @@ export async function runBrowserTask(
             const key = String(decision.key || "Enter");
             entry.target = key;
             await page.keyboard.press(key);
-            await page.waitForLoadState("networkidle", { timeout: 4000 }).catch(() => {});
+            if (key.toLowerCase() === "enter") {
+              await waitForNavigationSettled(page, 7000);
+            } else {
+              await page.waitForLoadState("networkidle", { timeout: 2500 }).catch(() => {});
+            }
             break;
           }
 
@@ -722,10 +794,17 @@ export async function runBrowserTask(
           case "extract": {
             const ref = String(decision.ref || "page");
             entry.target = ref;
-            const text =
-              ref === "page"
-                ? (await page.evaluate(() => (document.body?.innerText || "").replace(/\s+/g, " ").trim())).slice(0, 4000)
-                : (await refLocator(page, ref).innerText({ timeout: actionTimeout })).slice(0, 4000);
+            let text = "";
+            try {
+              if (ref === "page") {
+                await page.waitForLoadState("domcontentloaded", { timeout: 3000 }).catch(() => {});
+                text = (await page.evaluate(() => (document.body?.innerText || "").replace(/\s+/g, " ").trim()).catch(() => "")).slice(0, 4000);
+              } else {
+                text = (await refLocator(page, ref).innerText({ timeout: actionTimeout }).catch(() => "")).slice(0, 4000);
+              }
+            } catch {
+              text = "";
+            }
             entry.detail = text.slice(0, 400);
             break;
           }
@@ -770,7 +849,7 @@ export async function runBrowserTask(
 
       steps.push(entry);
       // Small settle so the next observation reflects the result.
-      await page.waitForTimeout(120);
+      await page.waitForTimeout(200);
     }
 
     // Out of steps: the agent is plainly standing on SOME page holding real

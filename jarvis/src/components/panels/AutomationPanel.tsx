@@ -46,8 +46,25 @@ interface AIEmailContext {
   keyPoints: string;
 }
 
-export default function AutomationPanel() {
-  const [activeTab, setActiveTab] = useState<"notion" | "todoist" | "meeting" | "research" | "email">("notion");
+/** Tabs of the automation hub — exported so a caller can pick the landing tab. */
+export type AutomationTabId = "notion" | "todoist" | "meeting" | "research" | "email";
+
+interface AutomationPanelProps {
+  /**
+   * Tab shown the moment the panel mounts. The in-meeting pill passes
+   * "meeting" so one tap lands back on the running bot; every other entry
+   * point keeps the default. The panel unmounts when closed, so this is read
+   * once per open.
+   */
+  initialTab?: AutomationTabId;
+}
+
+// The meeting bot's session is NOT owned by this panel — it lives on the server
+// (the MeetingBotService singleton behind /api/meeting). Switching tabs or
+// closing the panel only closes a *view* of it: unmounting must never send
+// "leave". Only the explicit Leave & Sync button ends a meeting.
+export default function AutomationPanel({ initialTab = "notion" }: AutomationPanelProps) {
+  const [activeTab, setActiveTab] = useState<AutomationTabId>(initialTab);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<{ success: boolean; message: string } | null>(null);
   const [isDragging, setIsDragging] = useState(false);

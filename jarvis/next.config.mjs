@@ -14,7 +14,27 @@ const nextConfig = {
   },
   experimental: {
     instrumentationHook: true, // enables src/instrumentation.ts (watcher heartbeat)
-    serverComponentsExternalPackages: ['puppeteer-extra-plugin-stealth', 'playwright-extra', 'playwright', 'edge-tts', 'pdf-parse', 'mammoth', 'form-data', 'koffi', 'screenshot-desktop'],
+    // Each of these must stay OUTSIDE the webpack bundle:
+    //   @duckdb/node-api            — native .node bindings, resolved at runtime
+    //   @modelcontextprotocol/sdk    — subclasses/`require`s to spawn stdio servers
+    //   chrome-devtools-mcp          — a spawned child process, not a library
+    // Bundling any of them rewrites their module paths and the spawn/load fails
+    // at runtime with an opaque error instead of at build time.
+    serverComponentsExternalPackages: [
+      'puppeteer-extra-plugin-stealth',
+      'playwright-extra',
+      'playwright',
+      'edge-tts',
+      'pdf-parse',
+      'mammoth',
+      'form-data',
+      'koffi',
+      'screenshot-desktop',
+      '@duckdb/node-api',
+      '@duckdb/node-bindings',
+      '@modelcontextprotocol/sdk',
+      'chrome-devtools-mcp',
+    ],
   },
   reactStrictMode: true,
   images: {
