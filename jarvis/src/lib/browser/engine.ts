@@ -433,6 +433,25 @@ export interface RunOptions {
   sessionName?: string;
   headed?: boolean;
   globalTimeoutMs?: number; // whole-run deadline (default 90s)
+  /**
+   * Resource types to refuse for this run, e.g. ["image", "media", "font"].
+   *
+   * Opt-in on purpose: a screenshot or a visual check needs those bytes. A
+   * text scrape does not — and refusing them is the difference between the
+   * page's `load` event firing in 0.6s and never firing at all within the
+   * settle window, because a price page is mostly images.
+   */
+  blockResources?: string[];
+  /**
+   * How long to wait for the page's `load` event after `domcontentloaded`
+   * (default 10s). This is a ceiling, not a delay — a page that finishes
+   * loading returns immediately.
+   *
+   * Set it to 0 when the run reads a specific selector instead: a heavy page
+   * whose `load` never fires otherwise burns the whole ceiling on every
+   * navigation. The price scrapes do exactly this, and paid 10s a page.
+   */
+  loadWaitMs?: number;
 }
 
 export interface RunResult {
@@ -442,9 +461,9 @@ export interface RunResult {
   durationMs: number;
 }
 
-async function safeGoto(page: Page, url: string, timeout = 25_000): Promise<void> {
+async function safeGoto(page: Page, url: string, timeout = 25_000, loadWaitMs = 10_000): Promise<void> {
   await page.goto(url, { waitUntil: "domcontentloaded", timeout });
-  await page.waitForLoadState("load", { timeout: 10_000 }).catch(() => {});
+  if (loadWaitMs > 0) await page.waitForLoadState("load", { timeout: loadWaitMs }).catch(() => {});
 }
 
 export async function runActions(actions: BrowserAction[], opts: RunOptions = {}): Promise<RunResult> {
@@ -455,6 +474,15 @@ export async function runActions(actions: BrowserAction[], opts: RunOptions = {}
   const page = await context.newPage();
   page.setDefaultTimeout(15_000);
   tagPage(page, context);
+
+  if (opts.blockResources?.length) {
+    const blocked = new Set(opts.blockResources);
+    await page.route("**/*", (route) => {
+      // abort() rejects when the request already completed; that is not an error.
+      if (blocked.has(route.request().resourceType())) return route.abort().catch(() => {});
+      return route.continue().catch(() => {});
+    });
+  }
 
   const results: ActionOutcome[] = [];
   let captcha = false;
@@ -470,7 +498,7 @@ export async function runActions(actions: BrowserAction[], opts: RunOptions = {}
         switch (action.type) {
           case "navigate": {
             if (!action.url) throw new Error("URL required for navigate");
-            await safeGoto(page, action.url, action.timeout);
+            await safeGoto(page, action.url, action.timeout, opts.loadWaitMs);
             finalUrl = page.url();
             captcha = await detectCaptcha(page);
             results.push({ action: "navigate", url: action.url, success: !captcha, error: captcha ? "Bot wall / captcha detected" : undefined });

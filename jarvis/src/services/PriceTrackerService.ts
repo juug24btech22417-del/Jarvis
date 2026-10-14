@@ -34,7 +34,10 @@ const MAX_TICK_BATCH = Math.max(1, Number(process.env.PRICE_TICK_BATCH || 5)); /
 const ALERT_COOLDOWN_MS = Math.max(60_000, Number(process.env.PRICE_ALERT_COOLDOWN_MINUTES || 720)) * 60_000;
 const MAX_PRODUCTS = Math.max(1, Number(process.env.PRICE_MAX_PRODUCTS || 50));
 const AMAZON_DOMAIN = process.env.AMAZON_DOMAIN || "www.amazon.com";
-const SCRAPE_TIMEOUT_MS = Math.max(15_000, Number(process.env.PRICE_SCRAPE_TIMEOUT_MS || 75_000));
+// Ceiling for one page read, not a target. A read now takes ~4s including a
+// cold browser launch, so this only decides how long a genuinely stuck page
+// holds the tick loop before it is abandoned.
+const SCRAPE_TIMEOUT_MS = Math.max(15_000, Number(process.env.PRICE_SCRAPE_TIMEOUT_MS || 45_000));
 const KEEPA_DOMAIN = Number(process.env.KEEPA_DOMAIN || 1); // Keepa marketplace id (1 = US)
 
 // Same internal-API convention as instrumentation.ts: never assume port 3000.
@@ -133,24 +136,75 @@ const PRICE_SELECTORS = [
   ".a-price .a-offscreen",
 ];
 
+/**
+ * One extraction pass over the product page.
+ *
+ * This replaced a list of `getText` actions, one per price selector. Each of
+ * those waited for its selector to become visible with an 8s default timeout,
+ * and four of the five price selectors do not exist on a given layout — so a
+ * single product read spent ~40s waiting for elements that were never coming,
+ * on top of the navigation. "Add product" took 61 seconds.
+ *
+ * Querying every candidate inside one evaluate costs a single round trip, and
+ * the Node side still does the price parsing and currency detection in the
+ * order the selectors are declared.
+ */
+function buildProductExtractor(): string {
+  return `(() => {
+    const sels = ${JSON.stringify(PRICE_SELECTORS)};
+    const txt = (s) => { const el = document.querySelector(s); return el ? (el.textContent || '').trim() : ''; };
+    const priceTexts = [];
+    for (const s of sels) { const t = txt(s); if (t) priceTexts.push(t); }
+    if (priceTexts.length === 0) {
+      const whole = txt('.a-price-whole');
+      if (whole) {
+        const frac = txt('.a-price-fraction');
+        priceTexts.push(txt('.a-price-symbol') + whole + (frac ? '.' + frac : ''));
+      }
+    }
+    const img = document.querySelector('#landingImage');
+    const sub = txt('#productSubtitle');
+    return {
+      title: txt('#productTitle'),
+      priceTexts,
+      image: img ? img.getAttribute('src') : '',
+      subtitle: sub,
+    };
+  })()`;
+}
+
 /** Real scrape of the product page using the app's existing browser engine. */
 async function fetchFromScrape(asin: string): Promise<FetchedProduct> {
   const url = amazonUrl(asin);
   const actions: BrowserAction[] = [
     { type: "navigate", url },
-    { type: "waitForSelector", selector: "#productTitle, .a-price", timeout: 20_000, optional: true },
-    { type: "getText", selector: "#productTitle", optional: true },
-    ...PRICE_SELECTORS.map((sel) => ({ type: "getText" as const, selector: sel, optional: true })),
-    { type: "getAttribute", selector: "#landingImage", value: "src", optional: true },
-    { type: "getText", selector: "#productSubtitle", optional: true },
+    // One wait, for the two things that must exist. It resolves the instant
+    // either is present, so it costs nothing when the page is normal and stops
+    // the evaluate from reading a price block that has not painted yet.
+    { type: "waitForSelector", selector: "#productTitle, .a-price", timeout: 8_000, optional: true },
+    { type: "evaluate", script: buildProductExtractor() },
   ];
 
-  const run = await runActions(actions, { globalTimeoutMs: SCRAPE_TIMEOUT_MS });
+  const run = await runActions(actions, {
+    globalTimeoutMs: SCRAPE_TIMEOUT_MS,
+    // A price page is overwhelmingly image bytes, and none of them are read:
+    // the thumbnail comes from the #landingImage attribute, not the decoded
+    // pixels. Only these three types are refused — "other" also carries
+    // sub-resources Amazon's price block needs to render at all, and blocking
+    // it produced pages with no #productTitle.
+    blockResources: ["image", "media", "font"],
+    // We wait for #productTitle above, so there is nothing to gain from
+    // waiting out the load event too — on these pages it often never fires.
+    loadWaitMs: 0,
+  });
 
-  const title = run.results.find((r) => r.selector === "#productTitle")?.text ?? null;
-  const priceTexts = run.results.filter((r) => r.action === "getText" && r.selector && PRICE_SELECTORS.includes(r.selector!));
-  const priceText = priceTexts.map((r) => r.text).find((t) => !!t && parsePrice(t) !== null) ?? null;
-  const image = run.results.find((r) => r.action === "getAttribute")?.value ?? null;
+  const extracted = run.results.find((r) => r.action === "evaluate" && r.result && typeof r.result === "object")?.result as
+    | { title?: string; priceTexts?: string[]; image?: string; subtitle?: string }
+    | undefined;
+
+  const title = extracted?.title || null;
+  const image = extracted?.image || null;
+  const priceText = (extracted?.priceTexts ?? []).find((t) => parsePrice(t) !== null) ?? null;
 
   if (run.captcha) {
     return { title: title || asin, price: null, currency: "USD", imageUrl: image, source: "scrape", error: "Amazon served a bot wall / captcha — try again later or configure KEEPA_API_KEY." };
@@ -446,7 +500,12 @@ async function searchOnAmazon(query: string): Promise<
 
       let title = '';
       for (const c of e.querySelectorAll('h2 span, h2 a span, h2')) {
-        const t = (c.textContent || '').replace(/\s+/g, ' ').trim();
+        // NOTE the double backslash. This is a string that BECOMES a script, so
+        // a single \s is an unrecognised escape in a template literal and
+        // evaluates to a bare "s" — the extractor was really running
+        // .replace(/s+/g, ' ') and deleting every "s" from every title
+        // ("MX Ma ter 3S Wirele  Mou e"). Only "\\s" survives into the script.
+        const t = (c.textContent || '').replace(/\\s+/g, ' ').trim();
         if (t.length > title.length) title = t;
       }
 
