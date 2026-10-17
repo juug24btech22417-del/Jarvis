@@ -60,6 +60,7 @@ next-env.d.ts
 /dev.db-shm
 /.jarvis-memory.json
 /.jarvis_macros.json
+/.jarvis_proactive_state.json
 
 # MCP server config can carry access tokens
 /.mcp.json

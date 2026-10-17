@@ -352,7 +352,7 @@ export const useJarvisStore = create<JarvisStore>((set) => ({
   setShowBriefing: (showBriefing) => set({ showBriefing }),
 
   // User
-  userName: "Boss",
+  userName: "Dhruv",
   weatherCity: typeof window !== "undefined"
     ? localStorage.getItem("jarvis-weather-city") || "Bangalore"
     : "Bangalore",

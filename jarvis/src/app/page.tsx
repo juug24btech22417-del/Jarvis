@@ -329,6 +329,7 @@ import { useJarvisVoice } from "@/hooks/useVoice";
 import { useJarvisSentinel } from "@/hooks/useSentinel";
 import { useJarvisBiometrics } from "@/hooks/useBiometrics";
 import { useAutoPersona } from "@/hooks/useAutoPersona";
+import { useProactiveCompanion } from "@/hooks/useProactiveCompanion";
 import { useReactorDrive } from "@/hooks/useReactorDrive";
 import { useAmbientContext } from "@/hooks/useAmbientContext";
 import { composeLocalBriefing, polishBriefing } from "@/services/BriefingService";
@@ -412,6 +413,8 @@ export default function Home() {
 
   // Tier 3B: auto-switch persona on time/alerts/panel/chat context.
   useAutoPersona();
+  // Proactive companion: speaks unprompted when natural with anti-annoyance filters.
+  useProactiveCompanion();
   // Sentinel Eyes global watcher — headless face-security loop that runs
   // regardless of which panel is open. Controlled by SentinelArmToggle.
   useSentinelWatcher();

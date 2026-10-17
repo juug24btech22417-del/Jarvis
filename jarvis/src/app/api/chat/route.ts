@@ -20,6 +20,8 @@ import {
   answerTimeTravelQuestion,
   maybeAutoMilestone,
 } from "@/lib/companion/journey";
+import { detectTone } from "@/lib/companion/toneDetector";
+import { recordUserInteraction } from "@/lib/companion/proactive";
 
 // Node runtime + an explicit duration ceiling. Without these, the streaming
 // reply could outlive the platform's default function budget (or, in dev, the
@@ -55,13 +57,14 @@ function asStreamResponse(body: ReadableStream<Uint8Array> | null): Response {
   return new Response(body, { headers: { ...SSE_HEADERS, Connection: "close" } });
 }
 
-// Fallback persona when the client omits systemPrompt. Critically, providers
-// (notably NVIDIA NIM) reject any message whose `content` field is missing —
-// an undefined systemPrompt used to serialize to `{"role":"system"}`, produce
-// an HTTP 400, and force every reply onto the slow fallback chain.
-const DEFAULT_SYSTEM_PROMPT =
-  "You are JARVIS, a concise, witty AI assistant. Address the user as Boss. " +
-  "Answer directly and helpfully, and keep replies short unless asked for detail.";
+// Dynamic fallback persona when the client omits systemPrompt.
+function getDefaultSystemPrompt(lastUserMessage: string = "", messages: any[] = []): string {
+  const tone = detectTone(lastUserMessage, messages, "Dhruv");
+  return `You are JARVIS, an intuitive, witty AI companion, brother, and trusted partner to Dhruv. ` +
+    `Tone: match user vibe (${tone.archetype}). Address them naturally as "${tone.preferredAddress}" or "Dhruv". ` +
+    `Answer directly and helpfully, and keep replies concise unless asked for detail.`;
+}
+const DEFAULT_SYSTEM_PROMPT = getDefaultSystemPrompt();
 
 // Shared SSE headers for every streaming lane (NVIDIA, Gemini, Groq, OpenRouter).
 const SSE_HEADERS: Record<string, string> = {
@@ -1109,13 +1112,13 @@ export async function POST(request: Request) {
         role: m.role === "assistant" || m.role === "system" ? m.role : "user",
         content: typeof m.content === "string" ? m.content : m.content == null ? "" : String(m.content),
       }));
+    const lastUserMessage = [...messages].reverse().find((m: { role: string }) => m.role === "user")?.content || "";
     // Same for the system prompt: never send an undefined/empty system message.
     const systemPrompt =
       typeof body?.systemPrompt === "string" && body.systemPrompt.trim()
         ? body.systemPrompt
-        : DEFAULT_SYSTEM_PROMPT;
+        : getDefaultSystemPrompt(lastUserMessage, messages);
 
-    const lastUserMessage = messages.find((m: { role: string }) => m.role === "user")?.content || "";
     // ── Deferred side-writes ──
     // Memory extraction, care signals, milestones and event logs all hit
     // Prisma. Run a few seconds AFTER the reply so they can never compete
@@ -1150,6 +1153,7 @@ export async function POST(request: Request) {
     );
     defer(() => recordCareSignals(lastUserMessage), "Care signal recording", true);
     defer(() => maybeAutoMilestone(lastUserMessage), "Milestone auto-detect", true);
+    defer(() => recordUserInteraction(), "Proactive interaction recording", true);
 
     // Journey questions ("how far have we come?") get live-computed answers
     // straight from the data — git history, presence, memory, milestones.
@@ -1266,21 +1270,23 @@ export async function POST(request: Request) {
       ? await withTimeout(getSystemStatus(), 2500, null)
       : null;
 
+    const userTone = detectTone(lastUserMessage, messages, "Dhruv");
     let enhancedSystemPrompt = memoryContext ? `${systemPrompt}\n\n${memoryContext}` : systemPrompt;
     if (carePromptBlock) enhancedSystemPrompt += carePromptBlock;
 
-    // Vent mode: when he says he just needs to talk, JARVIS stops being
-    // an assistant entirely. No tasks, no solutions, no silver linings —
-    // just presence. If there's a past win on record, he may gently
-    // recall it, but only if the moment is right.
-    const ventMode = /\b(just need to (talk|vent)|let me vent|no solutions|just listen|don'?t fix)\b/i.test(lastUserMessage);
+    // Inject dynamic relationship, tone & address adaptation
+    enhancedSystemPrompt += `\n${userTone.promptDirective}\n`;
+
+    // Vent mode: triggers if detected by tone detector OR explicit regex
+    const ventMode = userTone.isVenting || /\b(just need to (talk|vent)|let me vent|no solutions|just listen|don'?t fix)\b/i.test(lastUserMessage);
     if (ventMode) {
       const pastWin = await getPastWin().catch(() => null);
-      enhancedSystemPrompt += `\n\n── VENT MODE ─────────────────────────────────────\n` +
-        `Boss needs to vent. For this conversation:\n` +
-        `- DO NOT offer solutions, action plans, or advice unless he explicitly asks for it.\n` +
-        `- DO NOT silver-line this ("at least..."). Just acknowledge and stay present.\n` +
-        `- Short, warm responses. It's a conversation, not a briefing.\n` +
+      enhancedSystemPrompt += `\n\n── VENT MODE & EMOTIONAL RESONANCE ─────────────────\n` +
+        `The user (${userTone.preferredAddress}) needs to vent or is feeling stressed/overwhelmed. For this conversation:\n` +
+        `- DO NOT offer solutions, action plans, tool commands, or unsolicited advice unless he explicitly asks for it.\n` +
+        `- DO NOT silver-line this ("at least..."). Just acknowledge and stay present like a genuine brother and friend.\n` +
+        `- Short, warm responses. It's a personal conversation, not a task briefing or ticket.\n` +
+        `- Address him naturally as "${userTone.preferredAddress}" or "Dhruv".\n` +
         `- Ask one small follow-up question at most, then mostly listen.\n` +
         (pastWin
           ? `- If the moment genuinely fits, you may gently recall this past moment of his: "${pastWin.slice(0, 160)}" — but only once, and only if it lands naturally.\n`

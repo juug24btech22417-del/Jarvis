@@ -4205,6 +4205,13 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
       const context = buildContext();
       const systemPrompt = buildSystemPrompt(context);
 
+      // Notify companion proactive service that user spoke (resets unprompted count)
+      fetch("/api/companion/proactive", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "user_spoke" }),
+      }).catch(() => {});
+
       // One attempt = a fresh controller plus its own stall watchdog. Note the
       // old code attached clientCtrl to the fetch ONLY when no external signal
       // was passed, so the ceiling silently governed nothing.
