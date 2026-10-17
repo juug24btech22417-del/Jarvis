@@ -37,6 +37,14 @@ const nextConfig = {
     ],
   },
   reactStrictMode: true,
+  // Build output directory. Overridable so an ISOLATED dev server can run
+  // alongside the normal one: two `next dev` processes sharing `.next` race on
+  // the same webpack chunks and corrupt them, which surfaces as
+  // "Cannot find module .next/server/pages/_document.js" and a 500 on every
+  // page while the affected server keeps answering API routes as if healthy.
+  // scripts/e2e-routine-api.ts (which needs its own throwaway database, and so
+  // its own server) points this at a temp directory. Defaults to .next.
+  distDir: process.env.JARVIS_DIST_DIR || '.next',
   images: {
     domains: [],
   },

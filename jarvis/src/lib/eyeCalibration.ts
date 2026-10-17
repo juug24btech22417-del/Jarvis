@@ -273,8 +273,8 @@ export function clearCalibration() {
 }
 
 /**
- * AutoGain — calibration-free gaze mapping that teaches itself the user's
- * own gaze span.
+ * AutoGain — calibration-free gaze mapping that learns the reachable envelope
+ * of the user's own eye signal.
  *
  * The uncalibrated path used to be a fixed `0.5 + raw * 1.8` expand, tuned
  * back when rawH/rawV came from the eye-look BLENDSHAPES. The signal is now
@@ -285,87 +285,140 @@ export function clearCalibration() {
  *
  * Rather than swapping one magic constant for another (eye darts differ by
  * ~5× between users and by ~2× with how far you sit from the camera), this
- * measures the signal itself:
+ * learns the ENVELOPE of the signal — the lowest and highest raw values the
+ * user has actually produced — and maps that envelope onto the screen:
  *
- *   • center — the mean of the first ~45 frames, i.e. wherever you were
- *     looking when tracking started. Fixed thereafter, because a drifting
- *     center drags the cursor back to the middle while you hold a glance.
- *   • dev — PEAK-HOLD span, with NO DECAY: the gain never grows on its own.
- *     That matters more than it sounds. With a decaying peak, holding a
- *     glance at a fixed spot shrinks the span, the gain rises, and the same
- *     gaze keeps mapping FARTHER out — the point drifts across the screen
- *     while you stare at it. Growth-only means a fixed look maps to a fixed
- *     point, permanently.
- *   • The span may grow by at most MAX_GROWTH per frame. A one-frame landmark
- *     spike therefore costs at most 25% of the gain (and the mapping still
- *     reaches the screen edge), while a real dart — which is large for
- *     several consecutive frames — is learned within about two of them.
- *     Without this cap a single garbage frame would permanently crush the
- *     gain, because growth-only means it can never come back down.
+ *   • center — the MIDPOINT of the observed envelope, not the mean of the
+ *     first ~45 frames. That distinction is the "eye cursor is stuck on the
+ *     right side" bug. The old center was frozen at wherever the user
+ *     happened to be looking when tracking started (typically the HUD, in a
+ *     corner); every later gaze was then measured against that wrong origin,
+ *     which shifted the whole mapped range by up to half a screen. With the
+ *     envelope midpoint, the origin is where the user's own gazes straddle
+ *     the middle — so it converges on the truth as they look around, and a
+ *     power-on glance at a corner can no longer bias the map permanently.
+ *     (A midpoint of a linear raw signal is the raw value of screen centre
+ *     for any symmetric pair of looks, so partial exploration still centres
+ *     correctly.)
+ *   • one span PER DIRECTION — left and right (and up/down) learn their own
+ *     reach. The old code kept a single symmetric magnitude, so one big
+ *     rightward glance permanently stole reach from the left: the cursor
+ *     could not travel left of the middle no matter where the user looked.
+ *     Real gaze is asymmetric (a head turn, a camera off the eye axis), and
+ *     per-direction spans make that correct instead of "compressed".
+ *   • growth is MONOTONE and CONFIRMED. Monotone: the envelope never shrinks,
+ *     because a decaying span means holding a glance keeps raising the gain,
+ *     so a fixed look drifts across the screen. Confirmed: an edge may only
+ *     move to the LESS extreme of two consecutive samples that both lie
+ *     outside it. A real dart holds for several frames, so it is learned one
+ *     frame later; a one-frame landmark spike is bracketed by in-envelope
+ *     samples and is rejected outright. That matters because the envelope can
+ *     never come back down — an unguarded spike would crush the gain forever.
+ *   • The envelope may move by at most MAX_GROWTH per frame. Even a
+ *     multi-frame glitch therefore costs at most 25% of the gain, while a
+ *     real dart — large for several consecutive frames — is learned within
+ *     about two of them.
  *
- * Output is clamped to 0..1, so an excursion past the learned span pins
+ * Output is clamped to 0..1, so an excursion past the learned envelope pins
  * gently at the edge instead of wrapping or overshooting.
  */
-/** Max span growth per frame (see the spike note above). */
+/** Max envelope growth per frame (see the spike note above). */
 const MAX_GROWTH = 1.25;
 
 export class AutoGain {
-  private sum = 0;
-  private count = 0;
-  private center: number | null = null;
-  private dev: number;
+  /** Warmup samples, used to establish the first envelope. */
+  private buf: number[] = [];
+  /** Observed envelope, raw units. Monotone (see the class note). */
+  private lo = 0;
+  private hi = 0;
+  /** Envelope seeded with at least one observation. */
+  private seeded = false;
+  /** Previous sample, used to confirm an excursion on two consecutive frames. */
+  private prev = 0;
 
   constructor(
-    /** Starting span guess, used until the peak-hold decays to the truth. */
-    private readonly dev0 = 0.04,
-    /** Span floor — keeps a dead-steady stare from driving the gain to
-     *  infinity (which would amplify landmark noise into visible motion). */
+    /** Per-direction half-span floor — keeps a dead-steady stare from driving
+     *  the gain to infinity (which would amplify landmark noise into motion). */
     private readonly devMin = 0.025,
-    /** Span ceiling — one wild outlier excursion can't crush the gain. */
+    /** Per-direction half-span ceiling — one wild excursion can't crush the
+     *  gain for everything else. */
     private readonly devMax = 0.16,
-    /** Frames averaged to establish the resting center (~1.5s at 30fps). */
+    /** Frames observed before the first envelope is published (~1.5s at 30fps). */
     private readonly warmup = 45
-  ) {
-    this.dev = Math.max(devMin, Math.min(devMax, dev0));
-  }
+  ) {}
 
   /** Feed a raw sample; returns the mapped screen coordinate 0..1. */
   push(x: number): number {
     if (!Number.isFinite(x)) return 0.5;
-    if (this.center === null) {
-      this.sum += x;
-      this.count++;
-      if (this.count < this.warmup) return 0.5;
-      this.center = this.sum / this.count;
+    if (!this.seeded) {
+      // Bootstrap: the map is useless until an envelope exists, so report
+      // screen centre and learn where the user's signal starts out. Their
+      // starting gaze does NOT become the permanent origin — the origin is
+      // the envelope midpoint, which the first real look either way moves.
+      this.buf.push(x);
+      this.prev = x;
+      if (this.buf.length < this.warmup) return 0.5;
+      this.lo = Math.min(...this.buf);
+      this.hi = Math.max(...this.buf);
+      this.seeded = true;
       return 0.5;
     }
-    const d = Math.abs(x - this.center);
-    // Growth-only peak hold, rate-limited so a spike can't crush the gain.
-    if (d > this.dev) this.dev = Math.min(d, this.dev * MAX_GROWTH, this.devMax);
+    const prev = this.prev;
+    this.prev = x;
+
+    // A real dart is outside the envelope on SEVERAL consecutive frames; a
+    // landmark spike is a single frame. So an edge is only allowed to move to
+    // the less extreme of two consecutive outside samples — a lone spike can
+    // never extend it, and a genuine dart is learned one frame later. Growth is
+    // additionally rate-limited, which bounds what even a multi-frame glitch
+    // can do to the gain.
+    const maxStep = this.span * MAX_GROWTH;
+    if (x > this.hi && prev > this.hi) this.hi = Math.min(x, prev, this.hi + maxStep);
+    if (x < this.lo && prev < this.lo) this.lo = Math.max(x, prev, this.lo - maxStep);
     return this.map(x);
   }
 
-  /** Map a raw sample with the currently learned center/span. */
+  /** Screen origin of the map: the midpoint of the observed envelope. */
+  private mid(): number {
+    return (this.lo + this.hi) / 2;
+  }
+
+  /** Per-direction half-span, floored against noise and capped against outliers. */
+  private halfFor(x: number): number {
+    const m = this.mid();
+    const raw = x >= m ? this.hi - m : m - this.lo;
+    return Math.min(this.devMax, Math.max(this.devMin, raw));
+  }
+
+  /** Map a raw sample with the currently learned envelope. */
   map(x: number): number {
-    if (this.center === null || !Number.isFinite(x)) return 0.5;
-    const scale = 0.5 / (this.dev * 1.15);
-    return Math.max(0, Math.min(1, 0.5 + (x - this.center) * scale));
+    if (!this.seeded || !Number.isFinite(x)) return 0.5;
+    const m = this.mid();
+    // Per-direction gain: a big rightward range must not flatten the left side,
+    // which is what pinned the cursor to one half of the screen.
+    const scale = 0.5 / (this.halfFor(x) * 1.15);
+    return Math.max(0, Math.min(1, 0.5 + (x - m) * scale));
   }
 
-  /** True once the resting center has been learned. */
+  /** True once the resting envelope has been learned. */
   get ready(): boolean {
-    return this.center !== null;
+    return this.seeded;
   }
 
-  /** The learned gaze span (raw signal units). Exposed for diagnostics. */
+  /** Mean per-direction half-span (raw signal units), for diagnostics. */
   get span(): number {
-    return this.dev;
+    if (!this.seeded) return this.devMin;
+    const m = this.mid();
+    const right = Math.min(this.devMax, Math.max(this.devMin, this.hi - m));
+    const left = Math.min(this.devMax, Math.max(this.devMin, m - this.lo));
+    return (left + right) / 2;
   }
 
   reset(): void {
-    this.sum = 0;
-    this.count = 0;
-    this.center = null;
-    this.dev = this.dev0;
+    this.buf = [];
+    this.lo = 0;
+    this.hi = 0;
+    this.seeded = false;
+    this.prev = 0;
   }
 }

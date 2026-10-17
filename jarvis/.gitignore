@@ -11,6 +11,8 @@
 
 # next.js
 /.next/
+# isolated build dirs used by the e2e scripts (JARVIS_DIST_DIR)
+/.next-*/
 /out/
 
 # production

@@ -20,6 +20,17 @@ import stealthPlugin from "puppeteer-extra-plugin-stealth";
 import type { Browser, Page } from "playwright";
 import { callJsonLlm } from "@/lib/llm/fastJson";
 import { describeShopperProfile } from "@/lib/agent/shopperProfile";
+import {
+  bestMatch,
+  describeGrounding,
+} from "@/lib/screen/elementGrounding";
+import {
+  classifyChange,
+  changeNote,
+  expectsChange,
+  type ScreenChange,
+  type ScreenSnapshot,
+} from "@/lib/screen/screenChange";
 
 // Apply the stealth plugin once per process (matches PlaywrightService).
 if (!(chromium as any)._plugins?.some((p: any) => p.name === "stealth")) {
@@ -33,6 +44,15 @@ export interface BrowserStep {
   target?: string;
   detail?: string;
   ok: boolean;
+  /**
+   * Whether the page visibly moved after this step. Undefined for the last
+   * step (nothing has been observed after it yet) and for non-mutating actions.
+   */
+  screenChanged?: boolean;
+  /** Feedback handed back to the model on the next turn (see changeNote). */
+  note?: string;
+  /** Confidence of the local grounding that resolved this step's target. */
+  groundingConfidence?: number;
 }
 
 export interface BrowserTaskResult {
@@ -121,9 +141,14 @@ interface PageObservation {
   truncated: boolean;
 }
 
+/** Render an observation into the same text the model reasons over (harness). */
+export function renderObservation(obs: PageObservation): string {
+  return render(obs);
+}
+
 const TOOLS = `- goto: {"action":"goto","url":"..."} navigate to a URL
-- click: {"action":"click","ref":"j3"} click a tagged element
-- type: {"action":"type","ref":"j5","text":"hello","submit":false} focus + type into a field
+- click: {"action":"click","ref":"j3"} click a tagged element — or let JARVIS resolve it descriptionally: {"action":"click","find":"the blue Subscribe button"}
+- type: {"action":"type","ref":"j5","text":"hello","submit":false} focus + type into a field ("find" works here too instead of ref)
 - press: {"action":"press","key":"Enter"} press one key ("Enter","Tab","Escape","ArrowDown")
 - scroll: {"action":"scroll","direction":"down"} scroll the viewport ("down","up")
 - extract: {"action":"extract","ref":"j2"} read the text of an element or the page ("ref":"page")
@@ -142,6 +167,8 @@ ${TOOLS}
 Rules:
 - Take exactly ONE step per reply.
 - Use the ref ids from the CURRENT observation. Refs are re-issued every turn, so never reuse a ref from an earlier turn.
+- If you are not certain which ref is the right element, use "find" with the element's visible label instead of guessing a ref — JARVIS resolves it against the live page and tells you if it could not. A confident "find" is always better than a plausible-looking wrong ref.
+- Steps that report "NO visible change" did nothing. Do not repeat them; pick a different element or clear whatever is covering it.
 - If a field is already filled or a required input is missing, fix that before continuing.
 - If a cookie/consent dialog blocks the goal, dismiss it first.
 - Use "extract" to read content, and "done" ONLY when the goal is finished or provably impossible.
@@ -156,7 +183,15 @@ Rules:
  * compact description. This runs INSIDE the page, so it must be self-contained
  * and must not reference anything from module scope.
  */
-async function observe(page: Page): Promise<PageObservation> {
+/**
+ * EXPORTED FOR THE E2E HARNESS (scripts/e2e-browser-grounding.ts).
+ *
+ * Observation is the input to every local decision the agent makes — grounding
+ * and change verification both read exactly this shape — so the harness drives
+ * this function against a real Chromium page rather than re-implementing the
+ * in-page extraction and testing a copy of it.
+ */
+export async function observe(page: Page): Promise<PageObservation> {
   const MAX_RETRIES = 5;
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -338,6 +373,8 @@ interface Decision {
   thought?: string;
   action?: string;
   ref?: string;
+  /** Natural-language target for click/type, resolved locally (see resolveTarget). */
+  find?: string;
   url?: string;
   text?: string;
   key?: string;
@@ -360,7 +397,12 @@ async function decide(
 ): Promise<Decision | null> {
   const trail = history.length
     ? history
-        .map((h) => `${h.step}. ${h.action}${h.target ? ` ${h.target}` : ""}${h.detail ? ` "${h.detail}"` : ""} -> ${h.ok ? "ok" : "FAILED"}`)
+        .map(
+          (h) =>
+            `${h.step}. ${h.action}${h.target ? ` ${h.target}` : ""}${h.detail ? ` "${h.detail}"` : ""} -> ${
+              h.ok ? "ok" : "FAILED"
+            }${h.note ? ` (${h.note})` : ""}`
+        )
         .join("\n")
     : "(nothing yet)";
 
@@ -466,6 +508,34 @@ async function harvest(page: Page, goal: string, timeoutMs: number): Promise<str
 
   const excerpt = text.slice(0, 400);
   return excerpt ? `From the page: "${excerpt}"` : "";
+}
+
+/**
+ * Turn a decision into the ref to act on.
+ *
+ * When the model supplies `find`, the target is grounded LOCALLY against the
+ * elements that actually exist on the page. This is the single biggest
+ * reliability win in the loop: an LLM reading a 70-row table picks a plausible
+ * nearby ref a meaningful fraction of the time, and every wrong pick costs a
+ * full decision round-trip plus a misleading trail entry. A local ranker with
+ * the instruction "Subscribe button" and the live label list does not.
+ *
+ * Grounding is never a guess: below the acceptance threshold the step FAILS
+ * with the candidate list in the error, so the model gets told what the page
+ * offers instead of a coin-flip click.
+ */
+/** Exported for the e2e harness — the real grounding path, not a copy. */
+export function resolveTarget(decision: Decision, obs: PageObservation, entry: BrowserStep): string {
+  const findExpr = String(decision.find ?? "").trim();
+  if (!findExpr) return String(decision.ref || "");
+
+  const match = bestMatch(findExpr, obs.elements);
+  if (!match) {
+    throw new Error(`could not resolve "${findExpr}" — ${describeGrounding(findExpr, obs.elements)}`);
+  }
+  entry.detail = `found "${findExpr}" -> ${match.ref} "${match.name}" (${match.confidence.toFixed(2)})`;
+  entry.groundingConfidence = match.confidence;
+  return match.ref;
 }
 
 /** Resolve a ref to a locator. Refs are per-turn, so a stale one simply fails. */
@@ -629,6 +699,10 @@ export async function runBrowserTask(
     }
 
     let lastScreenshot: string | undefined;
+    // Self-verification state: the observation the agent acted on, and the step
+    // whose effect we still have to judge.
+    let prevSnapshot: ScreenSnapshot | null = null;
+    let prevEntry: BrowserStep | null = null;
 
     for (let step = 1; step <= maxSteps; step++) {
       let obs = await observe(page);
@@ -640,6 +714,27 @@ export async function runBrowserTask(
         await page.waitForTimeout(450);
         obs = await observe(page);
       }
+
+      // ── Verdict on the PREVIOUS action ─────────────────────────────────
+      // Deliberately computed from THIS turn's observation (which we needed
+      // anyway) rather than a fresh screenshot after every action: no extra
+      // round trip, and the note lands in the trail exactly when the model
+      // decides what to do instead.
+      if (prevSnapshot && prevEntry) {
+        let change: ScreenChange | null = null;
+        try {
+          change = classifyChange(prevSnapshot, obs);
+        } catch {
+          change = null; // verification is advisory; never break a run over it
+        }
+        if (change) {
+          if (expectsChange(prevEntry.action)) prevEntry.screenChanged = change.changed;
+          const note = changeNote(prevEntry.action, change);
+          if (note) prevEntry.note = note;
+        }
+      }
+      prevSnapshot = obs;
+      prevEntry = null;
 
       // Sign-in wall: the human, not the model, owns credentials. Pause the run
       // in place — the window stays up — and resume automatically once they are
@@ -722,7 +817,8 @@ export async function runBrowserTask(
           }
 
           case "click": {
-            const ref = String(decision.ref || "");
+            const resolved = resolveTarget(decision, obs, entry);
+            const ref = resolved;
             entry.target = ref;
             const loc = refLocator(page, ref);
             if ((await loc.count()) === 0) throw new Error(`ref ${ref} is no longer on the page`);
@@ -745,14 +841,14 @@ export async function runBrowserTask(
               page.setDefaultTimeout(actionTimeout);
               page.on("dialog", (d) => d.dismiss().catch(() => {}));
               await page.waitForLoadState("domcontentloaded").catch(() => {});
-              entry.detail = "opened a new tab";
+              entry.detail = entry.detail ? `${entry.detail}; opened a new tab` : "opened a new tab";
             }
             await waitForNavigationSettled(page, 5000);
             break;
           }
 
           case "type": {
-            const ref = String(decision.ref || "");
+            const ref = resolveTarget(decision, obs, entry);
             const text = String(decision.text ?? "");
             entry.target = ref;
             entry.detail = text;
@@ -848,6 +944,9 @@ export async function runBrowserTask(
       }
 
       steps.push(entry);
+      // Remember what to verify: the next observation is compared against the
+      // page state this action was taken on.
+      prevEntry = entry;
       // Small settle so the next observation reflects the result.
       await page.waitForTimeout(200);
     }

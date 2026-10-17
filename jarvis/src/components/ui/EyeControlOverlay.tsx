@@ -46,6 +46,19 @@ import {
 } from "@/lib/eyeCalibration";
 import { OneEuroFilter } from "@/lib/oneEuro";
 import { GazeCursor } from "@/lib/gazeCursor";
+import {
+  GazeAdapter,
+  loadGazeAdapter,
+  saveGazeAdapter,
+  clearGazeAdapter,
+} from "@/lib/gazeAdapt";
+import {
+  FAR_RADIUS,
+  resolveClickLesson,
+  screenTargetsFrom,
+  type CandidateElement,
+  type ScreenTarget,
+} from "@/lib/gazeClickLesson";
 import { sendOsInput } from "@/lib/osInputClient";
 import { claimVision, releaseVision, visionHolder, onVisionLockChange } from "@/lib/visionLock";
 import { pipSupported, openPiPWith, pipWindow } from "@/lib/documentPiP";
@@ -168,10 +181,34 @@ export default function EyeControlOverlay(props: {
   const autoGainX = useRef(new AutoGain());
   const autoGainY = useRef(new AutoGain());
 
+  // ─── Online per-user refinement (see @/lib/gazeAdapt) ────────────────────
+  // Every labelled fixation this feature produces — a completed dwell target,
+  // a practice-drill hit, the 17 ritual samples — is a supervised example of
+  // "this raw eye signal meant THAT screen point". The adapter folds them into
+  // an affine correction of the base map, so accuracy keeps improving from
+  // normal use instead of decaying until the next calibration ritual.
+  const adapterRef = useRef<GazeAdapter | null>(null);
+  const adapterSavedAt = useRef(0);
+  const [adapterSamples, setAdapterSamples] = useState(0);
+  const getAdapter = useCallback((): GazeAdapter => {
+    if (!adapterRef.current) adapterRef.current = new GazeAdapter();
+    return adapterRef.current;
+  }, []);
+
+  useEffect(() => {
+    const stored = loadGazeAdapter();
+    if (stored && !adapterRef.current) {
+      adapterRef.current = stored;
+      setAdapterSamples(stored.samples);
+    }
+  }, []);
+
   // Blink state
   const eyesOpen = useRef(true);
   const closedAt = useRef<number | null>(null);
   const lastClick = useRef(0);
+  /** Rolling accuracy of the learned map, for the HUD (screen fractions). */
+  const [learnError, setLearnError] = useState<number | null>(null);
   const blinkFallbackSince = useRef<number | null>(null);
   const openBase = useRef(OPEN_BASE_INIT); // rolling open-eye openness baseline
   const faceLostAt = useRef<number | null>(null); // face-loss debounce timestamp
@@ -207,21 +244,6 @@ export default function EyeControlOverlay(props: {
     }
   }
 
-  // rawV zero-offset correction for the DEFAULT_COEFFS path in cursor mode.
-  // The DEFAULT_COEFFS assume rawV=0 at center gaze, but actual rawV at rest
-  // varies with webcam height, user posture, and face geometry. We measure it
-  // from the first ~90 stable frames and subtract it so y=0.5 maps to wherever
-  // the user naturally looks — not to a hardware-specific magic number.
-  const rawVBaseline = useRef<{ sum: number; count: number; value: number | null }>({
-    sum: 0,
-    count: 0,
-    value: null,
-  });
-  const rawHBaseline = useRef<{ sum: number; count: number; value: number | null }>({
-    sum: 0,
-    count: 0,
-    value: null,
-  });
 
   const targetRef = useRef<{ x: number; y: number } | null>(null);
   const lastSentRef = useRef<{ x: number; y: number }>({ x: -1, y: -1 });
@@ -276,17 +298,29 @@ export default function EyeControlOverlay(props: {
     lastDriveAt.current = performance.now();
     blinkFallbackSince.current = null;
     openBase.current = OPEN_BASE_INIT; // fresh baseline on (re)start
-    // Re-learn the resting gaze baseline when tracking resumes.
-    rawVBaseline.current = { sum: 0, count: 0, value: null };
-    rawHBaseline.current = { sum: 0, count: 0, value: null };
-
+    // NOTE: the LEARNED gaze model is deliberately not touched here. It took
+    // minutes of real fixations to earn (see gazeAdapt), and a dropped camera
+    // frame is not evidence that the user's eye geometry changed.
   }, []);
 
-  /** Screen point for display/targets: calibrated if possible, else AutoGain. */
-  const displayPoint = useCallback(
+  /**
+   * The BASE gaze map: the quadratic fit when one has been earned, otherwise
+   * the self-scaling AutoGain mapper.
+   *
+   * This is the single definition of "where does this eye signal point" — the
+   * on-screen dot, the dwell targets, the drill and the OS cursor all come
+   * through here, and the learned adapter is defined as a correction of it.
+   * It used to exist twice: display/targets used AutoGain (the tested,
+   * self-scaling path) while cursor mode used DEFAULT_COEFFS — a fixed
+   * 7.2×/9.0× gain with a hand-rolled 90-frame baseline. Those defaults are
+   * blendshape-era magic numbers, so the mode that actually drives the OS
+   * cursor was the one mode that ignored the calibration-free mapper, which is
+   * exactly why targets mode worked and cursor mode did not.
+   */
+  const basePointFor = useCallback(
     (g: GazeFrame): { x: number; y: number } => {
       // Only use the regression map when the user has run the ritual and saved
-      // a real calibration. DEFAULT_COEFFS are too setup-specific for display.
+      // a real calibration. DEFAULT_COEFFS are too setup-specific for real use.
       if (hasRealCalib.current && coeffs.current)
         return mapGaze(coeffs.current, g.rawH, g.rawV, g.yaw, g.pitch);
       // Uncalibrated path: self-scaling auto-gain (see AutoGain). rawV is
@@ -294,6 +328,170 @@ export default function EyeControlOverlay(props: {
       return { x: autoGainX.current.map(g.rawH), y: 1 - autoGainY.current.map(g.rawV) };
     },
     []
+  );
+
+  /** Base map + the learned per-user correction. */
+  const gazePointFor = useCallback(
+    (g: GazeFrame): { x: number; y: number } => {
+      const base = basePointFor(g);
+      return getAdapter().correct(
+        { h: g.rawH, v: g.rawV, yaw: g.yaw, pitch: g.pitch },
+        base
+      );
+    },
+    [basePointFor, getAdapter]
+  );
+
+  /** Screen point for display/targets/practice: base map + learned correction. */
+  const displayPoint = useCallback(
+    (g: GazeFrame): { x: number; y: number } => gazePointFor(g),
+    [gazePointFor]
+  );
+
+  /**
+   * Interactive elements near a screen point, as click-lesson candidates.
+   *
+   * Reads geometry only (no state, no async): a blink click is rare, and the
+   * distance test runs BEFORE anything is read off the element, so a whole
+   * page of controls costs one pass of getBoundingClientRect.
+   */
+  const domTargetsNear = useCallback(
+    (point: { x: number; y: number }, radius = FAR_RADIUS): ScreenTarget[] => {
+      if (typeof document === "undefined") return [];
+      const SELECTOR =
+        'button, a[href], input, select, textarea, [role="button"], [role="link"], [role="checkbox"], [role="tab"], [role="menuitem"], [onclick], [tabindex]:not([tabindex="-1"])';
+      const candidates: CandidateElement[] = [];
+      for (const el of Array.from(document.querySelectorAll(SELECTOR))) {
+        const html = el as HTMLElement;
+        candidates.push({
+          label:
+            html.getAttribute("aria-label") || html.textContent || html.tagName.toLowerCase(),
+          rect: html.getBoundingClientRect(),
+        });
+      }
+      // All geometry and filtering live in the pure, tested helper — this only
+      // reads the page.
+      return screenTargetsFrom(
+        candidates,
+        { width: window.innerWidth, height: window.innerHeight },
+        point,
+        radius
+      );
+    },
+    []
+  );
+
+  /**
+   * Learn from a BLINK CLICK.
+   *
+   * This is the strongest label the app ever gets for free: clicking means
+   * "activate what I am looking at", so the control under the pointer is where
+   * the user's eye really was, and the residual against the current map is a
+   * measured sample of that map's error. See @/lib/gazeClickLesson for how the
+   * intended control is inferred — including refusing to guess.
+   *
+   * Only BLINK-initiated clicks teach. A click the user made with the real
+   * mouse says nothing about where the eye was, and feeding it in would teach
+   * the map a lie.
+   */
+  const learnFromBlinkClick = useCallback(() => {
+    const g = gazeRef.current;
+    if (!g.faceFound) return;
+    // Where the OS cursor was — that is where this click will land. Before the
+    // first move it is unset, and a click there teaches nothing.
+    const point = lastSentRef.current;
+    if (point.x < 0 || point.y < 0) return;
+    const lesson = resolveClickLesson({ point, targets: domTargetsNear(point) });
+    if (!lesson) return;
+    const accepted = getAdapter().push(
+      {
+        h: g.rawH,
+        v: g.rawV,
+        yaw: g.yaw,
+        pitch: g.pitch,
+        x: lesson.x,
+        y: lesson.y,
+        mode: hasRealCalib.current ? "calib" : "auto",
+      },
+      basePointFor(g),
+      lesson.weight
+    );
+    if (!accepted) return;
+    saveGazeAdapter(getAdapter());
+    setAdapterSamples(getAdapter().samples);
+    setLearnError(getAdapter().meanError);
+    console.info(
+      `[EyeControl] learned from a blink click — ${lesson.reason} (weight ${lesson.weight.toFixed(2)})`
+    );
+  }, [domTargetsNear, getAdapter, basePointFor]);
+
+  /**
+   * Teach the adapter one labelled fixation.
+   *
+   * `target` is a screen point the user was demonstrably looking at: a dwell
+   * target they opened, a drill dot they held, or a ritual dot. Those are the
+   * only genuinely supervised moments the app has, which is why they are the
+   * only things fed in here.
+   */
+  const recordFixation = useCallback(
+    (g: GazeFrame, target: { x: number; y: number }) => {
+      if (!g.faceFound) return;
+      const accepted = getAdapter().push(
+        {
+          h: g.rawH,
+          v: g.rawV,
+          yaw: g.yaw,
+          pitch: g.pitch,
+          x: target.x,
+          y: target.y,
+          // The correction belongs to whichever base map produced it —
+          // switching maps (ritual run/cleared) restarts the learner instead
+          // of applying a correction that belongs to another function.
+          mode: hasRealCalib.current ? "calib" : "auto",
+        },
+        basePointFor(g)
+      );
+      if (!accepted) return;
+      const now = performance.now();
+      // Persist at most every few seconds: this runs inside the 30Hz frame
+      // handler and localStorage is synchronous.
+      if (now - adapterSavedAt.current > 3000) {
+        adapterSavedAt.current = now;
+        saveGazeAdapter(getAdapter());
+      }
+      setAdapterSamples(getAdapter().samples);
+    },
+    [basePointFor, getAdapter]
+  );
+
+  /**
+   * Seed the adapter from a completed calibration ritual.
+   *
+   * The 17 ritual samples are exact labels, so they start the learner with real
+   * evidence instead of zero — the correction is then refined by drill hits and
+   * dwell targets rather than having to discover the map from scratch.
+   */
+  const seedAdapterFromCalibration = useCallback(
+    (fitted: number[], samples: GazePoint[]) => {
+      const adapter = getAdapter();
+      for (const s of samples) {
+        adapter.push(
+          {
+            h: s.h,
+            v: s.v,
+            yaw: s.yaw,
+            pitch: s.pitch,
+            x: s.sx,
+            y: s.sy,
+            mode: "calib",
+          },
+          mapGaze(fitted, s.h, s.v, s.yaw, s.pitch)
+        );
+      }
+      saveGazeAdapter(adapter);
+      setAdapterSamples(adapter.samples);
+    },
+    [getAdapter]
   );
 
   const handleFrame = useCallback(
@@ -327,8 +525,12 @@ export default function EyeControlOverlay(props: {
       faceLostAt.current = null;
 
       // Keep the calibration-free mapper learning (targets mode / practice
-      // drill). The calibrated path uses the regression instead.
-      if (!coeffs.current) {
+      // drill / uncalibrated cursor). The calibrated path uses the regression
+      // instead. This used to test `!coeffs.current`, which is never true
+      // because coeffs is always seeded with DEFAULT_COEFFS — so AutoGain never
+      // saw a single sample and its learned span stayed at the constructor
+      // guess. The test is the real question: is there a user calibration?
+      if (!hasRealCalib.current) {
         autoGainX.current.push(g.rawH);
         autoGainY.current.push(g.rawV);
       }
@@ -475,6 +677,9 @@ export default function EyeControlOverlay(props: {
                 coeffs.current = normed;
                 hasRealCalib.current = true;
                 saveCalibration(normed);
+                // Hand the 17 labelled ritual points to the online adapter as
+                // its starting evidence (see seedAdapterFromCalibration).
+                seedAdapterFromCalibration(normed, calibSamples.current);
                 setHasCalib(true);
                 setCalibQuality(fit.residual);
                 setCalibAttempt(0);
@@ -552,6 +757,10 @@ export default function EyeControlOverlay(props: {
           const inCooldown = now - lastClick.current <= BLINK_COOLDOWN_MS;
           if (dur < BLINK_MAX_MS && !inCooldown) {
             lastClick.current = now;
+            // Teach the map BEFORE the click lands: resolution needs the
+            // control the user was aiming at, and a click that navigates the
+            // page would take that control away.
+            learnFromBlinkClick();
             sendInput({ action: "click" });
             setClickFlash(true);
             setTimeout(() => setClickFlash(false), 220);
@@ -573,31 +782,11 @@ export default function EyeControlOverlay(props: {
 
         if (now < settleUntil.current) return;
 
-        const c = coeffs.current ?? DEFAULT_COEFFS;
-        // Apply rawV/rawH baseline correction when using DEFAULT_COEFFS.
-        // This measures the user's resting gaze for the first 90 frames and
-        // offsets it so center-screen gaze maps to (0.5, 0.5).
-        let correctedH = g.rawH;
-        let correctedV = g.rawV;
-        if (!hasRealCalib.current) {
-          const bH = rawHBaseline.current;
-          const bV = rawVBaseline.current;
-          if (bH.value === null) {
-            bH.sum += g.rawH;
-            bH.count++;
-            if (bH.count >= 90) bH.value = bH.sum / bH.count;
-          } else {
-            correctedH = g.rawH - bH.value;
-          }
-          if (bV.value === null) {
-            bV.sum += g.rawV;
-            bV.count++;
-            if (bV.count >= 90) bV.value = bV.sum / bV.count;
-          } else {
-            correctedV = g.rawV - bV.value;
-          }
-        }
-        const p = mapGaze(c, correctedH, correctedV, g.yaw, g.pitch);
+        // Base map (quadratic fit when calibrated, AutoGain when not) plus the
+        // learned per-user correction. These are the SAME two stages the
+        // on-screen dot uses, so what you see is always where the OS cursor is
+        // about to go — a divergence between the two was itself a bug report.
+        const p = gazePointFor(g);
         // Defensive: never let a non-finite prediction reach the OS.
         if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) {
           resetDrive();
@@ -625,6 +814,9 @@ export default function EyeControlOverlay(props: {
         setActiveRing({ id: hit.id, pct });
         if (pct >= 1) {
           dwellProgress.current[hit.id] = -10000; // cooldown: don't retrigger
+          // A completed dwell is a labelled fixation: the user held their gaze
+          // on a target whose screen position we know exactly.
+          recordFixation(g, { x: hit.x, y: hit.y });
           hit.action?.();
         }
       } else {
@@ -634,7 +826,18 @@ export default function EyeControlOverlay(props: {
         }
       }
     },
-    [uiMode, calibStep, sendInput, displayPoint, pushCoach, resetDrive]
+    [
+      uiMode,
+      calibStep,
+      sendInput,
+      displayPoint,
+      gazePointFor,
+      pushCoach,
+      resetDrive,
+      recordFixation,
+      seedAdapterFromCalibration,
+      learnFromBlinkClick,
+    ]
   );
 
   // Entering cursor mode or toggling practice: park at current gaze +
@@ -661,6 +864,10 @@ export default function EyeControlOverlay(props: {
       if (g.faceFound && Math.hypot(tx - p.x, ty - p.y) < DRILL_RADIUS) {
         d.hold += 100;
         if (d.hold >= DRILL_DWELL_MS) {
+          // 900ms of steady gaze on a known dot = one supervised training
+          // example for the online adapter. Practice is now productive: it
+          // literally makes live cursor mode more accurate.
+          recordFixation(g, { x: tx, y: ty });
           d.hold = 0;
           d.idx = (d.idx + 1) % CALIB_POINTS.length;
           setDrillHits((h) => h + 1);
@@ -677,7 +884,7 @@ export default function EyeControlOverlay(props: {
       setDrillUi({ idx: d.idx, pct: Math.min(1, d.hold / DRILL_DWELL_MS) });
     }, 100);
     return () => clearInterval(iv);
-  }, [practice, uiMode, displayPoint, pushCoach]);
+  }, [practice, uiMode, displayPoint, pushCoach, recordFixation]);
 
   // Esc exits practice.
   useEffect(() => {
@@ -691,7 +898,7 @@ export default function EyeControlOverlay(props: {
 
   // Live diagnostic: cursor mode active but the drive is idle → say why.
   useEffect(() => {
-    if (uiMode !== "cursor" || !coeffs.current) {
+    if (uiMode !== "cursor") {
       setDriveStalled(false);
       return;
     }
@@ -742,16 +949,39 @@ export default function EyeControlOverlay(props: {
 
   const { videoRef, ready, error } = useEyeControl({ enabled: enabled && camGranted, onFrame: handleFrame });
 
-  // ─── 60Hz Decoupled Gaze Drive Loop ───────────────────────────────────────
-  // Decoupled from camera frame rate: interpolates smoothly at 60Hz,
+  // ─── Decoupled Gaze Drive Loop ──────────────────────────────────────────
+  // Decoupled from camera frame rate: interpolates smoothly on its own clock,
   // immune to background tab throttling via backgroundTicker.
+  //
+  // SINGLE-FLIGHT — this loop is pumped by TWO clocks (its own setTimeout chain
+  // AND the 60Hz background ticker). The old body called tick() straight from
+  // the ticker and re-armed another timeout from inside tick(), so every ticker
+  // tick armed one MORE self-perpetuating chain: the number of concurrent
+  // chains grew by ~60 per second and saturated the main thread within seconds.
+  // That is the "eye control is laggy / doesn't work" report — the tracker was
+  // fine, the driver was eating the machine. The inference loop in
+  // useEyeControl already carries the same fix; this loop did not.
+  //
+  // SEND BUDGET — a move is posted at most every CURSOR_SEND_MS (30Hz) unless
+  // the cursor is jumping a long way (a saccade), which always goes out
+  // immediately. Each move is an HTTP request to /api/os/input, so an
+  // unlimited loop was firing up to 120 requests/sec.
   useEffect(() => {
     if (!enabled || !camGranted || uiMode !== "cursor") return;
     let stopped = false;
+    let armed = false;
     let last = performance.now();
     const releaseKeepAlive = backgroundTicker.acquire("eye-cursor-drive");
 
-    const tick = () => {
+    /** Arm the next tick, unless one is already armed or running. */
+    function schedule(delay = 16) {
+      if (stopped || armed) return;
+      armed = true;
+      driveTimer.current = setTimeout(tick, delay);
+    }
+
+    function tick() {
+      armed = false; // this tick consumes the slot
       if (stopped) return;
       const now = performance.now();
       const dt = Math.min(0.05, Math.max(0.008, (now - last) / 1000));
@@ -761,22 +991,26 @@ export default function EyeControlOverlay(props: {
       if (target && !eyesClosedRef.current && now >= settleUntil.current) {
         const out = cursor.current.step(target, dt);
         lastDriveAt.current = now;
-        if (
-          out &&
-          (Math.abs(out.x - lastSentRef.current.x) >= 0.001 ||
-            Math.abs(out.y - lastSentRef.current.y) >= 0.001)
-        ) {
-          lastSentRef.current = { x: out.x, y: out.y };
-          sendInput({ action: "move", nx: out.x, ny: out.y });
+        if (out) {
+          const moved = Math.hypot(
+            out.x - lastSentRef.current.x,
+            out.y - lastSentRef.current.y
+          );
+          // A big delta is a saccade: send it now. Everything else is paced so
+          // the loop cannot flood the OS-input route.
+          const urgent = moved > 0.06;
+          if (moved >= 0.001 && (urgent || now - lastSend.current >= CURSOR_SEND_MS)) {
+            lastSend.current = now;
+            lastSentRef.current = { x: out.x, y: out.y };
+            sendInput({ action: "move", nx: out.x, ny: out.y });
+          }
         }
       }
-      driveTimer.current = setTimeout(tick, 16);
-    };
+      schedule();
+    }
 
-    const unsub = backgroundTicker.subscribe(() => {
-      if (!stopped) tick();
-    });
-    driveTimer.current = setTimeout(tick, 16);
+    const unsub = backgroundTicker.subscribe(() => schedule());
+    schedule();
 
     return () => {
       stopped = true;
@@ -971,8 +1205,16 @@ export default function EyeControlOverlay(props: {
                       ? hasCalib
                         ? driveStalled
                           ? "CURSOR: signal stuck — glance wider or recalibrate"
-                          : "CURSOR: gaze drives mouse · blink = click"
-                        : "CURSOR: calibrate first"
+                          : `CURSOR: gaze drives mouse · blink = click${
+                              adapterSamples > 0
+                                ? ` · learned ×${adapterSamples}${
+                                    learnError !== null
+                                      ? ` (error ${(learnError * 100).toFixed(1)}%)`
+                                      : ""
+                                  }`
+                                : ""
+                            }`
+                        : "CURSOR: calibration-free · run the drill to sharpen it"
                       : "EYES: tracking — hold gaze to open"
                     : "EYES: searching for face…"
                   : "EYES: loading models…"}
@@ -1005,14 +1247,23 @@ export default function EyeControlOverlay(props: {
                       fit ±{(calibQuality * 100).toFixed(0)}
                     </span>
                   )}
+                  {adapterSamples > 0 && (
+                    <span
+                      className="font-rajdhani text-[10px] text-[#00FF9D]/50 px-1"
+                      title="Every dwell, drill hit and calibration sample teaches an online correction of the gaze map — this is how many it has learned"
+                    >
+                      learning {adapterSamples}
+                    </span>
+                  )}
                   {hasCalib && (
                     <button
                       onClick={() => {
                         clearCalibration();
+                        clearGazeAdapter();
+                        adapterRef.current = null;
+                        setAdapterSamples(0);
                         coeffs.current = DEFAULT_COEFFS;
                         hasRealCalib.current = false;
-                        rawVBaseline.current = { sum: 0, count: 0, value: null };
-                        rawHBaseline.current = { sum: 0, count: 0, value: null };
                         setHasCalib(false);
                         setUiMode("targets");
                       }}
