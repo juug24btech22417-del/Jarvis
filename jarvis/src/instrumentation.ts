@@ -137,6 +137,28 @@ export async function register() {
   setInterval(dispatchEmails, 5_000);
   console.log("[EmailDispatcher] armed — queued emails fire every 5s");
 
+  // ── Meeting auto-attend heartbeat ──
+  // Auto-attending a calendar lecture must not depend on the Automation panel
+  // being open — otherwise "the bot joins my 9am class on its own" only works
+  // while someone is staring at JARVIS. The service owns its own timer once its
+  // module is loaded, and in a fresh process nothing imported it; this self-call
+  // loads it at boot (same HTTP-knock pattern as every other heartbeat here, to
+  // keep node-only imports out of the edge copy of this file).
+  const tickMeetingAutoJoin = async () => {
+    try {
+      await fetch("http://localhost:3000/api/meeting/autojoin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "tick" }),
+      });
+    } catch {
+      // Server warming up or restarting — the next tick catches it.
+    }
+  };
+  setTimeout(tickMeetingAutoJoin, 25_000);
+  setInterval(tickMeetingAutoJoin, 60_000);
+  console.log("[MeetingAutoJoin] armed — calendar checked every 60s, no panel needed");
+
   // ── Route compile warmup (dev only, fire-and-forget) ──
   // In dev, Next.js compiles each route on its FIRST request. A cold
   // /api/chat compile can take 10–20s, which used to land squarely on the
@@ -156,6 +178,7 @@ export async function register() {
       "/api/explain",
       "/api/clipboard/capture",
       "/api/meeting/shadow",
+      "/api/meeting/autojoin",
       "/api/sentinel/analyze",
       "/api/price-tracker",
     ];

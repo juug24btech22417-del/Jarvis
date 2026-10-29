@@ -13,6 +13,7 @@ import McpHubPanel from "@/components/panels/McpHubPanel";
 import ExplainOverlay from "@/components/ui/ExplainOverlay";
 import { useWeatherAmbient } from "@/hooks/useWeatherAmbient";
 import ReactorTelemetry from "@/components/panels/ReactorTelemetry";
+import PanelWindow from "@/components/ui/PanelWindow";
 import CommandBar from "@/components/panels/CommandBar";
 import TimerPanel from "@/components/panels/TimerPanel";
 import CalculatorDisplay, { useCalculatorHistory } from "@/components/panels/CalculatorDisplay";
@@ -1014,19 +1015,9 @@ export default function Home() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [calculations.length, addCalculation]);
 
-  // The app dock belongs to the JARVIS desktop. Any open panel is modal, so the
-  // dock hides (the calculator is excluded — it is a transient overlay and
-  // starts open).
-  const desktopView = ![
-    whatsappOpen, telegramOpen, phoneRemoteOpen, connectedOpen, commHubOpen, securityOpen,
-    vaultOpen, dungeonOpen, habitsOpen, voiceNotesOpen, weatherOpen, spotifyOpen, newsOpen,
-    calendarOpen, skillTrainerOpen, imageGeneratorOpen, summarizerOpen, webScraperOpen,
-    nasaOpen, huggingFaceOpen, iftttOpen, browserOpen, localLLMOpen, visionOpen,
-    automationOpen, priceTrackerOpen, transcriptionOpen, playwrightOpen, proxyOpen,
-    agentOpen, missionOpen, widgetsOpen, secondBrainOpen, taskDeckOpen, macroOpen, analyticsOpen,
-    teleportOpen, proximityOpen, videoDirectorOpen, roomScannerOpen, whiteboardOpen,
-    firecrawlOpen, meetingShadowOpen, faceCrmOpen, taskAgentOpen, mcpHubOpen,
-  ].some(Boolean);
+  // Panels are windows now, not modals: several can be open at once and the
+  // desktop (dock, reactor, command bar) stays live underneath them. So the app
+  // dock is always mounted instead of hiding behind whichever panel is open.
 
   return (
     <main className="relative min-h-screen overflow-hidden bg-deep-space">
@@ -1116,32 +1107,45 @@ export default function Home() {
           <CodePanel />
 
           {/* WhatsApp Panel */}
-          <AnimatePresence>
-            {whatsappOpen && (
-              <WhatsAppPanel
-                onClose={() => setWhatsappOpen(false)}
-                onSendMessage={(name, message) => {
-                  speak(`Message sent to ${name}, Boss.`);
-                }}
-              />
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="whatsapp"
+            title="WhatsApp"
+            open={whatsappOpen}
+            onClose={() => setWhatsappOpen(false)}
+            showClose={false}
+            size={{ w: 460, h: 720 }}
+          >
+            <WhatsAppPanel
+              onClose={() => setWhatsappOpen(false)}
+              onSendMessage={(name, message) => {
+                speak(`Message sent to ${name}, Boss.`);
+              }}
+            />
+          </PanelWindow>
 
           {/* Telegram Panel */}
-          <AnimatePresence>
-            {telegramOpen && (
-              <TelegramPanel
-                onClose={() => setTelegramOpen(false)}
-              />
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="telegram"
+            title="Telegram"
+            open={telegramOpen}
+            onClose={() => setTelegramOpen(false)}
+            showClose={false}
+            size={{ w: 560, h: 700 }}
+          >
+            <TelegramPanel onClose={() => setTelegramOpen(false)} />
+          </PanelWindow>
 
           {/* Phone-as-arc-remote — QR pairing + status */}
-          <AnimatePresence>
-            {phoneRemoteOpen && (
-              <PhoneRemotePanel onClose={() => setPhoneRemoteOpen(false)} />
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="phone-remote"
+            title="Phone Remote"
+            open={phoneRemoteOpen}
+            onClose={() => setPhoneRemoteOpen(false)}
+            showClose={false}
+            size={{ w: 520, h: 640 }}
+          >
+            <PhoneRemotePanel onClose={() => setPhoneRemoteOpen(false)} />
+          </PanelWindow>
 
           {/* ── Flex features: eyes · air-mouse · gesture DJ ── */}
           <EyeControlOverlay
@@ -1157,627 +1161,534 @@ export default function Home() {
           <ScreenNarratorToast />
 
           {/* Connected Apps Panel */}
-          <AnimatePresence>
-            {connectedOpen && (
-              <ConnectedPanel
-                onClose={() => setConnectedOpen(false)}
-              />
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="connected"
+            title="Connected Apps"
+            open={connectedOpen}
+            onClose={() => setConnectedOpen(false)}
+            showClose={false}
+            size={{ w: 720, h: 680 }}
+          >
+            <ConnectedPanel onClose={() => setConnectedOpen(false)} />
+          </PanelWindow>
 
           {/* App Deck (top-left) — one glass button instead of a row of
               floating launchers. The deck carries every tool, its live state
               and its inline controls, so the home screen stays clean. */}
-          {desktopView && <AppDeck onLaunch={launchDeck} />}
+          <AppDeck onLaunch={launchDeck} />
 
           {/* Communication Hub */}
-          <AnimatePresence>
-            {commHubOpen && (
-              <CommunicationHub
-                onClose={() => setCommHubOpen(false)}
-                onSendMessage={(platform, name, message) => {
-                  speak(`${platform} message sent to ${name}, Boss.`);
-                }}
-              />
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="comm-hub"
+            title="Communication Hub"
+            open={commHubOpen}
+            onClose={() => setCommHubOpen(false)}
+            showClose={false}
+            size={{ w: 640, h: 640 }}
+          >
+            <CommunicationHub
+              onClose={() => setCommHubOpen(false)}
+              onSendMessage={(platform, name, message) => {
+                speak(`${platform} message sent to ${name}, Boss.`);
+              }}
+            />
+          </PanelWindow>
 
           {/* Security Panel */}
-          <AnimatePresence>
-            {securityOpen && (
-              <SecurityPanel
-                onClose={() => setSecurityOpen(false)}
-              />
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="security"
+            title="Security"
+            open={securityOpen}
+            onClose={() => setSecurityOpen(false)}
+            showClose={false}
+            size={{ w: 480, h: 720 }}
+          >
+            <SecurityPanel onClose={() => setSecurityOpen(false)} />
+          </PanelWindow>
 
           {/* Vault Panel */}
-          <AnimatePresence>
-            {vaultOpen && (
-              <VaultPanel
-                onClose={() => setVaultOpen(false)}
-              />
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="vault"
+            title="Vault"
+            open={vaultOpen}
+            onClose={() => setVaultOpen(false)}
+            showClose={false}
+            size={{ w: 460, h: 680 }}
+          >
+            <VaultPanel onClose={() => setVaultOpen(false)} />
+          </PanelWindow>
 
           {/* Dungeon Master */}
-          <AnimatePresence>
-            {dungeonOpen && (
-              <DungeonPanel
-                onClose={() => setDungeonOpen(false)}
-              />
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="dungeon"
+            title="Dungeon Master"
+            open={dungeonOpen}
+            onClose={() => setDungeonOpen(false)}
+            showClose={false}
+            size={{ w: 820, h: 700 }}
+          >
+            <DungeonPanel onClose={() => setDungeonOpen(false)} />
+          </PanelWindow>
 
           {/* Reality Check Habits */}
-          <AnimatePresence>
-            {habitsOpen && (
-              <HabitsPanel
-                onClose={() => setHabitsOpen(false)}
-              />
-            )}
-          </AnimatePresence>
-
-
+          <PanelWindow
+            id="habits"
+            title="Reality Check"
+            open={habitsOpen}
+            onClose={() => setHabitsOpen(false)}
+            showClose={false}
+            size={{ w: 440, h: 700 }}
+          >
+            <HabitsPanel onClose={() => setHabitsOpen(false)} />
+          </PanelWindow>
 
           {/* Voice Notes */}
-          <VoiceNotesPanel
-            isOpen={voiceNotesOpen}
+          <PanelWindow
+            id="voice-notes"
+            title="Voice Notes"
+            open={voiceNotesOpen}
             onClose={() => setVoiceNotesOpen(false)}
-          />
+            showClose={false}
+          >
+            <VoiceNotesPanel isOpen onClose={() => setVoiceNotesOpen(false)} />
+          </PanelWindow>
 
           {/* Tier 2: Weather Widget */}
-          <WeatherPanel
-            isOpen={weatherOpen}
+          <PanelWindow
+            id="weather"
+            title="Weather Station"
+            open={weatherOpen}
             onClose={() => setWeatherOpen(false)}
-          />
+            showClose={false}
+          >
+            <WeatherPanel isOpen onClose={() => setWeatherOpen(false)} />
+          </PanelWindow>
 
           {/* Tier 2: Spotify Control */}
-          <SpotifyPanel
-            isOpen={spotifyOpen}
+          <PanelWindow
+            id="spotify"
+            title="Spotify"
+            open={spotifyOpen}
             onClose={() => setSpotifyOpen(false)}
-          />
+            showClose={false}
+          >
+            <SpotifyPanel isOpen onClose={() => setSpotifyOpen(false)} />
+          </PanelWindow>
 
           {/* Tier 2: News Briefing */}
-          <NewsPanel
-            isOpen={newsOpen}
+          <PanelWindow
+            id="news"
+            title="News Briefing"
+            open={newsOpen}
             onClose={() => setNewsOpen(false)}
-          />
+            showClose={false}
+            size={{ w: 780, h: 680 }}
+          >
+            <NewsPanel isOpen onClose={() => setNewsOpen(false)} />
+          </PanelWindow>
 
           {/* Tier 2: Google Calendar */}
-          <CalendarPanel
-            isOpen={calendarOpen}
+          <PanelWindow
+            id="calendar"
+            title="Calendar"
+            open={calendarOpen}
             onClose={() => setCalendarOpen(false)}
-          />
+            showClose={false}
+            size={{ w: 720, h: 660 }}
+          >
+            <CalendarPanel isOpen onClose={() => setCalendarOpen(false)} />
+          </PanelWindow>
 
           {/* Tier 2: NEW FEATURES */}
           {/* Skill Trainer */}
-          <AnimatePresence>
-            {skillTrainerOpen && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
-              >
-                <div className="w-full max-w-2xl h-[80vh]">
-                  <SkillTrainerPanel />
-                </div>
-                <button
-                  onClick={() => setSkillTrainerOpen(false)}
-                  className="absolute top-4 right-4 p-2 text-white/60 hover:text-white"
-                >
-                  ✕
-                </button>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="skill-trainer"
+            title="Skill Trainer"
+            open={skillTrainerOpen}
+            onClose={() => setSkillTrainerOpen(false)}
+          >
+            <SkillTrainerPanel />
+          </PanelWindow>
 
           {/* Image Generator */}
-          <AnimatePresence>
-            {imageGeneratorOpen && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
-              >
-                <div className="w-full max-w-lg h-[80vh]">
-                  <ImageGeneratorPanel />
-                </div>
-                <button
-                  onClick={() => setImageGeneratorOpen(false)}
-                  className="absolute top-4 right-4 p-2 text-white/60 hover:text-white"
-                >
-                  ✕
-                </button>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="image-generator"
+            title="Image Generator"
+            open={imageGeneratorOpen}
+            onClose={() => setImageGeneratorOpen(false)}
+            size={{ w: 640, h: 700 }}
+          >
+            <ImageGeneratorPanel />
+          </PanelWindow>
 
           {/* Content Summarizer */}
-          <AnimatePresence>
-            {summarizerOpen && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
-              >
-                <div className="w-full max-w-lg h-[80vh]">
-                  <SummarizerPanel />
-                </div>
-                <button
-                  onClick={() => setSummarizerOpen(false)}
-                  className="absolute top-4 right-4 p-2 text-white/60 hover:text-white"
-                >
-                  ✕
-                </button>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="summarizer"
+            title="Summarizer"
+            open={summarizerOpen}
+            onClose={() => setSummarizerOpen(false)}
+            size={{ w: 640, h: 660 }}
+          >
+            <SummarizerPanel />
+          </PanelWindow>
 
           {/* Web Scraper */}
-          <AnimatePresence>
-            {webScraperOpen && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
-              >
-                <div className="w-full max-w-lg h-[80vh]">
-                  <WebScraperPanel />
-                </div>
-                <button
-                  onClick={() => setWebScraperOpen(false)}
-                  className="absolute top-4 right-4 p-2 text-white/60 hover:text-white"
-                >
-                  ✕
-                </button>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="web-scraper"
+            title="Web Scraper"
+            open={webScraperOpen}
+            onClose={() => setWebScraperOpen(false)}
+            size={{ w: 640, h: 700 }}
+          >
+            <WebScraperPanel />
+          </PanelWindow>
 
           {/* Firecrawl */}
-          <AnimatePresence>
-            {firecrawlOpen && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
-              >
-                <div className="w-full max-w-lg h-[85vh]">
-                  <FirecrawlPanel />
-                </div>
-                <button
-                  onClick={() => setFirecrawlOpen(false)}
-                  className="absolute top-4 right-4 p-2 text-white/60 hover:text-white"
-                >
-                  ✕
-                </button>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="firecrawl"
+            title="Firecrawl"
+            open={firecrawlOpen}
+            onClose={() => setFirecrawlOpen(false)}
+            size={{ w: 660, h: 720 }}
+          >
+            <FirecrawlPanel />
+          </PanelWindow>
 
           {/* NASA Explorer */}
-          <AnimatePresence>
-            {nasaOpen && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
-              >
-                <div className="w-full max-w-2xl h-[80vh]">
-                  <NASAPanel />
-                </div>
-                <button
-                  onClick={() => setNasaOpen(false)}
-                  className="absolute top-4 right-4 p-2 text-white/60 hover:text-white"
-                >
-                  ✕
-                </button>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="nasa"
+            title="NASA Explorer"
+            open={nasaOpen}
+            onClose={() => setNasaOpen(false)}
+            size={{ w: 880, h: 700 }}
+          >
+            <NASAPanel />
+          </PanelWindow>
 
           {/* Hugging Face */}
-          <AnimatePresence>
-            {huggingFaceOpen && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
-              >
-                <div className="w-full max-w-lg h-[80vh]">
-                  <HuggingFacePanel />
-                </div>
-                <button
-                  onClick={() => setHuggingFaceOpen(false)}
-                  className="absolute top-4 right-4 p-2 text-white/60 hover:text-white"
-                >
-                  ✕
-                </button>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="huggingface"
+            title="Hugging Face"
+            open={huggingFaceOpen}
+            onClose={() => setHuggingFaceOpen(false)}
+            size={{ w: 700, h: 700 }}
+          >
+            <HuggingFacePanel />
+          </PanelWindow>
 
           {/* IFTTT */}
-          <AnimatePresence>
-            {iftttOpen && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
-              >
-                <div className="w-full max-w-lg h-[80vh]">
-                  <IFTTTPanel />
-                </div>
-                <button
-                  onClick={() => setIftttOpen(false)}
-                  className="absolute top-4 right-4 p-2 text-white/60 hover:text-white"
-                >
-                  ✕
-                </button>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="ifttt"
+            title="IFTTT"
+            open={iftttOpen}
+            onClose={() => setIftttOpen(false)}
+            size={{ w: 640, h: 640 }}
+          >
+            <IFTTTPanel />
+          </PanelWindow>
 
           {/* Browser Automation */}
-          <AnimatePresence>
-            {browserOpen && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
-              >
-                <div className="w-full max-w-2xl h-[80vh]">
-                  <BrowserAutomationPanel />
-                </div>
-                <button
-                  onClick={() => setBrowserOpen(false)}
-                  className="absolute top-4 right-4 p-2 text-white/60 hover:text-white"
-                >
-                  ✕
-                </button>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="browser"
+            title="Browser Automation"
+            open={browserOpen}
+            onClose={() => setBrowserOpen(false)}
+            size={{ w: 880, h: 700 }}
+          >
+            <BrowserAutomationPanel />
+          </PanelWindow>
 
           {/* Local LLM */}
-          <AnimatePresence>
-            {localLLMOpen && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
-              >
-                <div className="w-full max-w-lg h-[80vh]">
-                  <LocalLLMPanel />
-                </div>
-                <button
-                  onClick={() => setLocalLLMOpen(false)}
-                  className="absolute top-4 right-4 p-2 text-white/60 hover:text-white"
-                >
-                  ✕
-                </button>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="local-llm"
+            title="Local LLM"
+            open={localLLMOpen}
+            onClose={() => setLocalLLMOpen(false)}
+            size={{ w: 640, h: 680 }}
+          >
+            <LocalLLMPanel />
+          </PanelWindow>
 
           {/* Vision AI */}
-          <AnimatePresence>
-            {visionOpen && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
-              >
-                <div className="w-full max-w-lg h-[80vh]">
-                  <VisionPanel />
-                </div>
-                <button
-                  onClick={() => setVisionOpen(false)}
-                  className="absolute top-4 right-4 p-2 text-white/60 hover:text-white"
-                >
-                  ✕
-                </button>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="vision"
+            title="Vision AI"
+            open={visionOpen}
+            onClose={() => setVisionOpen(false)}
+            size={{ w: 660, h: 680 }}
+          >
+            <VisionPanel />
+          </PanelWindow>
 
           {/* Direct API Automations */}
-          <AnimatePresence>
-            {automationOpen && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
-              >
-                <div className="w-full max-w-lg h-[80vh]">
-                  <AutomationPanel initialTab={automationTab} />
-                </div>
-                <button
-                  onClick={() => {
-                    // Reset the landing tab so any later open starts on the
-                    // default. The mounted panel ignores this while it plays
-                    // its exit animation.
-                    setAutomationTab("notion");
-                    setAutomationOpen(false);
-                  }}
-                  className="absolute top-4 right-4 p-2 text-white/60 hover:text-white"
-                >
-                  ✕
-                </button>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="automation"
+            title="Automation"
+            open={automationOpen}
+            onClose={() => {
+              // Reset the landing tab so any later open starts on the default.
+              setAutomationTab("notion");
+              setAutomationOpen(false);
+            }}
+            // The meeting console is a two-column workspace (setup | notes, Q&A,
+            // revision), so it opens wide; the other tabs are settings forms.
+            size={automationTab === "meeting" ? { w: 1240, h: 860 } : { w: 720, h: 720 }}
+          >
+            <AutomationPanel initialTab={automationTab} />
+          </PanelWindow>
 
           {/* Price Tracker */}
-          <AnimatePresence>
-            {priceTrackerOpen && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
-              >
-                <div className="w-full max-w-2xl h-[80vh]">
-                  <PriceTrackerPanel />
-                </div>
-                <button
-                  onClick={() => setPriceTrackerOpen(false)}
-                  className="absolute top-4 right-4 p-2 text-white/60 hover:text-white"
-                >
-                  ✕
-                </button>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="price-tracker"
+            title="Price Tracker"
+            open={priceTrackerOpen}
+            onClose={() => setPriceTrackerOpen(false)}
+            size={{ w: 860, h: 680 }}
+          >
+            <PriceTrackerPanel />
+          </PanelWindow>
 
           {/* Transcription */}
-          <AnimatePresence>
-            {transcriptionOpen && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
-              >
-                <div className="w-full max-w-3xl h-[85vh]">
-                  <TranscriptionPanel onClose={() => setTranscriptionOpen(false)} />
-                </div>
-                <button
-                  onClick={() => setTranscriptionOpen(false)}
-                  className="absolute top-4 right-4 p-2 text-white/60 hover:text-white"
-                >
-                  ✕
-                </button>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="transcription"
+            title="Transcription"
+            open={transcriptionOpen}
+            onClose={() => setTranscriptionOpen(false)}
+            showClose={false}
+            size={{ w: 960, h: 660 }}
+          >
+            <TranscriptionPanel onClose={() => setTranscriptionOpen(false)} />
+          </PanelWindow>
 
           {/* Autonomous Web Interceptor Proxy */}
-          <ProxyPanel
-            isOpen={proxyOpen}
+          <PanelWindow
+            id="proxy"
+            title="Interceptor Proxy"
+            open={proxyOpen}
             onClose={() => setProxyOpen(false)}
-          />
+            showClose={false}
+            size={{ w: 480, h: 700 }}
+          >
+            <ProxyPanel isOpen onClose={() => setProxyOpen(false)} />
+          </PanelWindow>
 
           {/* Tier 2A: Goal agent */}
-          <AgentPanel
-            isOpen={agentOpen}
+          <PanelWindow
+            id="agent"
+            title="Goal Agent"
+            open={agentOpen}
             onClose={() => setAgentOpen(false)}
-          />
+            showClose={false}
+            size={{ w: 560, h: 700 }}
+          >
+            <AgentPanel isOpen onClose={() => setAgentOpen(false)} />
+          </PanelWindow>
 
           {/* Tier 2A v3: Mission Control (hybrid Firecrawl × Playwright engine) */}
-          <MissionControlPanel
-            isOpen={missionOpen}
+          <PanelWindow
+            id="mission"
+            title="Mission Control"
+            open={missionOpen}
             onClose={() => setMissionOpen(false)}
-          />
+            showClose={false}
+            size={{ w: 900, h: 720 }}
+          >
+            <MissionControlPanel isOpen onClose={() => setMissionOpen(false)} />
+          </PanelWindow>
 
           {/* Natural-language widgets (JSON-driven HUD mini-panels) */}
-          <WidgetsPanel isOpen={widgetsOpen} onClose={() => setWidgetsOpen(false)} />
+          <PanelWindow
+            id="widgets"
+            title="Widgets"
+            open={widgetsOpen}
+            onClose={() => setWidgetsOpen(false)}
+            showClose={false}
+            size={{ w: 560, h: 700 }}
+          >
+            <WidgetsPanel isOpen onClose={() => setWidgetsOpen(false)} />
+          </PanelWindow>
 
           {/* Second Brain — the memory graph as a 3D constellation */}
-          <SecondBrainPanel isOpen={secondBrainOpen} onClose={() => setSecondBrainOpen(false)} />
+          <PanelWindow
+            id="second-brain"
+            title="Second Brain"
+            open={secondBrainOpen}
+            onClose={() => setSecondBrainOpen(false)}
+            showClose={false}
+            size={{ w: 1000, h: 720 }}
+          >
+            <SecondBrainPanel isOpen onClose={() => setSecondBrainOpen(false)} />
+          </PanelWindow>
 
           {/* Command Deck — tasks + timers in one closable dashboard. Stays
               mounted so it can detect new tasks/timers and surface itself. */}
-          <TaskTimerDashboard
-            isOpen={taskDeckOpen}
+          <PanelWindow
+            id="tasks"
+            title="Command Deck"
+            open={taskDeckOpen}
             onClose={() => setTaskDeckOpen(false)}
-            onNudge={() => setTaskDeckOpen(true)}
-          />
+            showClose={false}
+            keepMounted
+            size={{ w: 880, h: 680 }}
+          >
+            <TaskTimerDashboard
+              isOpen
+              onClose={() => setTaskDeckOpen(false)}
+              onNudge={() => setTaskDeckOpen(true)}
+            />
+          </PanelWindow>
 
           {/* Always-on widget rail on the HUD */}
           <WidgetRail />
 
           {/* Ghost Analytics Panel */}
-          <AnimatePresence>
-            {analyticsOpen && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
-              >
-                <div className="w-full max-w-2xl h-[85vh]">
-                  <AnalyticsPanel onClose={() => setAnalyticsOpen(false)} />
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="analytics"
+            title="Ghost Analytics"
+            open={analyticsOpen}
+            onClose={() => setAnalyticsOpen(false)}
+            showClose={false}
+            size={{ w: 900, h: 700 }}
+          >
+            <AnalyticsPanel onClose={() => setAnalyticsOpen(false)} />
+          </PanelWindow>
 
           {/* Record & Replay Macro Panel */}
-          <AnimatePresence>
-            {macroOpen && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
-              >
-                <div className="w-full max-w-2xl h-[85vh]">
-                  <MacroPanel onClose={() => setMacroOpen(false)} />
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="macros"
+            title="Macros"
+            open={macroOpen}
+            onClose={() => setMacroOpen(false)}
+            showClose={false}
+            size={{ w: 900, h: 700 }}
+          >
+            <MacroPanel onClose={() => setMacroOpen(false)} />
+          </PanelWindow>
 
           {/* QR Code Teleporter */}
-          <AnimatePresence>
-            {teleportOpen && (
-              <QRTeleportPanel onClose={() => setTeleportOpen(false)} />
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="qr-teleporter"
+            title="QR Teleporter"
+            open={teleportOpen}
+            onClose={() => setTeleportOpen(false)}
+            showClose={false}
+            size={{ w: 820, h: 680 }}
+          >
+            <QRTeleportPanel onClose={() => setTeleportOpen(false)} />
+          </PanelWindow>
 
           {/* Proximity Awareness Radar */}
-          <AnimatePresence>
-            {proximityOpen && (
-              <ProximityPanel onClose={() => setProximityOpen(false)} />
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="proximity-scanner"
+            title="Proximity Radar"
+            open={proximityOpen}
+            onClose={() => setProximityOpen(false)}
+            showClose={false}
+            size={{ w: 820, h: 700 }}
+          >
+            <ProximityPanel onClose={() => setProximityOpen(false)} />
+          </PanelWindow>
 
           {/* AI Video Director */}
-          <AnimatePresence>
-            {videoDirectorOpen && (
-              <VideoDirectorPanel onClose={() => setVideoDirectorOpen(false)} />
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="video-director"
+            title="Video Director"
+            open={videoDirectorOpen}
+            onClose={() => setVideoDirectorOpen(false)}
+            showClose={false}
+            size={{ w: 900, h: 720 }}
+          >
+            <VideoDirectorPanel onClose={() => setVideoDirectorOpen(false)} />
+          </PanelWindow>
 
           {/* Spatial Room Scanner */}
-          <AnimatePresence>
-            {roomScannerOpen && (
-              <RoomScannerPanel onClose={() => setRoomScannerOpen(false)} />
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="room-scanner"
+            title="Room Scanner"
+            open={roomScannerOpen}
+            onClose={() => setRoomScannerOpen(false)}
+            showClose={false}
+            size={{ w: 860, h: 720 }}
+          >
+            <RoomScannerPanel onClose={() => setRoomScannerOpen(false)} />
+          </PanelWindow>
 
           {/* Whiteboard OCR Live */}
-          <AnimatePresence>
-            {whiteboardOpen && (
-              <WhiteboardOCRPanel onClose={() => setWhiteboardOpen(false)} />
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="whiteboard-ocr"
+            title="Whiteboard OCR"
+            open={whiteboardOpen}
+            onClose={() => setWhiteboardOpen(false)}
+            showClose={false}
+            size={{ w: 900, h: 720 }}
+          >
+            <WhiteboardOCRPanel onClose={() => setWhiteboardOpen(false)} />
+          </PanelWindow>
 
           {/* Real-Time Meeting Shadow (Feature 1) */}
-          <AnimatePresence>
-            {meetingShadowOpen && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.95 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.95 }}
-                onClick={(e) => {
-                  if (e.target === e.currentTarget) setMeetingShadowOpen(false);
-                }}
-                className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md cursor-pointer"
-              >
-                <div 
-                  onClick={(e) => e.stopPropagation()}
-                  className="w-full max-w-5xl max-h-[92vh] overflow-y-auto bg-zinc-950 rounded-2xl border border-cyan-500/40 relative custom-scrollbar cursor-default"
-                >
-                  <button
-                    onClick={() => setMeetingShadowOpen(false)}
-                    className="absolute top-4 right-4 z-20 px-3 py-1 bg-zinc-900/90 hover:bg-zinc-800 text-zinc-300 rounded-lg text-xs font-mono border border-zinc-700 hover:text-white transition-colors cursor-pointer"
-                  >
-                    CLOSE [ESC]
-                  </button>
-                  <MeetingShadowPanel />
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="meeting-shadow"
+            title="Meeting Shadow"
+            open={meetingShadowOpen}
+            onClose={() => setMeetingShadowOpen(false)}
+            size={{ w: 1080, h: 720 }}
+          >
+            <div className="h-full w-full overflow-y-auto custom-scrollbar">
+              <MeetingShadowPanel />
+            </div>
+          </PanelWindow>
 
           {/* Face-to-CRM (Feature 2) */}
-          <AnimatePresence>
-            {faceCrmOpen && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.95 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.95 }}
-                onClick={(e) => {
-                  if (e.target === e.currentTarget) setFaceCrmOpen(false);
-                }}
-                className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md cursor-pointer"
-              >
-                <div 
-                  onClick={(e) => e.stopPropagation()}
-                  className="w-full max-w-6xl max-h-[92vh] overflow-y-auto bg-zinc-950 rounded-2xl border border-cyan-500/40 relative custom-scrollbar cursor-default"
-                >
-                  <button
-                    onClick={() => setFaceCrmOpen(false)}
-                    className="absolute top-4 right-4 z-20 px-3 py-1 bg-zinc-900/90 hover:bg-zinc-800 text-zinc-300 rounded-lg text-xs font-mono border border-zinc-700 hover:text-white transition-colors cursor-pointer"
-                  >
-                    CLOSE [ESC]
-                  </button>
-                  <FaceCrmPanel />
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="face-crm"
+            title="Face to CRM"
+            open={faceCrmOpen}
+            onClose={() => setFaceCrmOpen(false)}
+            size={{ w: 1120, h: 740 }}
+          >
+            <div className="h-full w-full overflow-y-auto custom-scrollbar">
+              <FaceCrmPanel />
+            </div>
+          </PanelWindow>
 
           {/* Autonomous Task Agent (Feature 5) */}
-          <AnimatePresence>
-            {taskAgentOpen && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.95 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.95 }}
-                onClick={(e) => {
-                  if (e.target === e.currentTarget) setTaskAgentOpen(false);
-                }}
-                className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md cursor-pointer"
-              >
-                <div 
-                  onClick={(e) => e.stopPropagation()}
-                  className="w-full max-w-5xl max-h-[92vh] overflow-y-auto bg-zinc-950 rounded-2xl border border-cyan-500/40 relative custom-scrollbar cursor-default"
-                >
-                  <button
-                    onClick={() => setTaskAgentOpen(false)}
-                    className="absolute top-4 right-4 z-20 px-3 py-1 bg-zinc-900/90 hover:bg-zinc-800 text-zinc-300 rounded-lg text-xs font-mono border border-zinc-700 hover:text-white transition-colors cursor-pointer"
-                  >
-                    CLOSE [ESC]
-                  </button>
-                  <AutonomousTaskAgentPanel />
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="task-agent"
+            title="Task Agent"
+            open={taskAgentOpen}
+            onClose={() => setTaskAgentOpen(false)}
+            size={{ w: 1000, h: 720 }}
+          >
+            <div className="h-full w-full overflow-y-auto custom-scrollbar">
+              <AutonomousTaskAgentPanel />
+            </div>
+          </PanelWindow>
 
           {/* MCP Hub (GitHub, Filesystem, Maps, WhatsApp) */}
-          <AnimatePresence>
-            {mcpHubOpen && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.95 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.95 }}
-                onClick={(e) => {
-                  if (e.target === e.currentTarget) setMcpHubOpen(false);
-                }}
-                className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md cursor-pointer"
-              >
-                <div 
-                  onClick={(e) => e.stopPropagation()}
-                  className="w-full max-w-5xl max-h-[92vh] overflow-y-auto bg-zinc-950 rounded-2xl border border-cyan-500/40 relative custom-scrollbar cursor-default"
-                >
-                  <button
-                    onClick={() => setMcpHubOpen(false)}
-                    className="absolute top-4 right-4 z-20 px-3 py-1 bg-zinc-900/90 hover:bg-zinc-800 text-zinc-300 rounded-lg text-xs font-mono border border-zinc-700 hover:text-white transition-colors cursor-pointer"
-                  >
-                    CLOSE [ESC]
-                  </button>
-                  <McpHubPanel />
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <PanelWindow
+            id="mcp-hub"
+            title="MCP Hub"
+            open={mcpHubOpen}
+            onClose={() => setMcpHubOpen(false)}
+            size={{ w: 1000, h: 720 }}
+          >
+            <div className="h-full w-full overflow-y-auto custom-scrollbar">
+              <McpHubPanel />
+            </div>
+          </PanelWindow>
+
+          {/* Browser console (Playwright) — same window shell as every other
+              panel, so it can sit beside the mission it is driving. */}
+          <PanelWindow
+            id="playwright"
+            title="Playwright Logs"
+            open={playwrightOpen}
+            onClose={() => setPlaywrightOpen(false)}
+            showClose={false}
+            size={{ w: 520, h: 620 }}
+          >
+            <PlaywrightPanel isOpen onClose={() => setPlaywrightOpen(false)} />
+          </PanelWindow>
 
           {/* Instant Explain Overlay (Feature 8 - Global Hotkey & Selection) */}
           <ExplainOverlay />

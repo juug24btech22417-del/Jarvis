@@ -84,4 +84,6 @@ next-env.d.ts
 
 # screen captures of the desktop / filled-in forms
 /public/automation/
+# meeting bot's captured slides/diagrams (per-session screenshots)
+/public/meeting-captures/
 /zoom_webinar_reg*.png

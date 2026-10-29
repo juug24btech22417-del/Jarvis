@@ -417,7 +417,13 @@ ${aiContext.keyPoints ? `Key points to include:\n${aiContext.keyPoints}` : ""}`;
 
       {/* Content Area */}
       <div className="flex-1 relative overflow-hidden">
-        <div className="absolute inset-0 overflow-auto px-6 pb-6 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
+        {/* The meeting bot manages its own padding and scroll: it is a two-column
+            console that must fill the window, not a settings form. */}
+        <div
+          className={`absolute inset-0 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent ${
+            activeTab === "meeting" ? "overflow-hidden" : "overflow-auto px-6 pb-6"
+          }`}
+        >
           <AnimatePresence mode="wait">
             {activeTab === "notion" && (
               <motion.div
@@ -536,7 +542,7 @@ ${aiContext.keyPoints ? `Key points to include:\n${aiContext.keyPoints}` : ""}`;
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -20 }}
-                className="space-y-4"
+                className="h-full min-h-0"
               >
                 <MeetingBotPanel />
               </motion.div>

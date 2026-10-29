@@ -3,7 +3,8 @@ import { meetingBot } from '@/services/MeetingBotService';
 
 export async function POST(request: NextRequest) {
   try {
-    const { action, url, credentials, message } = await request.json();
+    const body = await request.json();
+    const { action, url, credentials, message } = body;
 
     if (action === 'join') {
       if (!url && !credentials?.id) {
@@ -24,6 +25,12 @@ export async function POST(request: NextRequest) {
       }
       const result = await meetingBot.sendChatMessage(message);
       return NextResponse.json(result);
+    }
+
+    if (action === 'ask') {
+      const question = typeof body.question === 'string' ? body.question : '';
+      const result = await meetingBot.ask(question);
+      return NextResponse.json(result, { status: result.success ? 200 : 400 });
     }
 
     if (action === 'status') {

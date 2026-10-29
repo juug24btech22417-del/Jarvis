@@ -785,3 +785,57 @@ html[data-theme="quantum"] .reactor-glow {
     animation: none;
   }
 }
+
+/* ═══ Floating panel windows ═══ */
+
+/* Every panel is mounted inside <PanelWindow>. These rules are what let a panel
+   that was written as a fixed-size modal (or a hardcoded `w-[420px] h-[650px]`
+   card) fill a window of any size without touching the panel's own markup.
+   `!important` is deliberate: the panel's own geometry utilities are exactly
+   what has to lose. */
+[data-panel-window-body] > * {
+  position: absolute !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+  margin: 0 !important;
+  border-width: 0 !important;
+  border-radius: 0 !important;
+  transform: none !important;
+  z-index: 0 !important;
+  /* Some panels never grew a scroll area of their own (they were full-height
+     drawers on a screen they could not outgrow). In a window they can be
+     shorter than their content, so the panel root scrolls when it has to and
+     never grows a horizontal scrollbar from decorative overflow. */
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+}
+
+/* Panels that open through a full-screen backdrop: the backdrop becomes the
+   window body, and its inner card becomes the content. */
+[data-panel-fill="overlay"] > * {
+  padding: 0 !important;
+  background: transparent !important;
+  background-image: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  cursor: default !important;
+}
+[data-panel-fill="overlay"] > * > * {
+  display: flex !important;
+  flex-direction: column !important;
+  width: 100% !important;
+  height: 100% !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+  margin: 0 !important;
+}
+/* ...and inside that card, the scrolling body must be the thing that scrolls
+   rather than overflowing the window. */
+[data-panel-fill="overlay"] > * > * > * {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  max-height: 100% !important;
+}

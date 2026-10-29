@@ -173,9 +173,12 @@ try {
   await railMCP.click();
   await page.waitForTimeout(600);
   check("the deck closes on launch", (await deck.count()) === 0);
+  // Panels open as movable windows now, not as full-screen modals, so the
+  // marker is the window frame rather than an in-modal CLOSE [ESC] button.
+  const mcpWindow = page.locator('[data-panel-window="mcp-hub"]');
   check(
-    "the tool's real panel opened",
-    await page.getByText(/CLOSE \[ESC\]/i).first().isVisible().catch(() => false)
+    "the tool's real panel opened in a window",
+    (await mcpWindow.count()) === 1 && (await mcpWindow.isVisible().catch(() => false))
   );
 
   console.log(`\n${passes} passed, ${fails} failed`);

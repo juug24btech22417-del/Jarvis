@@ -3,6 +3,47 @@ import { execSync } from 'child_process';
 import * as fs from 'fs';
 import os from 'os';
 import path from 'path';
+import {
+  FINGERPRINT_GRID_SIZE,
+  DEFAULT_VISUAL_DUPLICATE_THRESHOLD,
+  buildVisualPromptIndex,
+  clampRegionToViewport,
+  extractJsonObject,
+  isDistinctFingerprint,
+  isDistinctFrameBytes,
+  sampleEvenly,
+  visualCaptionContext,
+  visualClock,
+  visualFileName,
+  visualImageUrl,
+  visualTypeLabel,
+  type CapturedVisual,
+  type FrameRegion,
+  type MeetingVisual,
+} from '@/lib/meeting/visualFrames';
+import {
+  buildSummaryPrompt,
+  meetingNoteTitle,
+  normalizeMeetingSummary,
+  summaryWordCount,
+  type SummaryCore,
+} from '@/lib/meeting/summary';
+import {
+  buildMeetingQaPrompt,
+  normalizeMeetingAnswer,
+  offsetClock,
+  turnsFromCaptions,
+  type MeetingAnswer,
+  type MeetingTurn,
+  type QaVisualRef,
+} from '@/lib/meeting/meetingQa';
+import {
+  buildStudyKitPrompt,
+  normalizeStudyKit,
+  studyKitFromSummary,
+  type StudyKit,
+  type StudyKitSource,
+} from '@/lib/meeting/studyKit';
 
 // Use the user's real installed Chrome to avoid Google's "insecure browser" block.
 // Points to the real Chrome profile already signed in to dhruvbijapur@gmail.com.
@@ -17,6 +58,30 @@ const CHROME_PATH =
 // so JARVIS joining a meeting doesn't interfere with normal Chrome usage.
 // On first run Playwright will create this directory automatically.
 const JARVIS_PROFILE_DIR = path.join(os.homedir(), '.jarvis-meet-profile');
+
+// ─── VISUAL CAPTURE TUNABLES ──────────────────────────────────────────────
+// The bot used to keep only words. These drive what it keeps of the *screen*:
+// how often it looks, when two frames count as the same slide, and how many
+// pictures reach the summary. Every knob is env-overridable.
+const VISUAL_CAPTURE_DIR = path.join(process.cwd(), 'public', 'meeting-captures');
+const VISUAL_INTERVAL_MS = Math.max(5_000, Number(process.env.MEETING_VISUAL_INTERVAL_MS || 15_000));
+const VISUAL_DUPLICATE_THRESHOLD = Number(
+  process.env.MEETING_VISUAL_DUPLICATE_THRESHOLD || DEFAULT_VISUAL_DUPLICATE_THRESHOLD
+);
+const MAX_VISUALS_PER_SESSION = Math.max(1, Number(process.env.MEETING_MAX_VISUALS || 40));
+const MAX_SUMMARY_VISUALS = Math.max(1, Number(process.env.MEETING_MAX_SUMMARY_VISUALS || 12));
+// When the vision model can't be reached the frames are attached unlabelled, so
+// fewer of them are better than a wall of unexplained pictures.
+const MAX_VISUALS_WITHOUT_VISION = Math.max(1, Number(process.env.MEETING_MAX_VISUALS_NO_VISION || 6));
+const VISUAL_SESSIONS_KEPT = Math.max(1, Number(process.env.MEETING_VISUAL_SESSIONS_KEPT || 5));
+const VISION_BATCH_SIZE = Math.max(1, Number(process.env.MEETING_VISION_BATCH || 4));
+const VISION_MODEL = process.env.MEETING_VISION_MODEL || 'gemini-2.5-flash';
+
+// Notion only accepts `file_upload` image blocks on its newer API versions,
+// while the rest of this payload has always been validated against the older
+// one. Try media first, fall back to text-only notes.
+const NOTION_MEDIA_VERSION = process.env.NOTION_MEDIA_VERSION || '2026-03-11';
+const NOTION_TEXT_VERSION = '2022-06-28';
 
 const SYSTEM_BLACKLIST = [
   'no one can join a meeting',
@@ -87,15 +152,65 @@ interface BotState {
   lastCaptionText: string;
   meetingPlatform: 'google-meet' | 'zoom' | 'unknown';
   meetingUrl: string;
+  /** Calendar event title when the bot walked in on its own, else the URL's own name. */
+  meetingTitle: string;
+  /** Epoch millis the session started, so notes can report a real duration. */
+  startedAt: number;
   statusMessage: string;
+  visualInterval: NodeJS.Timeout | null;
+  sessionId: string;
+  sessionDir: string | null;
+  visuals: CapturedVisual[];
 }
 
-export interface MeetingSummary {
+/** One frame's verdict from the vision model. */
+interface VisualLabel {
+  meaningful: boolean;
+  type: string;
+  title: string;
+  description: string;
+  textOnScreen?: string;
+}
+
+interface VisualLabelRaw {
+  index?: number;
+  meaningful?: boolean;
+  type?: string;
+  title?: string;
+  description?: string;
+  text_on_screen?: string;
+  textOnScreen?: string;
+}
+
+const VISUAL_TYPES = new Set([
+  'diagram',
+  'equation',
+  'chart',
+  'table',
+  'code',
+  'slide',
+  'text',
+  'people',
+  'other',
+]);
+
+function normalizeVisualType(value: unknown): string {
+  const type = String(value || '').trim().toLowerCase();
+  return VISUAL_TYPES.has(type) ? type : 'other';
+}
+
+export interface MeetingSummary extends SummaryCore {
   summary: string;
   keyTopics: string[];
   decisions: string[];
   actionItems: Array<{ task: string; assignee?: string; due?: string; priority?: number }>;
   nextSteps?: string;
+  /**
+   * Screenshots of the presented screen (diagrams, equations, charts) that the
+   * vision pass kept, in the order they appeared. This is what makes a lecture
+   * summary useful after the fact. Absent when nothing worth showing was shared.
+   */
+  visuals?: MeetingVisual[];
 }
 
 export interface MeetingResult {
@@ -104,6 +219,14 @@ export interface MeetingResult {
   captionCount: number;
   summary: MeetingSummary;
   notionUrl: string | null;
+  /** How many of the captured visuals were actually embedded in the Notion page. */
+  notionVisualImages?: number;
+  /**
+   * False when the vision pass could not run (provider down/rate-limited): the
+   * frames are still attached, but nothing described them. Surfaced so the panel
+   * and the e2e can tell "no diagrams were shown" from "we could not look".
+   */
+  visualsLabelled?: boolean;
   timestamp: string;
 }
 
@@ -116,6 +239,26 @@ class MeetingBotService {
   private currentSpeaker: string = 'Speaker';
   private _captionsToggledOnce = false;
   private _isSyncingNotion = false;
+  private _visualActive = false; // Guards the visual tick — flipped false by cleanup()
+  private _visualBusy = false;
+  private lastNotionImageCount = 0;
+  /**
+   * The finished session, kept after the browser closes: the Q&A box and the
+   * revision kit both answer from this transcript, not from the summary.
+   */
+  private lastSession: {
+    title: string;
+    platform: string;
+    startedAt: number;
+    turns: MeetingTurn[];
+    visuals: MeetingVisual[];
+    summary?: MeetingSummary;
+  } | null = null;
+  private lastStudyKit: StudyKit | null = null;
+  private lastVisualsLabelled = true;
+  private lastFingerprint: number[] | null = null;
+  private lastFrameBytes: Uint8Array | null = null;
+  private framesAttempted = 0;
 
   /**
    * Kills any Chrome process that currently owns the JARVIS profile directory
@@ -202,6 +345,55 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
       : 'unknown';
 
     return { url, platform, cleanId, password };
+  }
+
+  /**
+   * Does this URL belong to a meeting we are attending (or the registration
+   * flow that leads into one)?
+   *
+   * Chrome launches with its own New Tab page, and a restored profile or a
+   * Zoom registration can add tabs we must not confuse with the meeting. This
+   * guard is what stops the bot from transcribing `chrome://newtab` — which it
+   * genuinely did before, because every new tab used to be adopted.
+   */
+  private looksLikeMeetingPage(url: string): boolean {
+    const u = (url || '').toLowerCase();
+    if (!u) return false;
+    if (
+      u.startsWith('about:') ||
+      u.startsWith('chrome://') ||
+      u.startsWith('chrome-untrusted://') ||
+      u.startsWith('devtools://') ||
+      u.startsWith('edge://')
+    ) {
+      return false;
+    }
+    return (
+      u.includes('/wc/') ||
+      u.includes('/s/') ||
+      (u.includes('/j/') && !u.includes('/register')) ||
+      (u.includes('meet.google.com/') && u !== 'https://meet.google.com/') ||
+      u.includes('/webinar/register') ||
+      u.includes('/webinar/join')
+    );
+  }
+
+  /**
+   * The tab the session should be driving: the one we navigated to if it still
+   * exists, otherwise the first tab that looks like a meeting, otherwise the
+   * page we already had.
+   */
+  private pickMeetingPage(): Page | null {
+    if (!this.state) return null;
+    const all = this.state.context.pages();
+    const target = (this.state.meetingUrl || '').toLowerCase();
+    const exact = target ? all.find((p) => p.url().toLowerCase().startsWith(target)) : undefined;
+    return (
+      exact ||
+      all.find((p) => this.looksLikeMeetingPage(p.url())) ||
+      this.state.page ||
+      null
+    );
   }
 
   /**
@@ -350,9 +542,25 @@ public class ChromeFocusHelper {
     }
   }
 
-  async joinMeeting(rawUrl: string, credentials?: { id?: string; password?: string; name?: string; email?: string; phone?: string }) {
+  async joinMeeting(
+    rawUrl: string,
+    credentials?: {
+      id?: string;
+      password?: string;
+      name?: string;
+      email?: string;
+      phone?: string;
+      /** Calendar event title, threaded through so the notes get a real subject. */
+      title?: string;
+    }
+  ) {
     const { url, platform, cleanId, password } = this.normalizeMeetingTarget(rawUrl, credentials);
     console.log(`JARVIS: Attempting to join meeting (${platform}) at ${url}...`);
+    // A new meeting is a new context: yesterday's answered questions must not
+    // answer today's identical-sounding question.
+    this.qaCache.clear();
+    this.lastSession = null;
+    this.lastStudyKit = null;
 
     // Close any previous meeting session
     if (this.state) {
@@ -371,6 +579,10 @@ public class ChromeFocusHelper {
         headless: false,
         args: [
           '--disable-blink-features=AutomationControlled',
+          // Stop Chrome from opening its own New Tab page next to the meeting —
+          // an extra tab with no meeting in it only creates confusion.
+          '--no-first-run',
+          '--no-default-browser-check',
           '--use-fake-ui-for-media-stream',           // Auto-grant mic/cam — no popup
           '--use-fake-device-for-media-stream',
           '--autoplay-policy=no-user-gesture-required',
@@ -389,15 +601,31 @@ public class ChromeFocusHelper {
       const page = pages.length > 0 ? pages[0] : await context.newPage();
       page.setDefaultTimeout(35000);
 
-      // Listen for any new popups or tabs (e.g. webinar join link opened in a new tab)
+      // A new tab usually means the registration flow opened the real meeting in
+      // it — but it can also be Chrome's own New Tab page. Adopt only tabs that
+      // genuinely look like a meeting (the URL may still be about:blank at the
+      // moment the event fires, so wait for its first real navigation).
       context.on('page', async (newPage) => {
-        console.log(`JARVIS: New browser tab/popup opened: ${newPage.url()}`);
-        if (this.state) {
+        const adopt = async () => {
+          if (!this.state) return;
+          console.log(`JARVIS: Following meeting tab ${newPage.url()}`);
           this.state.page = newPage;
           newPage.setDefaultTimeout(35000);
           await newPage.bringToFront().catch(() => {});
           await this.bringWindowToFront();
+        };
+
+        if (this.looksLikeMeetingPage(newPage.url())) {
+          await adopt();
+          return;
         }
+        console.log(`JARVIS: Ignoring unrelated tab: ${newPage.url() || 'about:blank'}`);
+        await newPage
+          .waitForURL((url) => this.looksLikeMeetingPage(url.toString()), { timeout: 25_000 })
+          .then(adopt)
+          .catch(() => {
+            console.log(`JARVIS: Tab stayed unrelated, leaving it alone: ${newPage.url()}`);
+          });
       });
 
       await page.bringToFront().catch(() => {});
@@ -413,7 +641,13 @@ public class ChromeFocusHelper {
         lastCaptionText: '',
         meetingPlatform: platform,
         meetingUrl: url,
+        meetingTitle: (credentials?.title || '').trim(),
+        startedAt: Date.now(),
         statusMessage: 'Navigating to meeting URL...',
+        visualInterval: null,
+        sessionId: '',
+        sessionDir: null,
+        visuals: [],
       };
 
       // Navigate to the meeting URL
@@ -957,7 +1191,11 @@ public class ChromeFocusHelper {
 
   private async enableCaptionsAndStartRecording() {
     if (!this.state?.page) return;
-    const page = this.state.page;
+    // Pick the tab that is genuinely the meeting — Chrome opens its own New Tab
+    // page alongside ours, and transcribing that instead is exactly the bug this
+    // guard exists for.
+    const page = this.pickMeetingPage() || this.state.page;
+    this.state.page = page;
     console.log("JARVIS: Enabling captions and starting transcription engine...");
 
     try {
@@ -972,6 +1210,8 @@ public class ChromeFocusHelper {
 
     this.state.isRecording = true;
     this.startSmartCaptionEngine(page);
+    // Start watching what is being *shown*, not only what is being said.
+    this.startVisualCaptureEngine(page);
   }
 
   private async enableGoogleMeetCaptions(page: Page) {
@@ -1187,19 +1427,15 @@ public class ChromeFocusHelper {
       this._captionBusy = true;
 
       try {
-        // If there are multiple tabs (e.g. registration page + webinar tab), ensure we are tracking the meeting tab
+        // If the registration flow opened the real meeting in another tab, follow
+        // it. Never fall back to "the last tab" — that is how the bot used to end
+        // up staring at Chrome's New Tab page.
         if (this.state?.context) {
-          const allPages = this.state.context.pages();
-          if (allPages.length > 1) {
-            const meetingPage = allPages.find(p => {
-              const u = p.url().toLowerCase();
-              return u.includes('/wc/') || u.includes('/s/') || (u.includes('/j/') && !u.includes('/register')) || (u.includes('meet.google.com/') && u !== 'https://meet.google.com/');
-            }) || allPages[allPages.length - 1];
-            if (meetingPage && meetingPage !== page) {
-              console.log(`JARVIS: Switching active meeting page to ${meetingPage.url()}`);
-              page = meetingPage;
-              this.state.page = meetingPage;
-            }
+          const meetingPage = this.pickMeetingPage();
+          if (meetingPage && meetingPage !== page) {
+            console.log(`JARVIS: Switching active meeting page to ${meetingPage.url()}`);
+            page = meetingPage;
+            this.state.page = meetingPage;
           }
         }
 
@@ -1520,6 +1756,430 @@ public class ChromeFocusHelper {
     this.state.captionInterval = setTimeout(tick, 2000) as any;
   }
 
+  // ─── VISUAL CAPTURE ENGINE ────────────────────────────────────────────
+  //
+  // What the lecturer *showed* used to be discarded entirely: a summary of a
+  // lecture about a circuit diagram or a worked equation came out as prose with
+  // no trace of the diagram or the numbers. This engine takes periodic frames of
+  // the presented content, keeps only frames that actually changed, and hands
+  // them to a vision model at leave-time so the summary can attach the exact
+  // picture.
+
+  /**
+   * Finds the element the meeting is presenting (the screen-share <video>, or a
+   * <canvas> slide), clips it to the viewport, and builds a 16x16 luminance
+   * fingerprint of it in-page. Fingerprint null means "compare encoded bytes
+   * instead" — e.g. a poster-frame canvas that is cross-origin tainted.
+   */
+  private async detectPresentedRegion(page: Page): Promise<{
+    region: FrameRegion | null;
+    fingerprint: number[] | null;
+    source: string;
+    width: number;
+    height: number;
+  }> {
+    // The bot's window launches maximized (`viewport: null`), so Playwright has
+    // no configured size — read the real one from the page or the clip math is
+    // wrong for every user whose screen isn't 1280x800.
+    const viewport =
+      (await page
+        .evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }))
+        .catch(() => null)) ||
+      page.viewportSize() ||
+      { width: 1280, height: 800 };
+
+    const probe = await page
+      .evaluate((gridSize: number) => {
+        const isVisible = (el: HTMLElement) => {
+          const style = window.getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden') return false;
+          if (Number(style.opacity) < 0.05) return false;
+          const r = el.getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        };
+
+        let best: HTMLElement | null = null;
+        let bestArea = 0;
+        document.querySelectorAll('video, canvas').forEach((node) => {
+          const el = node as HTMLElement;
+          if (!isVisible(el)) return;
+          const r = el.getBoundingClientRect();
+          const area = r.width * r.height;
+          if (area > bestArea) {
+            bestArea = area;
+            best = el;
+          }
+        });
+
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        // A webcam tile is not presented content — only treat a big element as a
+        // screen share, otherwise fall back to the whole window.
+        if (!best || bestArea < vw * vh * 0.15) return { found: false as const };
+
+        const el: HTMLElement = best;
+        const r = el.getBoundingClientRect();
+
+        let fingerprint: number[] | null = null;
+        try {
+          const c = document.createElement('canvas');
+          c.width = gridSize;
+          c.height = gridSize;
+          const ctx = c.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(el as HTMLVideoElement, 0, 0, gridSize, gridSize);
+            const data = ctx.getImageData(0, 0, gridSize, gridSize).data;
+            const grid: number[] = [];
+            for (let i = 0; i < gridSize * gridSize; i++) {
+              const o = i * 4;
+              grid.push(Math.round(0.299 * data[o] + 0.587 * data[o + 1] + 0.114 * data[o + 2]));
+            }
+            fingerprint = grid;
+          }
+        } catch {
+          fingerprint = null; // Tainted canvas — byte fallback handles dedupe.
+        }
+
+        return {
+          found: true as const,
+          region: { x: r.x, y: r.y, width: r.width, height: r.height },
+          fingerprint,
+          source: el.tagName.toLowerCase(),
+        };
+      }, FINGERPRINT_GRID_SIZE)
+      .catch(() => ({ found: false as const }));
+
+    if (!probe.found) {
+      // Nothing share-like on screen — capture the whole window. The dedupe
+      // threshold is raised for these so talking heads don't spam the gallery.
+      return {
+        region: null,
+        fingerprint: null,
+        source: 'window',
+        width: viewport.width,
+        height: viewport.height,
+      };
+    }
+
+    const region = clampRegionToViewport(probe.region, viewport);
+    return {
+      region,
+      fingerprint: Array.isArray(probe.fingerprint) ? probe.fingerprint : null,
+      source: probe.source || 'stage',
+      width: region?.width || viewport.width,
+      height: region?.height || viewport.height,
+    };
+  }
+
+  private startVisualCaptureEngine(page: Page) {
+    if (!this.state) return;
+
+    const sessionId = `session-${Date.now().toString(36)}`;
+    const dir = path.join(VISUAL_CAPTURE_DIR, sessionId);
+    this.state.sessionId = sessionId;
+    this.state.visuals = [];
+    this.framesAttempted = 0;
+    this.lastFingerprint = null;
+    this.lastFrameBytes = null;
+
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      this.state.sessionDir = dir;
+      this.pruneOldVisualSessions(sessionId);
+    } catch (e: any) {
+      console.warn('JARVIS: Could not create the visual capture folder:', e?.message);
+      this.state.sessionDir = null;
+      return;
+    }
+
+    this._visualActive = true;
+    this._visualBusy = false;
+    console.log(
+      `JARVIS: 👁  Visual capture armed — a frame of the shared screen every ${Math.round(
+        VISUAL_INTERVAL_MS / 1000
+      )}s.`
+    );
+
+    const tick = async () => {
+      if (!this._visualActive || !this.state?.page || !this.state.isRecording) return;
+      if (this._visualBusy) {
+        this.state.visualInterval = setTimeout(tick, VISUAL_INTERVAL_MS) as any;
+        return;
+      }
+
+      this._visualBusy = true;
+      try {
+        await this.captureVisualFrame(page);
+      } catch (e: any) {
+        console.warn('JARVIS: Visual capture note:', e?.message?.substring(0, 90));
+      } finally {
+        this._visualBusy = false;
+        if (this._visualActive && this.state?.isRecording) {
+          this.state.visualInterval = setTimeout(tick, VISUAL_INTERVAL_MS) as any;
+        }
+      }
+    };
+
+    this.state.visualInterval = setTimeout(tick, VISUAL_INTERVAL_MS) as any;
+  }
+
+  /** One capture attempt: probe → dedupe → save the frame plus its context. */
+  private async captureVisualFrame(page: Page) {
+    if (!this.state?.sessionDir || !this.state.sessionId) return;
+    if (this.state.visuals.length >= MAX_VISUALS_PER_SESSION) return;
+
+    this.framesAttempted += 1;
+    const target = await this.detectPresentedRegion(page);
+    const wholeWindow = target.region === null;
+    const threshold = wholeWindow ? VISUAL_DUPLICATE_THRESHOLD * 2 : VISUAL_DUPLICATE_THRESHOLD;
+
+    // Same slide as the frame we already kept → skip it. This is why a 40-minute
+    // lecture ends up with 20 useful pictures instead of 160 near-copies.
+    if (
+      target.fingerprint &&
+      !isDistinctFingerprint(this.lastFingerprint, target.fingerprint, threshold)
+    ) {
+      return;
+    }
+
+    const buffer = await page.screenshot({
+      type: 'png',
+      ...(target.region ? { clip: target.region } : {}),
+    });
+
+    if (!target.fingerprint && !isDistinctFrameBytes(this.lastFrameBytes, buffer)) {
+      return;
+    }
+
+    const frameIndex = this.state.visuals.length + 1;
+    const filePath = path.join(this.state.sessionDir, visualFileName(frameIndex));
+    fs.writeFileSync(filePath, buffer);
+
+    const timestamp = new Date().toISOString();
+    const visual: CapturedVisual = {
+      id: `v${frameIndex}`,
+      frameIndex,
+      sessionId: this.state.sessionId,
+      filePath,
+      imageUrl: visualImageUrl(this.state.sessionId, frameIndex),
+      timestamp,
+      clock: visualClock(timestamp),
+      source: target.source,
+      width: target.width,
+      height: target.height,
+      bytes: buffer.byteLength,
+      captionContext: visualCaptionContext(this.state.captionLog || [], timestamp),
+    };
+
+    this.state.visuals.push(visual);
+    this.lastFingerprint = target.fingerprint;
+    this.lastFrameBytes = buffer;
+    console.log(
+      `JARVIS: 📸 Captured visual #${frameIndex} (${target.source}${
+        wholeWindow ? ', whole window' : ''
+      }, ${Math.round(buffer.byteLength / 1024)} KB)`
+    );
+  }
+
+  /** Keep only the last few sessions' frames on disk. */
+  private pruneOldVisualSessions(currentSessionId: string) {
+    try {
+      const stale = fs
+        .readdirSync(VISUAL_CAPTURE_DIR, { withFileTypes: true })
+        .filter((d) => d.isDirectory() && d.name !== currentSessionId)
+        .map((d) => {
+          const full = path.join(VISUAL_CAPTURE_DIR, d.name);
+          let mtime = 0;
+          try {
+            mtime = fs.statSync(full).mtimeMs;
+          } catch {
+            /* raced with a delete */
+          }
+          return { name: d.name, mtime };
+        })
+        .sort((a, b) => b.mtime - a.mtime);
+
+      for (const dir of stale.slice(VISUAL_SESSIONS_KEPT - 1)) {
+        fs.rmSync(path.join(VISUAL_CAPTURE_DIR, dir.name), { recursive: true, force: true });
+        console.log(`JARVIS: Pruned old capture session ${dir.name}`);
+      }
+    } catch {
+      /* First run — nothing to prune. */
+    }
+  }
+
+  // ─── VISION PASS ──────────────────────────────────────────────────────
+
+  /**
+   * Turn raw frames into summary visuals. The vision model decides which frames
+   * are worth keeping (a diagram, an equation, a chart) and names them; a
+   * webcam-tile or blank-desktop frame is dropped rather than attached.
+   */
+  private async analyzeCapturedVisuals(raw: CapturedVisual[]): Promise<MeetingVisual[]> {
+    const onDisk = raw.filter((v) => {
+      try {
+        return fs.existsSync(v.filePath) && fs.statSync(v.filePath).size > 2048;
+      } catch {
+        return false;
+      }
+    });
+    if (onDisk.length === 0) return [];
+
+    const labels = await this.labelVisualsWithVision(onDisk);
+    const merged: MeetingVisual[] = [];
+
+    for (const frame of onDisk) {
+      const label = labels?.get(frame.frameIndex);
+      // With labels we trust the model's judgement; without them everything is
+      // kept (capped lower) because we can't tell a diagram from a webcam tile.
+      if (labels && !label?.meaningful) continue;
+      merged.push({
+        id: frame.id,
+        clock: frame.clock,
+        timestamp: frame.timestamp,
+        type: label?.type || (labels ? 'other' : 'capture'),
+        title: label?.title || `Captured frame at ${frame.clock}`,
+        description: label?.description || '',
+        textOnScreen: label?.textOnScreen,
+        imageUrl: frame.imageUrl,
+        imagePath: frame.filePath,
+        transcriptContext: frame.captionContext || undefined,
+        width: frame.width,
+        height: frame.height,
+      });
+    }
+
+    if (labels) {
+      console.log(
+        `JARVIS: 👁  Vision pass kept ${merged.length}/${onDisk.length} captured frame(s).`
+      );
+    } else if (merged.length > 0) {
+      console.warn(
+        'JARVIS: Vision labelling unavailable — attaching frames without descriptions.'
+      );
+    }
+
+    return sampleEvenly(merged, labels ? MAX_SUMMARY_VISUALS : MAX_VISUALS_WITHOUT_VISION);
+  }
+
+  private visionPrompt(batch: CapturedVisual[]): string {
+    const listing = batch
+      .map(
+        (f, i) =>
+          `Image ${i + 1} → capture #${f.frameIndex} at ${f.clock}${
+            f.captionContext ? ` (spoken around then: ${f.captionContext.slice(0, 200)})` : ''
+          }`
+      )
+      .join('\n');
+
+    return `You are reviewing screenshots captured automatically from the SHARED SCREEN of a live lecture or meeting. Each image is a frame of what was being presented (or of the whole window when nothing was shared).
+
+Frames in this batch:
+${listing}
+
+For EACH image decide whether it is worth attaching to the meeting notes.
+KEEP: slides, diagrams, figures, circuit/circuitry drawings, charts, graphs, tables, whiteboard sketches, code listings, and any worked equation or numerical problem — anything a student would want to look at again.
+DROP: webcam tiles, grids of faces, blank or loading or placeholder screens, meeting toolbars, chat panels, an unchanged desktop, and near-duplicates of a frame already kept (keep the sharpest one).
+When a frame shows a worked problem or equation, transcribe it exactly — the numbers, symbols and the answer are the whole point.
+
+Return STRICT JSON with no commentary:
+{"items":[{"index":<capture number shown above>,"meaningful":true|false,"type":"diagram"|"equation"|"chart"|"table"|"code"|"slide"|"text"|"other","title":"<=8 word name for the visual","description":"1-3 sentences describing exactly what is shown, including labels, the full problem statement, given data and any numbers, so the notes make sense without the image","text_on_screen":"the key text, equation or values visible, verbatim, or \"\""}]}
+One entry per image, in the same order.`;
+  }
+
+  /**
+   * Batch the frames through Gemini's vision model. Returns null when the model
+   * could not be reached at all, so the caller knows to attach frames unlabelled
+   * rather than treat every frame as meaningless.
+   */
+  private async labelVisualsWithVision(
+    frames: CapturedVisual[]
+  ): Promise<Map<number, VisualLabel> | null> {
+    const geminiKey = process.env.GEMINI_API_KEY;
+    if (!geminiKey) {
+      console.warn('JARVIS: GEMINI_API_KEY missing — captured visuals will have no AI captions.');
+      return null;
+    }
+
+    const labels = new Map<number, VisualLabel>();
+    let visionAnswered = false;
+
+    for (let i = 0; i < frames.length; i += VISION_BATCH_SIZE) {
+      const batch = frames.slice(i, i + VISION_BATCH_SIZE);
+      const parts: any[] = [{ text: this.visionPrompt(batch) }];
+
+      for (const frame of batch) {
+        try {
+          const b64 = fs.readFileSync(frame.filePath).toString('base64');
+          parts.push({ inline_data: { mime_type: 'image/png', data: b64 } });
+        } catch {
+          /* Unreadable frame — the others still go. */
+        }
+      }
+      if (parts.length === 1) continue;
+
+      try {
+        // One overloaded model must not cost the gallery its labels — a frame
+        // with no description is exactly the unreadable screenshot this whole
+        // pass exists to avoid.
+        let items: VisualLabelRaw[] | null = null;
+        for (const model of [VISION_MODEL, 'gemini-flash-latest', 'gemini-3.5-flash']) {
+          const res = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{ parts }],
+                generationConfig: { responseMimeType: 'application/json', temperature: 0.1 },
+              }),
+              signal: AbortSignal.timeout(60_000),
+            }
+          ).catch(() => null);
+
+          if (!res || !res.ok) {
+            console.warn(
+              `JARVIS: Vision labelling via ${model} returned HTTP ${res?.status ?? 'network error'}`
+            );
+            continue;
+          }
+
+          const data = await res.json();
+          const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+          const parsed = extractJsonObject<{ items?: VisualLabelRaw[] }>(text || '');
+          if (Array.isArray(parsed?.items)) {
+            items = parsed.items;
+            break;
+          }
+          console.warn(`JARVIS: Vision labelling via ${model} returned unparseable JSON.`);
+        }
+
+        if (!items) continue;
+
+        visionAnswered = true;
+        items.forEach((item, position) => {
+          const wanted = typeof item?.index === 'number' ? item.index : batch[position]?.frameIndex;
+          const frame = batch.find((f) => f.frameIndex === wanted) || batch[position];
+          if (!frame) return;
+
+          const type = normalizeVisualType(item?.type);
+          labels.set(frame.frameIndex, {
+            // A frame of faces is never worth attaching, whatever the model says.
+            meaningful: item?.meaningful !== false && type !== 'people',
+            type,
+            title: String(item?.title || '').trim().slice(0, 120) || `Captured frame at ${frame.clock}`,
+            description: String(item?.description || '').trim().slice(0, 1200),
+            textOnScreen: String(item?.text_on_screen ?? item?.textOnScreen ?? '').trim().slice(0, 1200) || undefined,
+          });
+        });
+      } catch (e: any) {
+        console.warn('JARVIS: Vision labelling note:', e?.message?.substring(0, 120));
+      }
+    }
+
+    return visionAnswered ? labels : null;
+  }
+
   // ─── WAITING ROOM MONITOR ─────────────────────────────────────────────
 
   private startWaitingRoomMonitor() {
@@ -1571,17 +2231,46 @@ public class ChromeFocusHelper {
     // meeting that quietly ends.
     console.log("JARVIS: leaveMeeting caller:", new Error().stack?.split("\n").slice(1, 5).join(" | "));
     const captionLog = [...(this.state.captionLog || [])];
+    // Snapshot the frames before cleanup() drops the session — the summariser
+    // needs them after the browser is already gone.
+    const capturedVisuals = [...(this.state.visuals || [])];
     const platform = this.state.meetingPlatform;
     const meetingUrl = this.state.meetingUrl;
+    const meetingTitle = this.state.meetingTitle;
+    const startedAt = this.state.startedAt;
     const captionCount = captionLog.length;
+
+    // Snapshot the dialogue before cleanup so the post-meeting Q&A and the
+    // revision kit still have something to answer from.
+    this.lastSession = {
+      title: meetingTitle,
+      platform,
+      startedAt,
+      turns:        turnsFromCaptions(
+          captionLog.map((entry) => ({
+            speaker: entry.speaker,
+            text: entry.text,
+            at: Date.parse(entry.timestamp) || startedAt,
+          })),
+          startedAt
+        ),
+      // Labelled visuals only exist after the vision pass in the pipeline.
+      visuals: [],
+    };
+    this.lastStudyKit = null;
 
     await this.cleanup();
     this.lastResult = null;
     this._isSyncingNotion = true;
 
     // Trigger AI summarization and Notion sync
-    console.log(`JARVIS: Processing meeting session (${captionCount} dialogue entries)...`);
-    this.runSummarizationPipeline(captionLog, platform, meetingUrl).catch(e => {
+    console.log(
+      `JARVIS: Processing meeting session (${captionCount} dialogue entries, ${capturedVisuals.length} screen frames)...`
+    );
+    this.runSummarizationPipeline(captionLog, platform, meetingUrl, capturedVisuals, {
+      title: meetingTitle,
+      startedAt,
+    }).catch(e => {
       console.error("JARVIS: Summarization pipeline error:", e);
       this._isSyncingNotion = false;
     });
@@ -1590,32 +2279,21 @@ public class ChromeFocusHelper {
       success: true,
       message:
         captionCount > 0
-          ? `JARVIS has left the meeting. Captured ${captionCount} dialogue entries — generating summary & syncing to Notion now, Boss.`
+          ? `JARVIS has left the meeting. Captured ${captionCount} dialogue entries${
+              capturedVisuals.length ? ` and ${capturedVisuals.length} screen frames` : ''
+            } — generating summary & syncing to Notion now, Boss.`
           : "JARVIS has left the meeting. Meeting attendance note is being synced to Notion.",
       captionCount,
     };
   }
 
-  private extractValidJson(raw: string): MeetingSummary | null {
-    try {
-      return JSON.parse(raw);
-    } catch {
-      const cleaned = raw.replace(/```(?:json)?/gi, '').replace(/```/g, '').trim();
-      try {
-        return JSON.parse(cleaned);
-      } catch {
-        const match = cleaned.match(/\{[\s\S]*\}/);
-        if (match) {
-          try {
-            return JSON.parse(match[0]);
-          } catch {}
-        }
-      }
-    }
-    return null;
-  }
-
-  private async runSummarizationPipeline(captionLog: CaptionEntry[], platform: string, meetingUrl: string) {
+  private async runSummarizationPipeline(
+    captionLog: CaptionEntry[],
+    platform: string,
+    meetingUrl: string,
+    rawVisuals: CapturedVisual[] = [],
+    meta: { title?: string; startedAt?: number } = {}
+  ) {
     try {
       const transcript =
         captionLog.length > 0
@@ -1624,57 +2302,68 @@ public class ChromeFocusHelper {
               .join('\n')
           : "(No speech dialogue was captured during this session. Captions may have been disabled.)";
 
+      // ── Visual pass first: the summary prompt needs to know which diagrams,
+      // equations and charts were actually shown so it can point at them.
+      let visuals: MeetingVisual[] = [];
+      if (rawVisuals.length > 0) {
+        console.log(`JARVIS: 👁  Analysing ${rawVisuals.length} captured screen frame(s)...`);
+        try {
+          visuals = await this.analyzeCapturedVisuals(rawVisuals);
+        } catch (visualErr: any) {
+          console.warn('JARVIS: Visual analysis note:', visualErr?.message);
+        }
+      }
+      const visualIndex = buildVisualPromptIndex(visuals);
+
       console.log("JARVIS: Generating meeting summary...");
       let summary: MeetingSummary | null = null;
 
-      const summaryPrompt = `You are JARVIS, an elite executive AI assistant. Analyze the following meeting transcript and return a structured summary as JSON.
+      // Notes are the only artefact left after the call, so the prompt asks for
+      // a full written record (overview + chronological sections + quotes) and
+      // gets the real event title and duration to anchor it.
+      const startedAtDate = meta.startedAt ? new Date(meta.startedAt) : undefined;
+      const durationMinutes = startedAtDate
+        ? Math.max(1, Math.round((Date.now() - startedAtDate.getTime()) / 60000))
+        : undefined;
+      const promptInput = {
+        platform,
+        title: meta.title,
+        startedAt: startedAtDate?.toLocaleString(),
+        durationMinutes,
+        visualIndex,
+      };
+      // Long lectures easily exceed 100k characters. Gemini 2.5 Flash has room
+      // for that; the fallback chain does not, so it gets a trimmed transcript.
+      const summaryPrompt = buildSummaryPrompt({
+        ...promptInput,
+        transcript: transcript.slice(0, 160_000),
+      });
+      const fallbackPrompt = buildSummaryPrompt({
+        ...promptInput,
+        transcript: transcript.slice(0, 30_000),
+      });
 
-Format strictly as JSON:
-{
-  "summary": "2-3 sentence overview of the meeting",
-  "keyTopics": ["topic 1", "topic 2"],
-  "decisions": ["decision 1", "decision 2"],
-  "actionItems": [
-    { "task": "specific action", "assignee": "person or Unassigned", "due": "suggested due date", "priority": 1 }
-  ],
-  "nextSteps": "follow-ups or next meeting notes"
-}
-
-Transcript:
-${transcript.slice(0, 30000)}`;
-
-      // 1. Direct AI Summarization with Gemini 2.5 Flash
-      const geminiKey = process.env.GEMINI_API_KEY;
-      if (geminiKey && captionLog.length > 0) {
+      // 1. Gemini, walking a model chain. Notes are the artefact the whole
+      // session exists for, so one model being rate-limited or overloaded must
+      // not drop the meeting to a placeholder summary.
+      if (process.env.GEMINI_API_KEY && captionLog.length > 0) {
         try {
-          const geminiRes = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                contents: [{ parts: [{ text: summaryPrompt }] }],
-                generationConfig: {
-                  responseMimeType: 'application/json',
-                  temperature: 0.2,
-                },
-              }),
-            }
-          );
-
-          if (geminiRes.ok) {
-            const data = await geminiRes.json();
-            const textContent = data.candidates?.[0]?.content?.parts?.[0]?.text;
-            if (textContent) {
-              summary = this.extractValidJson(textContent);
-            }
-          } else {
-            console.warn(
-              `JARVIS: Gemini summarization returned HTTP ${geminiRes.status}; falling back to LLM chain`
-            );
+          summary = normalizeMeetingSummary(
+            await this.geminiJson(summaryPrompt, {
+              // Long notes need output room: a small default silently truncated
+              // the summary mid-JSON.
+              maxOutputTokens: 8192,
+              temperature: 0.2,
+              models: ['gemini-flash-latest', 'gemini-3.5-flash', 'gemini-2.5-flash'],
+              budgetMs: 150_000,
+              attemptTimeoutMs: 60_000,
+            })
+          ) as MeetingSummary | null;
+          if (!summary) {
+            console.warn('JARVIS: Gemini summarization unavailable; falling back to LLM chain');
           }
         } catch (aiErr: any) {
-          console.warn("JARVIS: Gemini summarization note:", aiErr.message);
+          console.warn('JARVIS: Gemini summarization note:', aiErr.message);
         }
       }
 
@@ -1685,11 +2374,13 @@ ${transcript.slice(0, 30000)}`;
         try {
           const { runLlmChain } = await import('@/services/LlmChain');
           const result = await runLlmChain(
-            `${summaryPrompt}\n\nReturn ONLY the raw JSON object — no markdown fences, no commentary.`,
-            { maxTokens: 2500, temperature: 0.2 }
+            `${fallbackPrompt}\n\nDo not break the JSON schema. Return ONLY the raw JSON object — no markdown fences, no commentary.`,
+            { maxTokens: 8000, temperature: 0.2 }
           );
           if (result?.content) {
-            summary = this.extractValidJson(result.content);
+            summary = normalizeMeetingSummary(extractJsonObject<unknown>(result.content)) as
+              | MeetingSummary
+              | null;
             if (summary) {
               console.log(`JARVIS: Summary generated via ${result.provider} ${result.model}`);
             }
@@ -1713,7 +2404,18 @@ ${transcript.slice(0, 30000)}`;
         };
       }
 
-      console.log("JARVIS: ✅ Summary generated:", summary.summary);
+      // Attach the captured screen visuals (diagrams, equations, charts) to the
+      // summary itself — this is the part the transcript can never carry.
+      summary.visuals = visuals;
+
+      this.lastVisualsLabelled = !visuals.some((visual) => visual.type === 'capture');
+
+      console.log(
+        `JARVIS: ✅ Summary generated (${summaryWordCount(summary)} words, ${
+          summary.sections?.length || 0
+        } section(s)${visuals.length ? `, ${visuals.length} visual(s)` : ''}):`,
+        summary.summary.slice(0, 400)
+      );
 
       // 2. Direct Sync to Notion Database (no fragile loopback HTTP requests)
       const notionToken = process.env.NOTION_TOKEN;
@@ -1723,10 +2425,13 @@ ${transcript.slice(0, 30000)}`;
       if (notionToken && notionDatabaseId) {
         try {
           notionUrl = await this.saveToNotionDirect({
-            title: `Meeting Notes — ${new Date().toLocaleDateString()} (${platform.toUpperCase()})`,
+            // The calendar title makes the Notion database scannable; the old
+            // "Meeting Notes — <date>" gave twenty identical rows.
+            title: meetingNoteTitle({ title: meta.title, platform }),
             summary,
             transcript,
             meetingUrl,
+            meta,
           });
           console.log("JARVIS: 📝 Notes saved to Notion:", notionUrl);
         } catch (notionErr: any) {
@@ -1758,12 +2463,19 @@ ${transcript.slice(0, 30000)}`;
       }
 
       // Store result
+      if (this.lastSession) {
+        this.lastSession.visuals = visuals;
+        this.lastSession.summary = summary;
+      }
+
       this.lastResult = {
-        title: `Meeting Notes — ${new Date().toLocaleDateString()}`,
+        title: meetingNoteTitle({ title: meta.title, platform }),
         platform,
         captionCount: captionLog.length,
         summary,
         notionUrl,
+        notionVisualImages: notionUrl ? this.lastNotionImageCount : undefined,
+        visualsLabelled: this.lastVisualsLabelled,
         timestamp: new Date().toISOString(),
       };
       this._isSyncingNotion = false;
@@ -1779,10 +2491,12 @@ ${transcript.slice(0, 30000)}`;
     summary: MeetingSummary;
     transcript: string;
     meetingUrl: string;
+    meta?: { title?: string; startedAt?: number };
   }): Promise<string | null> {
     const notionToken = process.env.NOTION_TOKEN;
     const notionDatabaseId = process.env.NOTION_DATABASE_ID;
     if (!notionToken || !notionDatabaseId) return null;
+    this.lastNotionImageCount = 0;
 
     // Split transcript into <= 2000-char chunks for Notion block limits
     const transcriptBlocks: any[] = [];
@@ -1797,79 +2511,137 @@ ${transcript.slice(0, 30000)}`;
       });
     }
 
-    const children: any[] = [
-      {
+    // Diagrams, equations and charts get their own section, with the actual
+    // screenshots embedded when Notion accepts the upload.
+    const visualSection = await this.notionVisualBlocks(notionToken, params.summary.visuals || []);
+
+    const summary = params.summary;
+
+    // Notion caps each rich_text object at 2000 characters, so long prose is
+    // split into consecutive paragraphs instead of being truncated (the old
+    // code sliced the overview at 2000 chars and dropped the rest).
+    const para = (text: string, maxChars = 1800): any[] => {
+      const clean = (text || '').trim();
+      if (!clean) return [];
+      const blocks: any[] = [];
+      for (let i = 0; i < clean.length; i += maxChars) {
+        blocks.push({
+          object: 'block',
+          type: 'paragraph',
+          paragraph: {
+            rich_text: [{ type: 'text', text: { content: clean.substring(i, i + maxChars) } }],
+          },
+        });
+      }
+      return blocks;
+    };
+    const h2 = (text: string) => ({
+      object: 'block',
+      type: 'heading_2',
+      heading_2: { rich_text: [{ type: 'text', text: { content: text } }] },
+    });
+    const h3 = (text: string) => ({
+      object: 'block',
+      type: 'heading_3',
+      heading_3: { rich_text: [{ type: 'text', text: { content: text.slice(0, 180) } }] },
+    });
+    const bullets = (items: string[] = []) =>
+      items.filter(Boolean).map((text) => ({
         object: 'block',
-        type: 'heading_2',
-        heading_2: {
-          rich_text: [{ type: 'text', text: { content: 'Executive Summary' } }],
+        type: 'bulleted_list_item',
+        bulleted_list_item: {
+          rich_text: [{ type: 'text', text: { content: text.slice(0, 1800) } }],
         },
-      },
+      }));
+    const quotes = (items: string[] = []) =>
+      items.filter(Boolean).map((text) => ({
+        object: 'block',
+        type: 'quote',
+        quote: { rich_text: [{ type: 'text', text: { content: text.slice(0, 1800) } }] },
+      }));
+
+    const metaLine = [
+      params.meta?.title ? `**${params.meta.title}**` : '',
+      new Date().toLocaleString(),
+      params.meta?.startedAt
+        ? `${Math.max(1, Math.round((Date.now() - params.meta.startedAt) / 60000))} min`
+        : '',
+      params.meetingUrl ? `[Join link](${params.meetingUrl})` : '',
+    ]
+      .filter(Boolean)
+      .join('  ·  ');
+
+    const children: any[] = [
       {
         object: 'block',
         type: 'paragraph',
         paragraph: {
-          rich_text: [
-            { type: 'text', text: { content: params.summary.summary.slice(0, 2000) } },
-          ],
+          rich_text: [{ type: 'text', text: { content: metaLine } }],
         },
       },
-      {
-        object: 'block',
-        type: 'heading_2',
-        heading_2: {
-          rich_text: [{ type: 'text', text: { content: 'Key Topics' } }],
-        },
-      },
-      ...(params.summary.keyTopics || []).map((t: string) => ({
-        object: 'block',
-        type: 'bulleted_list_item',
-        bulleted_list_item: {
-          rich_text: [{ type: 'text', text: { content: t } }],
-        },
-      })),
-      {
-        object: 'block',
-        type: 'heading_2',
-        heading_2: {
-          rich_text: [{ type: 'text', text: { content: 'Decisions' } }],
-        },
-      },
-      ...(params.summary.decisions || []).map((d: string) => ({
-        object: 'block',
-        type: 'bulleted_list_item',
-        bulleted_list_item: {
-          rich_text: [{ type: 'text', text: { content: d } }],
-        },
-      })),
-      {
-        object: 'block',
-        type: 'heading_2',
-        heading_2: {
-          rich_text: [{ type: 'text', text: { content: 'Action Items' } }],
-        },
-      },
-      ...(params.summary.actionItems || []).map((item: any) => ({
-        object: 'block',
-        type: 'to_do',
-        to_do: {
-          rich_text: [
-            {
-              type: 'text',
-              text: { content: `${item.task} (${item.assignee || 'Unassigned'}) — Due: ${item.due || 'TBD'}` },
-            },
-          ],
-          checked: false,
-        },
-      })),
-      {
-        object: 'block',
-        type: 'heading_2',
-        heading_2: {
-          rich_text: [{ type: 'text', text: { content: 'Meeting Transcript' } }],
-        },
-      },
-      ...transcriptBlocks.slice(0, 120),
+      h2('Overview'),
+      ...para(summary.summary),
+      ...(summary.keyTopics?.length ? [h2('Key Topics'), ...bullets(summary.keyTopics)] : []),
+      ...(summary.sections?.length
+        ? [
+            h2('Detailed Notes'),
+            ...summary.sections.flatMap((section) => [
+              h3(section.heading),
+              ...para(section.body),
+              ...bullets(section.bullets),
+            ]),
+          ]
+        : []),
+      ...visualSection.blocks,
+      ...(summary.highlights?.length
+        ? [h2('Key Moments'), ...quotes(summary.highlights)]
+        : []),
+      ...(summary.decisions?.length ? [h2('Decisions'), ...bullets(summary.decisions)] : []),
+      ...(summary.actionItems?.length
+        ? [
+            h2('Action Items'),
+            ...summary.actionItems.map((item: any) => ({
+              object: 'block',
+              type: 'to_do',
+              to_do: {
+                rich_text: [
+                  {
+                    type: 'text',
+                    text: {
+                      content: `${item.task} (${item.assignee || 'Unassigned'}) — Due: ${
+                        item.due || 'TBD'
+                      }`.slice(0, 1800),
+                    },
+                  },
+                ],
+                checked: false,
+              },
+            })),
+          ]
+        : []),
+      ...(summary.openQuestions?.length
+        ? [h2('Open Questions'), ...bullets(summary.openQuestions)]
+        : []),
+      ...(summary.concepts?.length
+        ? [
+            h2('Key Concepts'),
+            ...summary.concepts.map((concept) => ({
+              object: 'block',
+              type: 'bulleted_list_item',
+              bulleted_list_item: {
+                rich_text: [
+                  {
+                    type: 'text',
+                    text: { content: `${concept.term} — ${concept.explanation}`.slice(0, 1800) },
+                  },
+                ],
+              },
+            })),
+          ]
+        : []),
+      ...(summary.nextSteps ? [h2('Next Steps'), ...para(summary.nextSteps)] : []),
+      h2('Full Transcript'),
+      ...transcriptBlocks.slice(0, 200),
     ];
 
     // Resolve the database's real property names instead of assuming
@@ -1886,21 +2658,37 @@ ${transcript.slice(0, 30000)}`;
     // Notion caps a request at 100 blocks. Send the first batch, then
     // append the rest so long transcripts are fully preserved.
     const MAX_BLOCKS = 100;
-    const firstBatch = children.slice(0, MAX_BLOCKS);
 
-    const res = await fetch('https://api.notion.com/v1/pages', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${notionToken}`,
-        'Notion-Version': '2022-06-28',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        parent: { database_id: notionDatabaseId },
-        properties,
-        ...(firstBatch.length ? { children: firstBatch } : {}),
-      }),
-    });
+    const createPage = (blocks: any[], version: string) =>
+      fetch('https://api.notion.com/v1/pages', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${notionToken}`,
+          'Notion-Version': version,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          parent: { database_id: notionDatabaseId },
+          properties,
+          ...(blocks.length ? { children: blocks.slice(0, MAX_BLOCKS) } : {}),
+        }),
+      });
+
+    let usedBlocks = children;
+    let usedVersion = NOTION_MEDIA_VERSION;
+    let res = await createPage(usedBlocks, usedVersion);
+
+    // If the media-version payload or the uploaded images are the problem, a
+    // meeting note with captions beats a meeting note that never appears.
+    if (!res.ok && visualSection.imageCount > 0) {
+      const errText = await res.text().catch(() => '');
+      console.warn(
+        `JARVIS: Notion rejected the embedded visuals (HTTP ${res.status}) — retrying the note without images: ${errText.slice(0, 200)}`
+      );
+      usedBlocks = children.filter((b: any) => b.type !== 'image');
+      usedVersion = NOTION_TEXT_VERSION;
+      res = await createPage(usedBlocks, usedVersion);
+    }
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -1909,12 +2697,191 @@ ${transcript.slice(0, 30000)}`;
 
     const data = await res.json();
 
-    const leftover = children.slice(MAX_BLOCKS);
+    const leftover = usedBlocks.slice(MAX_BLOCKS);
     if (leftover.length) {
-      await this.notionAppendBlocks(notionToken, data.id, leftover);
+      await this.notionAppendBlocks(notionToken, data.id, leftover, usedVersion);
+    }
+
+    // Only count images that actually made it into the page (the retry strips
+    // them when Notion rejects the media version).
+    this.lastNotionImageCount = usedBlocks.some((b: any) => b.type === 'image')
+      ? visualSection.imageCount
+      : 0;
+    if (this.lastNotionImageCount > 0) {
+      console.log(`JARVIS: 🖼  ${this.lastNotionImageCount} visual image(s) embedded in the Notion note.`);
     }
 
     return data.url || null;
+  }
+
+  /**
+   * Build the "Diagrams & Visuals" section: one heading + description per
+   * captured visual, with the screenshot itself attached through Notion's file
+   * upload API when it works and a text reference to the local file when it
+   * doesn't.
+   */
+  private async notionVisualBlocks(
+    token: string,
+    visuals: MeetingVisual[]
+  ): Promise<{ blocks: any[]; imageCount: number }> {
+    if (visuals.length === 0) return { blocks: [], imageCount: 0 };
+
+    const blocks: any[] = [
+      {
+        object: 'block',
+        type: 'heading_2',
+        heading_2: {
+          rich_text: [{ type: 'text', text: { content: 'Diagrams & Visuals' } }],
+        },
+      },
+      {
+        object: 'block',
+        type: 'paragraph',
+        paragraph: {
+          rich_text: [
+            {
+              type: 'text',
+              text: {
+                content: `Captured automatically from the shared screen — ${visuals.length} visual${
+                  visuals.length === 1 ? '' : 's'
+                }.`,
+              },
+            },
+          ],
+        },
+      },
+    ];
+
+    let imageCount = 0;
+    for (let i = 0; i < visuals.length; i++) {
+      const visual = visuals[i];
+      blocks.push({
+        object: 'block',
+        type: 'heading_3',
+        heading_3: {
+          rich_text: [
+            {
+              type: 'text',
+              text: {
+                content: `${i + 1}. ${visual.title} (${visualTypeLabel(visual.type)} · ${visual.clock})`,
+              },
+            },
+          ],
+        },
+      });
+
+      blocks.push({
+        object: 'block',
+        type: 'paragraph',
+        paragraph: {
+          rich_text: [
+            { type: 'text', text: { content: visual.description || 'Captured from the presented screen.' } },
+          ],
+        },
+      });
+
+      if (visual.textOnScreen) {
+        blocks.push({
+          object: 'block',
+          type: 'quote',
+          quote: {
+            rich_text: [{ type: 'text', text: { content: visual.textOnScreen.slice(0, 1900) } }],
+          },
+        });
+      }
+
+      const uploadId = await this.notionUploadFile(token, visual.imagePath);
+      if (uploadId) {
+        blocks.push({
+          object: 'block',
+          type: 'image',
+          image: { type: 'file_upload', file_upload: { id: uploadId } },
+        });
+        imageCount++;
+      } else if (visual.imagePath) {
+        blocks.push({
+          object: 'block',
+          type: 'paragraph',
+          paragraph: {
+            rich_text: [
+              { type: 'text', text: { content: `Screenshot saved locally: ${visual.imagePath}` } },
+            ],
+          },
+        });
+      }
+
+      if (visual.transcriptContext) {
+        blocks.push({
+          object: 'block',
+          type: 'quote',
+          quote: {
+            rich_text: [
+              {
+                type: 'text',
+                text: { content: `Spoken around then — ${visual.transcriptContext.slice(0, 900)}` },
+              },
+            ],
+          },
+        });
+      }
+    }
+
+    return { blocks, imageCount };
+  }
+
+  /**
+   * Notion's file upload flow: create an upload slot, push the bytes as
+   * multipart, and hand back the id that image blocks reference. Returns null on
+   * any failure — the caller then falls back to a text reference.
+   */
+  private async notionUploadFile(token: string, filePath: string): Promise<string | null> {
+    try {
+      if (!filePath || !fs.existsSync(filePath)) return null;
+      const buffer = fs.readFileSync(filePath);
+      if (buffer.byteLength > 20 * 1024 * 1024) return null;
+      const filename = path.basename(filePath);
+
+      const createRes = await fetch('https://api.notion.com/v1/file_uploads', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Notion-Version': NOTION_MEDIA_VERSION,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ filename, content_type: 'image/png' }),
+      });
+      if (!createRes.ok) {
+        console.warn(`JARVIS: Notion file-upload init failed (HTTP ${createRes.status})`);
+        return null;
+      }
+
+      const created = await createRes.json();
+      if (!created?.id) return null;
+
+      const form = new FormData();
+      form.append('file', new Blob([new Uint8Array(buffer)], { type: 'image/png' }), filename);
+
+      const sendRes = await fetch(
+        created.upload_url || `https://api.notion.com/v1/file_uploads/${created.id}/send`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Notion-Version': NOTION_MEDIA_VERSION },
+          body: form,
+        }
+      );
+      if (!sendRes.ok) {
+        const errText = await sendRes.text().catch(() => '');
+        console.warn(
+          `JARVIS: Notion file send failed (HTTP ${sendRes.status}) — ${errText.slice(0, 160)}`
+        );
+        return null;
+      }
+
+      return created.id as string;
+    } catch (e: any) {
+      console.warn('JARVIS: Notion image upload note:', e?.message);
+      return null;
+    }
   }
 
   /** Resolve usable Notion database property payloads from the live schema. */
@@ -1972,7 +2939,12 @@ ${transcript.slice(0, 30000)}`;
   }
 
   /** Append blocks to a page in <=100-block batches. */
-  private async notionAppendBlocks(token: string, pageId: string, blocks: any[]) {
+  private async notionAppendBlocks(
+    token: string,
+    pageId: string,
+    blocks: any[],
+    version: string = NOTION_TEXT_VERSION
+  ) {
     for (let i = 0; i < blocks.length; i += 100) {
       const batch = blocks.slice(i, i + 100);
       try {
@@ -1980,7 +2952,7 @@ ${transcript.slice(0, 30000)}`;
           method: 'PATCH',
           headers: {
             Authorization: `Bearer ${token}`,
-            'Notion-Version': '2022-06-28',
+            'Notion-Version': version,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({ children: batch }),
@@ -2060,6 +3032,12 @@ ${transcript.slice(0, 30000)}`;
 
     if (this.state.monitorInterval) clearInterval(this.state.monitorInterval);
     if (this.state.captionInterval) clearTimeout(this.state.captionInterval);
+    if (this.state.visualInterval) clearTimeout(this.state.visualInterval);
+
+    this._visualActive = false;
+    this._visualBusy = false;
+    this.lastFingerprint = null;
+    this.lastFrameBytes = null;
 
     // Mark as not recording so any already-running async tick won't reschedule
     this.state.isRecording = false;
@@ -2078,6 +3056,15 @@ ${transcript.slice(0, 30000)}`;
       isRecording: this.state?.isRecording || false,
       isSyncingNotion: this._isSyncingNotion,
       captionsCollected: this.state?.captionLog?.length || 0,
+      visualsCaptured: this.state?.visuals?.length || 0,
+      visualFramesAttempted: this.framesAttempted,
+      visuals: (this.state?.visuals || []).map((v) => ({
+        id: v.id,
+        clock: v.clock,
+        timestamp: v.timestamp,
+        imageUrl: v.imageUrl,
+        source: v.source,
+      })),
       platform: this.state?.meetingPlatform || null,
       statusMessage:
         this.state?.statusMessage ||
@@ -2087,7 +3074,342 @@ ${transcript.slice(0, 30000)}`;
           ? 'In Meeting'
           : 'Idle'),
       lastResult: this.lastResult,
+      qa: this.qaAvailability(),
+      studyKit: this.lastStudyKit
+        ? {
+            flashcards: this.lastStudyKit.flashcards.length,
+            formulas: this.lastStudyKit.formulas.length,
+            generatedAt: this.lastStudyKit.generatedAt,
+          }
+        : null,
     };
+  }
+
+  /** What (if anything) the Q&A box can answer from right now. */
+  qaAvailability() {
+    const live = !!this.state && (this.state.captionLog?.length || 0) > 0;
+    const turns = live
+      ? this.state!.captionLog.length
+      : this.lastSession?.turns.filter((turn) => turn.text).length || 0;
+    return {
+      available: turns > 0,
+      turns,
+      live,
+      title: live ? this.state!.meetingTitle || null : this.lastSession?.title || null,
+      visuals: live ? this.state!.visuals.length : this.lastSession?.visuals.length || 0,
+    };
+  }
+
+  /** The transcript + visuals the last question should be answered from. */
+  private qaContext(): { turns: MeetingTurn[]; visuals: QaVisualRef[]; source: 'live' | 'last' } | null {
+    if (this.state?.captionLog?.length) {
+      const startedAt = this.state.startedAt || Date.now();
+      return {
+        turns: turnsFromCaptions(
+          this.state.captionLog.map((entry) => ({
+            speaker: entry.speaker,
+            text: entry.text,
+            at: Date.parse(entry.timestamp) || startedAt,
+          })),
+          startedAt
+        ),
+        // Live frames are unlabelled (the vision pass runs after the meeting),
+        // so the transcript line captured alongside them is the description.
+        visuals: this.state.visuals.map((visual) => ({
+          title: `Screen capture ${visual.clock}`,
+          clock: visual.clock,
+          description: (visual.captionContext || '').slice(-400),
+          imageUrl: visual.imageUrl,
+          offset: offsetClock(Date.parse(visual.timestamp) - startedAt),
+        })),
+        source: 'live',
+      };
+    }
+    if (this.lastSession?.turns.length) {
+      return {
+        turns: this.lastSession.turns,
+        visuals: this.lastSession.visuals.map((visual) => ({
+          title: visual.title,
+          clock: visual.clock,
+          description: visual.description,
+          imageUrl: visual.imageUrl,
+          textOnScreen: visual.textOnScreen,
+          offset: offsetClock(Date.parse(visual.timestamp) - (this.lastSession?.startedAt || 0)),
+        })),
+        source: 'last',
+      };
+    }
+    return null;
+  }
+
+  /**
+   * One Gemini JSON call, tuned for latency.
+   *
+   * flash-lite with thinking switched off answers a transcript question in a
+   * couple of seconds; flash is the fallback when lite is unavailable on the
+   * key. Returns null instead of throwing so callers can fall through to the
+   * LLM chain.
+   */
+  private async geminiJson(
+    prompt: string,
+    opts: {
+      maxOutputTokens: number;
+      temperature?: number;
+      models?: string[];
+      /** Total time this call may spend across every model attempt. */
+      budgetMs?: number;
+      /** Ceiling for a single request; long generations need more than chat. */
+      attemptTimeoutMs?: number;
+    } = { maxOutputTokens: 1024 }
+  ): Promise<unknown | null> {
+    const key = process.env.GEMINI_API_KEY;
+    if (!key) return null;
+    // Newest lite models first: a transcript question is a quoting task, and the
+    // lite tier answers it several times faster than the full flash model.
+    const models = opts.models || [
+      'gemini-flash-lite-latest',
+      'gemini-3.5-flash-lite',
+      'gemini-flash-latest',
+    ];
+    const deadline = Date.now() + (opts.budgetMs ?? 20_000);
+
+    for (const model of models) {
+      // `thinkingLevel: low` is supported by the current models but rejected by
+      // some older ids, so each model gets one retry without any thinking hint.
+      for (const thinking of [{ thinkingLevel: 'low' }, null] as Array<
+        Record<string, unknown> | null
+      >) {
+        const remaining = deadline - Date.now();
+        if (remaining < 1500) return null;
+        try {
+          const res = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              signal: AbortSignal.timeout(Math.min(remaining, opts.attemptTimeoutMs ?? 15_000)),
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: {
+                  responseMimeType: 'application/json',
+                  maxOutputTokens: opts.maxOutputTokens,
+                  ...(thinking ? { thinkingConfig: thinking } : {}),
+                  temperature: opts.temperature ?? 0.2,
+                },
+              }),
+            }
+          );
+          if (!res.ok) {
+            console.warn(`JARVIS: ${model} returned HTTP ${res.status}`);
+            // 400 = this model dislikes the thinking hint; retry it bare.
+            if (res.status === 400 && thinking) continue;
+            break;
+          }
+          const data = await res.json();
+          const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (text) {
+            const parsed = extractJsonObject<unknown>(text);
+            if (parsed) return parsed;
+          }
+          break;
+        } catch (e: any) {
+          // Timeout or network: stop spending this call's budget on this model.
+          console.warn(`JARVIS: ${model} note:`, e?.message);
+          break;
+        }
+      }
+    }
+    return null;
+  }
+
+  /** Questions already answered this session, so a repeat is instant. */
+  private qaAnswers: Map<string, MeetingAnswer> | null = null;
+  private get qaCache(): Map<string, MeetingAnswer> {
+    // Lazily created rather than a field initialiser: the service is a
+    // singleton, and a hot-reloaded module can patch methods onto an instance
+    // built from the previous class body (where the field never ran).
+    if (!this.qaAnswers) this.qaAnswers = new Map();
+    return this.qaAnswers;
+  }
+
+  /**
+   * Answer a question about the running or last meeting from the transcript.
+   *
+   * Latency is the feature here: flash-lite, no thinking budget, a small output
+   * cap, and a per-session answer cache. The LLM chain is only touched when
+   * Gemini is unreachable.
+   */
+  async ask(rawQuestion: string): Promise<{
+    success: boolean;
+    answer?: string;
+    citations?: MeetingAnswer['citations'];
+    followUps?: string[];
+    source?: 'live' | 'last';
+    turns?: number;
+    cached?: boolean;
+    /** Which path answered — the panel shows when a fallback model was used. */
+    provider?: 'gemini' | 'chain';
+    error?: string;
+  }> {
+    const question = (rawQuestion || '').trim().slice(0, 500);
+    if (!question) return { success: false, error: 'Ask a question first.' };
+
+    const context = this.qaContext();
+    if (!context) {
+      return {
+        success: false,
+        error: 'No transcript yet — join a meeting, or let JARVIS attend one, then ask.',
+      };
+    }
+
+    const cacheKey = `${context.turns.length}:${question.toLowerCase()}`;
+    const cached = this.qaCache.get(cacheKey);
+    if (cached) {
+      return {
+        success: true,
+        answer: cached.answer,
+        citations: cached.citations,
+        followUps: cached.followUps,
+        source: context.source,
+        turns: context.turns.length,
+        cached: true,
+      };
+    }
+
+    const prompt = buildMeetingQaPrompt({
+      question,
+      turns: context.turns,
+      visuals: context.visuals,
+      title: context.source === 'live' ? this.state?.meetingTitle : this.lastSession?.title,
+      platform: context.source === 'live' ? this.state?.meetingPlatform : this.lastSession?.platform,
+    });
+
+    let provider: 'gemini' | 'chain' = 'gemini';
+    let answer = normalizeMeetingAnswer(
+      await this.geminiJson(prompt, {
+        maxOutputTokens: 900,
+        temperature: 0.15,
+        // Hard cap: a slow provider must not leave the panel spinning. After
+        // this the LLM chain takes over rather than making the user wait more.
+        budgetMs: 12_000,
+      }),
+      context.turns,
+      context.visuals
+    );
+
+    if (!answer) {
+      provider = 'chain';
+      try {
+        const { runLlmChain } = await import('@/services/LlmChain');
+        const result = await runLlmChain(`${prompt}\n\nReturn ONLY the raw JSON object.`, {
+          maxTokens: 1200,
+          temperature: 0.2,
+        });
+        if (result?.content) {
+          answer = normalizeMeetingAnswer(
+            extractJsonObject<unknown>(result.content),
+            context.turns,
+            context.visuals
+          );
+        }
+      } catch (e: any) {
+        console.warn('JARVIS: Q&A fallback note:', e?.message);
+      }
+    }
+
+    if (!answer) {
+      return { success: false, error: 'No answer came back — try rephrasing the question.' };
+    }
+
+    this.qaCache.set(cacheKey, answer);
+    if (this.qaCache.size > 60) {
+      const oldest = this.qaCache.keys().next().value;
+      if (oldest) this.qaCache.delete(oldest);
+    }
+
+    return {
+      success: true,
+      answer: answer.answer,
+      citations: answer.citations,
+      followUps: answer.followUps,
+      source: context.source,
+      turns: context.turns.length,
+      provider,
+    };
+  }
+
+  /** Everything the revision exports need, from the last finished session. */
+  getStudyKit(): { kit: StudyKit; source: StudyKitSource } | null {
+    if (!this.lastStudyKit) return null;
+    return { kit: this.lastStudyKit, source: this.studyKitSource() };
+  }
+
+  private studyKitSource(): StudyKitSource {
+    const summary = this.lastSession?.summary || this.lastResult?.summary;
+    return {
+      title: this.lastSession?.title || this.lastResult?.title,
+      summary: summary?.summary,
+      concepts: summary?.concepts,
+      visuals: (this.lastSession?.visuals || []).map((visual) => ({
+        title: visual.title,
+        description: visual.description,
+        clock: visual.clock,
+        textOnScreen: visual.textOnScreen,
+      })),
+    };
+  }
+
+  /** Build the flashcards + formula sheet for the last finished meeting. */
+  async buildStudyKit(): Promise<{ success: boolean; kit?: StudyKit; error?: string }> {
+    const session = this.lastSession;
+    if (!session || !session.turns.length) {
+      return { success: false, error: 'No finished meeting to revise yet.' };
+    }
+
+    const source = this.studyKitSource();
+    const transcript = session.turns
+      .map((turn, i) => `[${i + 1}] ${turn.clock} ${turn.speaker}: ${turn.text}`)
+      .join('\n')
+      .slice(0, 160_000);
+
+    const prompt = buildStudyKitPrompt({
+      transcript,
+      source,
+      meetingTitle: session.title,
+      platform: session.platform,
+    });
+
+    let kit = normalizeStudyKit(
+      await this.geminiJson(prompt, {
+        maxOutputTokens: 6000,
+        temperature: 0.3,
+        models: ['gemini-flash-latest', 'gemini-3.5-flash'],
+        // Building 20 cards is a one-off click, but it still has a ceiling.
+        budgetMs: 45_000,
+      }),
+      session.title
+    );
+
+    if (!kit) {
+      try {
+        const { runLlmChain } = await import('@/services/LlmChain');
+        const result = await runLlmChain(`${prompt}\n\nReturn ONLY the raw JSON object.`, {
+          maxTokens: 6000,
+          temperature: 0.3,
+        });
+        if (result?.content) {
+          kit = normalizeStudyKit(extractJsonObject<unknown>(result.content), session.title);
+        }
+      } catch (e: any) {
+        console.warn('JARVIS: study kit fallback note:', e?.message);
+      }
+    }
+
+    if (!kit) kit = studyKitFromSummary(source);
+    if (!kit) return { success: false, error: 'No revision material could be generated.' };
+
+    this.lastStudyKit = kit;
+    return { success: true, kit };
   }
 
   async getPageDebugInfo(): Promise<any> {
