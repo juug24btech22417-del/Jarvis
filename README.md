@@ -215,6 +215,18 @@ Then the keyboard does the rest — `Alt+A` answer now, `Alt+S` summarise, `Alt+
 
 Underneath: a live transcript, a context brain that decides when to speak up, a queue, and streaming answers.
 
+### The Orb — floating desktop companion
+
+A frameless, transparent, always-on-top desktop companion (`npm run orb`, summon/hide via `Ctrl+Shift+O`) providing an unobtrusive companion surface with real-time agency:
+
+- **Universal Drag-and-Drop Ingestion:** Drag files, source scripts, or screenshots directly onto the orb for immediate streaming analysis and automated bug detection.
+- **Desktop Screen Reticle:** Real-time active window and foreground process interrogation, locking onto targets via element grounding for instant contextual auto-pilot actions.
+- **Cross-App Magic Clipboard Stash:** Background OS clipboard monitoring with automatic classification (`code`, `error`, `url`, `text`) and rapid synthesis into structured bug reports or executive briefs.
+- **Silent Ghost Worker:** Asynchronous multi-step agent delegation executing web research and complex tasks in the background with human-in-the-loop checkpoint approvals, delivering synthesized results directly without unwanted browser takeovers.
+- **Circle-to-Act Teleportation:** Instant screen capture and semantic task execution anchored to active desktop context.
+- **Organic Micro-Gestures:** Dynamic cognitive head tilts, gaze tracking, micro-saccades, and status plasma states reflecting live reasoning.
+- **Interactive Location Navigation:** Intelligently provides clickable Google Maps links for venue recommendations that open directly in your browser.
+
 ### Autonomy — a real ReAct loop
 
 The model picks **one** tool per turn. The tool actually runs. The true output is fed back before the next decision. No simulation, no narration of actions it did not take.
