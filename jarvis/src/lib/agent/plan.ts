@@ -491,14 +491,37 @@ export function heuristicPlan(goal: string): AgentPlan | null {
     ]);
   }
 
-  // ── find X and open it (the classic) ───────────────────────────────────
+  // ── find X (search and answer, or search and open if requested) ──────────
   m = g.match(/^(?:find|search for|look up|get me|recommend)(?: me)? (?:the )?(.{4,90}?)(?: and open (?:it|that|the best(?: one)?))?$/i);
   if (m && !tooComplex && !multiOpenIntent(g) && !MACHINE_CATS.has(category)) {
-    const query = m[1].replace(/\s+and open.*$/i, "").trim();
-    return wrap(`Find and open: ${query}`, [
-      { id: "f1", kind: "firecrawl_search", title: `Search: ${query}`, params: { query, limit: 5 } },
-      { id: "f2", kind: "llm_decide", title: "Pick the best match", params: { question: `Best match for: ${query}`, input: "from:f1" }, dependsOn: ["f1"] },
-      { id: "f3", kind: "browser_open", title: "Open the best result", params: { url: "from:f2.url" }, dependsOn: ["f2"] },
+    const wantsOpen = /\band open\b/i.test(g) || /\bopen (?:it|them|the|in (?:browser|tabs?))\b/i.test(g);
+    let query = m[1].replace(/\s+and open.*$/i, "").trim();
+    // Resolve location intent
+    if (/\b(?:near me|nearby|around here|locally)\b/i.test(query)) {
+      query = query.replace(/\b(?:near me|nearby|around here|locally)\b/gi, "in Bengaluru");
+    }
+
+    if (wantsOpen) {
+      return wrap(`Find and open: ${query}`, [
+        { id: "f1", kind: "firecrawl_search", title: `Search: ${query}`, params: { query, limit: 5 } },
+        { id: "f2", kind: "llm_decide", title: "Pick the best match", params: { question: `Best match for: ${query}`, input: "from:f1" }, dependsOn: ["f1"] },
+        { id: "f3", kind: "browser_open", title: "Open the best result", params: { url: "from:f2.url" }, dependsOn: ["f2"] },
+      ]);
+    }
+
+    // Default to answering and synthesizing the information directly without opening tabs!
+    return wrap(`Find and answer: ${query}`, [
+      { id: "f1", kind: "firecrawl_search", title: `Search: ${query}`, params: { query, limit: 6 } },
+      {
+        id: "f2",
+        kind: "llm_summarize",
+        title: "Synthesize findings & recommendations",
+        params: {
+          prompt: `Directly answer the user's request with a clean, bulleted breakdown including specific names, details, and recommendations for: ${query}. For each cafe, restaurant, place, or venue mentioned, ALWAYS provide an exact clickable Google Maps link in this format: [📍 View on Map](https://www.google.com/maps/search/?api=1&query=ENCODED_NAME_AND_LOCATION) so the user can tap it to open directly.`,
+          inputs: ["from:f1"],
+        },
+        dependsOn: ["f1"],
+      },
     ]);
   }
 

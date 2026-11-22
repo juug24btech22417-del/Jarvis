@@ -839,3 +839,50 @@ html[data-theme="quantum"] .reactor-glow {
   min-height: 0 !important;
   max-height: 100% !important;
 }
+
+/* ═══ Desktop orb ═══ */
+
+/* The orb's window is transparent (overlay/orb.js), so nothing may paint an
+   opaque background — not the html element, not the body. Keyed off the orb's
+   own root element, which is in the first HTML chunk, so even the first frame
+   is transparent; `!important` beats the global `body { background:#000 }`
+   rule above. */
+html:has(main.orb-surface),
+html:has(main.orb-surface) body {
+  background: transparent !important;
+}
+
+/* The bubble the orb speaks through: glass, but darker than the in-app panel so
+   it stays readable over a bright desktop (docs, slides, a white website). */
+.orb-panel {
+  border-radius: 16px;
+  /* Darker than the in-app glass on purpose: the orb floats over screenshots,
+     white websites and slides, and the text has to stay readable there. */
+  background: rgba(10, 12, 15, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  box-shadow:
+    0 12px 32px -10px rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(22px) saturate(150%);
+  -webkit-backdrop-filter: blur(22px) saturate(150%);
+  animation: orbPanelIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes orbPanelIn {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* The faces next/font self-hosts are already on <body> as CSS variables (see
+   app/layout.tsx); the remote Google-Fonts @import at the top of this file is
+   blocked by the Electron renderer's CSP, so the orb reads the variables
+   directly. Scoped to the orb — the rest of the app keeps its current stack. */
+.orb-surface {
+  font-family: var(--font-rajdhani), Rajdhani, sans-serif;
+}
+.orb-surface .font-orbitron {
+  font-family: var(--font-orbitron), Orbitron, sans-serif;
+}
+.orb-surface .font-rajdhani {
+  font-family: var(--font-rajdhani), Rajdhani, sans-serif;
+}

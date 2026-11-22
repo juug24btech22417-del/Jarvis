@@ -100,6 +100,7 @@ function routeCodeToForge(
  * Returns the cleaned goal, or null when this isn't a mission.
  */
 function matchMissionCommand(text: string): string | null {
+  if (text.startsWith("[")) return null;
   const t = text.trim().replace(/^(?:hey\s+)?jarvis[,:]?\s*/i, "").trim();
 
   // 1. Explicit prefix: "mission: find …" / "mission find …"
@@ -501,6 +502,9 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
 
   // Process system control commands (volume, clipboard, battery, network)
   const processSystemCommand = async (text: string): Promise<string | null> => {
+    // Ingested files, code reviews, orb system tags, and structured payloads
+    // should NEVER be intercepted as local system commands or missions.
+    if (text.startsWith("[")) return null;
     const lower = text.toLowerCase();
 
     // ─── AVENGERS ASSEMBLE ───────────────────────────────────────────────
@@ -4513,6 +4517,33 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
     // Fire the chat immediately — no abort signal, no race.
     await sendToClaude(text);
   };
+
+  // ── Orb bridge ─────────────────────────────────────────────────────────
+  // The desktop orb (src/app/orb) mounts this bar hidden and drives it through
+  // the store, so a typed or spoken instruction there runs THIS pipeline —
+  // system commands, intent routing, providers, memory, speech. One
+  // implementation of "what JARVIS can do", two faces.
+  //
+  // The effect deliberately reads the current `handleSubmit`/`handleVoiceToggle`
+  // closures: the trigger is a store field, and the run happens once per bump.
+  const pendingCommand = useJarvisStore((s) => s.pendingCommand);
+  const consumePendingCommand = useJarvisStore((s) => s.consumePendingCommand);
+  const pendingVoiceToggle = useJarvisStore((s) => s.pendingVoiceToggle);
+  const lastVoiceToggle = useRef(0);
+
+  useEffect(() => {
+    if (!pendingCommand) return;
+    consumePendingCommand();
+    void handleSubmit(pendingCommand);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingCommand, consumePendingCommand]);
+
+  useEffect(() => {
+    if (pendingVoiceToggle === lastVoiceToggle.current) return;
+    lastVoiceToggle.current = pendingVoiceToggle;
+    handleVoiceToggle();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingVoiceToggle]);
 
   // (handleVoiceToggle is defined above)
 

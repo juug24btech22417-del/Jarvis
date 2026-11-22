@@ -64,6 +64,36 @@ export interface ClipboardAssist {
   at: number;
 }
 
+export interface StashedClip {
+  id: string;
+  text: string;
+  kind: "code" | "error" | "url" | "text";
+  label: string;
+  source?: string;
+  timestamp: number;
+}
+
+export interface GhostWorker {
+  id: string;
+  title: string;
+  goal: string;
+  progress: number;
+  status: "running" | "waiting_approval" | "completed" | "failed";
+  step: string;
+  approvalPrompt?: string;
+  result?: string;
+  createdAt: number;
+}
+
+export interface ScreenReticle {
+  active: boolean;
+  target?: string;
+  role?: string;
+  confidence?: number;
+  action?: string;
+  details?: string;
+}
+
 interface JarvisStore {
   // Core state
   state: JarvisState;
@@ -212,6 +242,38 @@ interface JarvisStore {
   // OS-wide clipboard assistant — latest captured clip + its smart analysis.
   clipboardAssist: ClipboardAssist | null;
   setClipboardAssist: (assist: ClipboardAssist | null) => void;
+
+  // ── Desktop Orb Jaw-Dropping Capabilities ─────────────────────────────
+  /** Ingestion feedback (drag & drop singularity) */
+  orbIngestFeedback: { active: boolean; label: string; kind?: string } | null;
+  setOrbIngestFeedback: (feedback: JarvisStore["orbIngestFeedback"]) => void;
+
+  /** Screen Reticle mode & target info */
+  screenReticle: ScreenReticle | null;
+  setScreenReticle: (reticle: ScreenReticle | null) => void;
+
+  /** Multi-slot clipboard stash (up to 5 items across apps) */
+  clipboardStash: StashedClip[];
+  addToClipboardStash: (clip: { text: string; kind?: StashedClip["kind"]; source?: string }) => void;
+  removeFromClipboardStash: (id: string) => void;
+  clearClipboardStash: () => void;
+
+  /** Autonomous background ghost workers */
+  ghostWorkers: GhostWorker[];
+  startGhostWorker: (worker: Omit<GhostWorker, "id" | "createdAt"> & { id?: string }) => string;
+  updateGhostWorker: (id: string, update: Partial<GhostWorker>) => void;
+  removeGhostWorker: (id: string) => void;
+
+  // ── Desktop orb bridge ─────────────────────────────────────────────────
+  // The floating orb window mounts CommandBar hidden and drives it through
+  // these two fields, so asking from the orb runs the identical pipeline.
+  /** A line the orb (or any other surface) wants CommandBar to execute. */
+  pendingCommand: string | null;
+  queueCommand: (text: string) => void;
+  consumePendingCommand: () => void;
+  /** Bumped by the orb's mic button; CommandBar toggles listening on change. */
+  pendingVoiceToggle: number;
+  queueVoiceToggle: () => void;
 }
 
 export const useJarvisStore = create<JarvisStore>((set) => ({
@@ -394,5 +456,86 @@ export const useJarvisStore = create<JarvisStore>((set) => ({
 
   // OS-wide clipboard assistant
   clipboardAssist: null,
-  setClipboardAssist: (clipboardAssist) => set({ clipboardAssist }),
+  setClipboardAssist: (clipboardAssist) =>
+    set((state) => {
+      if (clipboardAssist?.text) {
+        const clean = clipboardAssist.text.trim();
+        const existing = state.clipboardStash.filter((c) => c.text.trim() !== clean);
+        const isUrl = /^https?:\/\//i.test(clean);
+        const isError = /error|traceback|exception|failed|fatal/i.test(clean);
+        const isCode = /[{};=>]|\bdef\b|\bfunction\b|\bconst\b|\bimport\b/.test(clean);
+        const kind: StashedClip["kind"] = (clipboardAssist.detection?.kind as any) || (isError ? "error" : isCode ? "code" : isUrl ? "url" : "text");
+        const newItem: StashedClip = {
+          id: clipboardAssist.id || Math.random().toString(36).substring(7),
+          text: clean,
+          kind,
+          label: clean.split("\n")[0].slice(0, 42),
+          source: clipboardAssist.source,
+          timestamp: clipboardAssist.at || Date.now(),
+        };
+        return {
+          clipboardAssist,
+          clipboardStash: [newItem, ...existing].slice(0, 5),
+        };
+      }
+      return { clipboardAssist };
+    }),
+
+  // Desktop Orb Jaw-Dropping Features
+  orbIngestFeedback: null,
+  setOrbIngestFeedback: (orbIngestFeedback) => set({ orbIngestFeedback }),
+
+  screenReticle: null,
+  setScreenReticle: (screenReticle) => set({ screenReticle }),
+
+  clipboardStash: [],
+  addToClipboardStash: (clip) =>
+    set((state) => {
+      const clean = clip.text.trim();
+      if (!clean) return state;
+      const existing = state.clipboardStash.filter((c) => c.text.trim() !== clean);
+      const isUrl = /^https?:\/\//i.test(clean);
+      const isError = /error|traceback|exception|failed|fatal/i.test(clean);
+      const isCode = /[{};=>]|\bdef\b|\bfunction\b|\bconst\b|\bimport\b/.test(clean);
+      const kind: StashedClip["kind"] = clip.kind ?? (isError ? "error" : isCode ? "code" : isUrl ? "url" : "text");
+      const label = clean.split("\n")[0].slice(0, 42);
+      const newItem: StashedClip = {
+        id: Math.random().toString(36).substring(7),
+        text: clean,
+        kind,
+        label,
+        source: clip.source,
+        timestamp: Date.now(),
+      };
+      return { clipboardStash: [newItem, ...existing].slice(0, 5) };
+    }),
+  removeFromClipboardStash: (id) =>
+    set((state) => ({ clipboardStash: state.clipboardStash.filter((c) => c.id !== id) })),
+  clearClipboardStash: () => set({ clipboardStash: [] }),
+
+  ghostWorkers: [],
+  startGhostWorker: (worker) => {
+    const id = worker.id || Math.random().toString(36).substring(7);
+    const newWorker: GhostWorker = {
+      ...worker,
+      id,
+      createdAt: Date.now(),
+    };
+    set((state) => ({ ghostWorkers: [newWorker, ...state.ghostWorkers.slice(0, 4)] }));
+    return id;
+  },
+  updateGhostWorker: (id, update) =>
+    set((state) => ({
+      ghostWorkers: state.ghostWorkers.map((w) => (w.id === id ? { ...w, ...update } : w)),
+    })),
+  removeGhostWorker: (id) =>
+    set((state) => ({ ghostWorkers: state.ghostWorkers.filter((w) => w.id !== id) })),
+
+  // Desktop orb bridge
+  pendingCommand: null,
+  queueCommand: (text) => set({ pendingCommand: text }),
+  consumePendingCommand: () => set({ pendingCommand: null }),
+  pendingVoiceToggle: 0,
+  queueVoiceToggle: () =>
+    set((state) => ({ pendingVoiceToggle: state.pendingVoiceToggle + 1 })),
 }));
