@@ -9,7 +9,7 @@
  *   5. Circle-to-Act Desktop Teleportation
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import {
   Mic,
   Send,
@@ -23,6 +23,13 @@ import {
   Sparkles,
   Upload,
   Trash2,
+  Eye,
+  Bug,
+  Search,
+  Zap,
+  FolderOpen,
+  AlertTriangle,
+  Wifi,
 } from "lucide-react";
 import CommandBar from "@/components/panels/CommandBar";
 import OrbCore, { ORB_TONES, type Gaze } from "@/components/orb/OrbCore";
@@ -40,6 +47,7 @@ declare global {
       dragEnd(): Promise<{ ok: boolean; moved: boolean }>;
       resize?(size: { width: number; height: number }): Promise<{ ok: boolean }>;
       openExternal?(url: string): void;
+      openPath?(filePath: string): Promise<{ ok: boolean; error?: string }>;
       hide(): void;
       quit(): void;
       openApp(): void;
@@ -130,8 +138,20 @@ export default function OrbPage() {
   const orbIngestFeedback = useJarvisStore((s) => s.orbIngestFeedback);
   const setOrbIngestFeedback = useJarvisStore((s) => s.setOrbIngestFeedback);
 
+  // New features store hooks
+  const contextLeech = useJarvisStore((s) => s.contextLeech);
+  const setContextLeech = useJarvisStore((s) => s.setContextLeech);
+  const ghostCopilot = useJarvisStore((s) => s.ghostCopilot);
+  const setGhostCopilot = useJarvisStore((s) => s.setGhostCopilot);
+  const omniQuery = useJarvisStore((s) => s.omniQuery);
+  const setOmniQuery = useJarvisStore((s) => s.setOmniQuery);
+  const envHealth = useJarvisStore((s) => s.envHealth);
+  const setEnvHealth = useJarvisStore((s) => s.setEnvHealth);
+
   const gazeRef = useRef<Gaze>({ x: 0, y: 0 });
   const inputRef = useRef<HTMLInputElement>(null);
+  const omniInputRef = useRef<HTMLInputElement>(null);
+  const copilotInputRef = useRef<HTMLInputElement>(null);
   const [inputOpen, setInputOpen] = useState(false);
   const [bubbleOpen, setBubbleOpen] = useState(false);
   const [draft, setDraft] = useState("");
@@ -143,6 +163,19 @@ export default function OrbPage() {
   const [showCircle, setShowCircle] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [statusNotification, setStatusNotification] = useState<string | null>(null);
+
+  // New feature trays
+  const [showLeech, setShowLeech] = useState(false);
+  const [leechLoading, setLeechLoading] = useState(false);
+  const [showCopilot, setShowCopilot] = useState(false);
+  const [copilotInput, setCopilotInput] = useState("");
+  const [copilotLoading, setCopilotLoading] = useState(false);
+  const [showOmni, setShowOmni] = useState(false);
+  const [omniInput, setOmniInput] = useState("");
+  const [omniLoading, setOmniLoading] = useState(false);
+  const [showEnvHeal, setShowEnvHeal] = useState(false);
+  const [envHealLoading, setEnvHealLoading] = useState(false);
+  const [healingId, setHealingId] = useState<string | null>(null);
 
   const notify = (msg: string) => {
     setStatusNotification(msg);
@@ -542,6 +575,210 @@ export default function OrbPage() {
     }
   };
 
+  // ── Feature 1: Context Leech — Live Screen Co-Pilot ─────────────────────
+  const triggerContextLeech = async () => {
+    setLeechLoading(true);
+    setShowLeech(true);
+    notify("Context Leech absorbing screen…");
+    try {
+      const res = await fetch("/api/orb/context-leech", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (data?.ok) {
+        setContextLeech({
+          active: true,
+          meetingTopic: data.meetingTopic,
+          tacticalBullets: data.tacticalBullets || [],
+          factChecks: data.factChecks || [],
+          suggestedQuestions: data.suggestedQuestions || [],
+          lastUpdated: Date.now(),
+        });
+        notify("Context absorbed ✓");
+      } else {
+        notify(data?.error || "Leech failed");
+      }
+    } catch {
+      notify("Context Leech: network error");
+    } finally {
+      setLeechLoading(false);
+    }
+  };
+
+  // ── Feature 3: Ghost Copilot — Bug Trapper ───────────────────────────────
+  const triggerGhostCopilot = async (errorTrace?: string) => {
+    const trace = (errorTrace || copilotInput).trim();
+    if (!trace) {
+      setShowCopilot(true);
+      setTimeout(() => copilotInputRef.current?.focus(), 80);
+      notify("Paste error trace & press Enter");
+      return;
+    }
+    setCopilotLoading(true);
+    notify("Ghost Copilot analyzing error…");
+    try {
+      const res = await fetch("/api/orb/copilot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "diagnose", errorTrace: trace }),
+      });
+      const data = await res.json();
+      if (data?.ok) {
+        setGhostCopilot({
+          active: true,
+          file: data.file || "unknown",
+          line: data.line,
+          errorSummary: data.errorSummary || "Error detected",
+          explanation: data.explanation || "",
+          proposedPatch: data.proposedPatch || "",
+          originalSnippet: data.originalSnippet,
+          patchedSnippet: data.patchedSnippet,
+          detectedAt: Date.now(),
+        });
+        setShowCopilot(true);
+        notify("Diagnosis complete ✓");
+      } else {
+        notify(data?.error || "Copilot failed");
+      }
+    } catch {
+      notify("Ghost Copilot: network error");
+    } finally {
+      setCopilotLoading(false);
+    }
+  };
+
+  const applyGhostCopilotFix = async () => {
+    if (!ghostCopilot) return;
+    notify("Applying patch with safety backup…");
+    try {
+      const res = await fetch("/api/orb/copilot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "apply",
+          file: ghostCopilot.file,
+          patchedCode: ghostCopilot.patchedSnippet || ghostCopilot.proposedPatch,
+        }),
+      });
+      const data = await res.json();
+      if (data?.ok) {
+        notify(`✓ Patch applied to ${ghostCopilot.file} (.bak saved)`);
+        setGhostCopilot({ ...ghostCopilot, active: false });
+        setShowCopilot(false);
+      } else {
+        notify(data?.error || "Patch apply failed");
+      }
+    } catch {
+      notify("Apply fix: network error");
+    }
+  };
+
+  // ── Feature 4: Omni-Query — Universal OS Deep Search ─────────────────────
+  const runOmniSearch = async (queryOverride?: string) => {
+    const q = (queryOverride || omniInput).trim();
+    if (!q) {
+      setShowOmni(true);
+      setTimeout(() => omniInputRef.current?.focus(), 80);
+      notify("Type a search query & press Enter");
+      return;
+    }
+    setOmniLoading(true);
+    notify("Omni-Query searching…");
+    try {
+      const res = await fetch("/api/orb/omni-query", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "search", query: q }),
+      });
+      const data = await res.json();
+      if (data?.ok) {
+        setOmniQuery({
+          query: q,
+          totalFound: data.totalFound,
+          files: data.files || [],
+          scannedPath: data.scannedPath,
+        });
+        setShowOmni(true);
+        notify(`Found ${data.totalFound} file(s)`);
+      } else {
+        notify(data?.error || "Omni-Query failed");
+      }
+    } catch {
+      notify("Omni-Query: network error");
+    } finally {
+      setOmniLoading(false);
+    }
+  };
+
+  const openOmniFile = async (filePath: string) => {
+    if ((window.jarvisOrb as any)?.openPath) {
+      await (window.jarvisOrb as any).openPath(filePath);
+      return;
+    }
+    await fetch("/api/orb/omni-query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "open", filePath }),
+    });
+  };
+
+  // ── Feature 6: Self-Healing Environment Daemon ───────────────────────────
+  const scanEnvHealth = async () => {
+    setEnvHealLoading(true);
+    notify("Scanning dev environment…");
+    try {
+      const res = await fetch("/api/orb/env-heal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "scan" }),
+      });
+      const data = await res.json();
+      if (data?.ok) {
+        setEnvHealth({
+          healthy: data.healthy,
+          issues: data.issues || [],
+          lastChecked: Date.now(),
+        });
+        setShowEnvHeal(true);
+        notify(data.healthy ? "Environment healthy ✓" : `${data.issues.length} issue(s) detected`);
+      } else {
+        notify(data?.error || "Scan failed");
+      }
+    } catch {
+      notify("Env Heal: network error");
+    } finally {
+      setEnvHealLoading(false);
+    }
+  };
+
+  const healEnvIssue = async (issue: { id: string; type: string; pid?: number }) => {
+    setHealingId(issue.id);
+    notify(`Healing: ${issue.id}…`);
+    try {
+      const res = await fetch("/api/orb/env-heal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "heal", issueId: issue.id, type: issue.type, pid: issue.pid }),
+      });
+      const data = await res.json();
+      if (data?.ok) {
+        notify(`✓ ${data.message}`);
+        if (envHealth) {
+          const remaining = envHealth.issues.filter((i) => i.id !== issue.id);
+          setEnvHealth({ ...envHealth, issues: remaining, healthy: remaining.length === 0 });
+        }
+      } else {
+        notify(data?.error || "Heal failed");
+      }
+    } catch {
+      notify("Heal: network error");
+    } finally {
+      setHealingId(null);
+    }
+  };
+
   const submit = (e?: React.FormEvent) => {
     e?.preventDefault();
     const text = draft.trim();
@@ -553,6 +790,11 @@ export default function OrbPage() {
       setInputOpen(false);
       return;
     }
+
+    if (text.startsWith("/leech")) { void triggerContextLeech(); setDraft(""); return; }
+    if (text.startsWith("/copilot")) { void triggerGhostCopilot(text.replace(/^\/copilot\s*/i, "")); setDraft(""); return; }
+    if (text.startsWith("/omni")) { const q = text.replace(/^\/omni\s*/i, ""); setOmniInput(q); void runOmniSearch(q); setDraft(""); return; }
+    if (text.startsWith("/heal")) { void scanEnvHealth(); setDraft(""); return; }
 
     if (text.startsWith("/ghost")) {
       void launchGhostWorker(text);
@@ -581,6 +823,10 @@ export default function OrbPage() {
     showStash ||
     showReticle ||
     showGhost ||
+    showLeech ||
+    showCopilot ||
+    showOmni ||
+    showEnvHeal ||
     state === "thinking" ||
     state === "listening";
 
@@ -772,6 +1018,65 @@ export default function OrbPage() {
         )}
       </div>
 
+      {/* ── New Features Second Dock Row ── */}
+      <div
+        data-orb-hit
+        className="mt-0.5 flex items-center gap-1 rounded-full border border-white/[0.05] bg-black/30 px-2 py-0.5 backdrop-blur"
+      >
+        {/* Context Leech (Feature 1) */}
+        <button
+          type="button"
+          onClick={() => void triggerContextLeech()}
+          title="Context Leech: absorb screen & get tactical co-pilot notes (/leech)"
+          className={`rounded-full p-1 transition-colors ${
+            leechLoading ? "animate-pulse text-violet-300" : showLeech && contextLeech ? "bg-violet-500/30 text-violet-300" : "text-white/40 hover:text-violet-300"
+          }`}
+        >
+          <Eye className="h-3 w-3" />
+        </button>
+
+        {/* Ghost Copilot (Feature 3) */}
+        <button
+          type="button"
+          onClick={() => { setShowCopilot((v) => !v); if (!showCopilot) setTimeout(() => copilotInputRef.current?.focus(), 80); }}
+          title="Ghost Copilot: paste error trace → get AI patch (/copilot)"
+          className={`rounded-full p-1 transition-colors ${
+            copilotLoading ? "animate-pulse text-orange-300" : showCopilot ? "bg-orange-500/30 text-orange-300" : "text-white/40 hover:text-orange-300"
+          }`}
+        >
+          <Bug className="h-3 w-3" />
+        </button>
+
+        {/* Omni-Query (Feature 4) */}
+        <button
+          type="button"
+          onClick={() => { setShowOmni((v) => !v); if (!showOmni) setTimeout(() => omniInputRef.current?.focus(), 80); }}
+          title="Omni-Query: search any file with natural language (/omni)"
+          className={`rounded-full p-1 transition-colors ${
+            omniLoading ? "animate-pulse text-sky-300" : showOmni ? "bg-sky-500/30 text-sky-300" : "text-white/40 hover:text-sky-300"
+          }`}
+        >
+          <Search className="h-3 w-3" />
+        </button>
+
+        {/* Env Heal (Feature 6) */}
+        <button
+          type="button"
+          onClick={() => void scanEnvHealth()}
+          title="Self-Healing Env: scan & fix port collisions, git locks (/heal)"
+          className={`relative rounded-full p-1 transition-colors ${
+            envHealLoading ? "animate-pulse text-green-300" : showEnvHeal ? "bg-green-500/30 text-green-300" : "text-white/40 hover:text-green-300"
+          }`}
+        >
+          <Zap className="h-3 w-3" />
+          {envHealth && !envHealth.healthy && (
+            <span className="absolute -top-0.5 -right-0.5 flex h-2.5 w-2.5 items-center justify-center rounded-full bg-red-500 text-[7px] font-bold text-white">
+              {envHealth.issues.length}
+            </span>
+          )}
+        </button>
+      </div>
+
       {/* ── The Card & Panels ── */}
       <div className="relative mt-1.5 w-full px-3">
         {cardOpen && (
@@ -902,8 +1207,194 @@ export default function OrbPage() {
               </div>
             )}
 
-            {/* Conversation content */}
-            {content && (
+            {/* ── Context Leech HUD (Feature 1) ── */}
+            {showLeech && (
+              <div className="mb-2 rounded border border-violet-500/30 bg-violet-950/20 p-1.5 text-[10px]">
+                <div className="flex items-center justify-between text-violet-300 mb-1">
+                  <span className="font-semibold flex items-center gap-1">
+                    <Eye className="h-3 w-3" /> CONTEXT LEECH
+                  </span>
+                  <div className="flex gap-1">
+                    <button type="button" onClick={() => void triggerContextLeech()}
+                      className="rounded bg-violet-500/20 px-1.5 py-0.5 text-[8.5px] text-violet-200 hover:bg-violet-500/40">
+                      {leechLoading ? "…" : "↻ Refresh"}
+                    </button>
+                    <button type="button" onClick={() => setShowLeech(false)} className="text-white/40 hover:text-white px-1">✕</button>
+                  </div>
+                </div>
+                {!contextLeech || leechLoading ? (
+                  <div className="text-white/40 text-[9px]">{leechLoading ? "Absorbing screen context…" : "Click Refresh to absorb screen"}</div>
+                ) : (
+                  <>
+                    {contextLeech.meetingTopic && (
+                      <div className="text-violet-200 font-semibold mb-0.5 truncate">📌 {contextLeech.meetingTopic}</div>
+                    )}
+                    {contextLeech.tacticalBullets.length > 0 && (
+                      <div className="mb-1">
+                        <div className="text-violet-400/80 text-[8.5px] mb-0.5">TACTICAL BULLETS</div>
+                        {contextLeech.tacticalBullets.slice(0, 3).map((b, i) => (
+                          <div key={i} className="text-white/80 text-[9px] leading-tight">• {b}</div>
+                        ))}
+                      </div>
+                    )}
+                    {contextLeech.suggestedQuestions.length > 0 && (
+                      <div>
+                        <div className="text-violet-400/80 text-[8.5px] mb-0.5">PROBE QUESTIONS</div>
+                        {contextLeech.suggestedQuestions.slice(0, 2).map((q, i) => (
+                          <div key={i} className="text-cyan-300/80 text-[9px] leading-tight cursor-pointer hover:text-cyan-200"
+                            onClick={() => useJarvisStore.getState().queueCommand(q)}>
+                            → {q}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* ── Ghost Copilot HUD (Feature 3) ── */}
+            {showCopilot && (
+              <div className="mb-2 rounded border border-orange-500/30 bg-orange-950/20 p-1.5 text-[10px]">
+                <div className="flex items-center justify-between text-orange-300 mb-1">
+                  <span className="font-semibold flex items-center gap-1">
+                    <Bug className="h-3 w-3" /> GHOST COPILOT
+                  </span>
+                  <button type="button" onClick={() => { setShowCopilot(false); setGhostCopilot(null); }}
+                    className="text-white/40 hover:text-white px-1">✕</button>
+                </div>
+                {!ghostCopilot ? (
+                  <form onSubmit={(e) => { e.preventDefault(); void triggerGhostCopilot(); }} className="flex flex-col gap-1">
+                    <input
+                      ref={copilotInputRef}
+                      value={copilotInput}
+                      onChange={(e) => setCopilotInput(e.target.value)}
+                      placeholder="Paste error trace or describe bug…"
+                      className="w-full rounded bg-black/40 px-1.5 py-1 text-[9.5px] text-white/80 outline-none placeholder:text-white/30"
+                    />
+                    <button type="submit" disabled={copilotLoading}
+                      className="self-start rounded bg-orange-500/20 px-2 py-0.5 text-[8.5px] text-orange-200 hover:bg-orange-500/40 disabled:opacity-50">
+                      {copilotLoading ? "Analyzing…" : "⚡ Diagnose"}
+                    </button>
+                  </form>
+                ) : (
+                  <>
+                    <div className="text-orange-200 font-semibold mb-0.5 truncate">
+                      🐛 {ghostCopilot.errorSummary}
+                    </div>
+                    <div className="text-white/70 text-[9px] mb-0.5">
+                      📄 {ghostCopilot.file}{ghostCopilot.line ? `:${ghostCopilot.line}` : ""}
+                    </div>
+                    {ghostCopilot.explanation && (
+                      <div className="text-white/80 text-[9px] mb-1 max-h-[48px] overflow-y-auto no-scrollbar">
+                        {ghostCopilot.explanation}
+                      </div>
+                    )}
+                    <div className="flex gap-1 mt-1">
+                      {ghostCopilot.active && (
+                        <button type="button" onClick={() => void applyGhostCopilotFix()}
+                          className="rounded bg-orange-500/30 px-2 py-0.5 text-[8.5px] text-orange-200 hover:bg-orange-500/50">
+                          ⚡ Apply Fix (.bak)
+                        </button>
+                      )}
+                      <button type="button" onClick={() => { setGhostCopilot(null); setCopilotInput(""); }}
+                        className="rounded px-1.5 py-0.5 text-[8.5px] text-white/40 hover:text-white">
+                        Re-diagnose
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* ── Omni-Query HUD (Feature 4) ── */}
+            {showOmni && (
+              <div className="mb-2 rounded border border-sky-500/30 bg-sky-950/20 p-1.5 text-[10px]">
+                <div className="flex items-center justify-between text-sky-300 mb-1">
+                  <span className="font-semibold flex items-center gap-1">
+                    <Search className="h-3 w-3" /> OMNI-QUERY
+                  </span>
+                  <button type="button" onClick={() => setShowOmni(false)} className="text-white/40 hover:text-white px-1">✕</button>
+                </div>
+                <form onSubmit={(e) => { e.preventDefault(); void runOmniSearch(); }} className="flex gap-1 mb-1">
+                  <input
+                    ref={omniInputRef}
+                    value={omniInput}
+                    onChange={(e) => setOmniInput(e.target.value)}
+                    placeholder="screenshots from yesterday, .py files…"
+                    className="flex-1 min-w-0 rounded bg-black/40 px-1.5 py-1 text-[9.5px] text-white/80 outline-none placeholder:text-white/30"
+                  />
+                  <button type="submit" disabled={omniLoading}
+                    className="rounded bg-sky-500/20 px-1.5 py-0.5 text-[8.5px] text-sky-200 hover:bg-sky-500/40 disabled:opacity-50">
+                    {omniLoading ? "…" : "Go"}
+                  </button>
+                </form>
+                {omniQuery && (
+                  <>
+                    <div className="text-white/50 text-[8.5px] mb-0.5">{omniQuery.totalFound} file(s) · {omniQuery.scannedPath}</div>
+                    <div className="max-h-[72px] overflow-y-auto no-scrollbar space-y-0.5">
+                      {omniQuery.files.length === 0 ? (
+                        <div className="text-white/30 text-[9px]">No files found for this query</div>
+                      ) : (
+                        omniQuery.files.slice(0, 10).map((f, i) => (
+                          <div key={i}
+                            className="flex items-center gap-1 rounded bg-black/30 px-1 py-0.5 cursor-pointer hover:bg-sky-900/30 group"
+                            onClick={() => void openOmniFile(f.path)}
+                            title={f.path}
+                          >
+                            <FolderOpen className="h-2.5 w-2.5 text-sky-400 shrink-0" />
+                            <span className="flex-1 truncate text-[9px] text-white/80 group-hover:text-sky-200">{f.name}</span>
+                            <span className="text-[8px] text-white/30 shrink-0">{f.size}</span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* ── Self-Healing Env HUD (Feature 6) ── */}
+            {showEnvHeal && (
+              <div className="mb-2 rounded border border-green-500/30 bg-green-950/20 p-1.5 text-[10px]">
+                <div className="flex items-center justify-between text-green-300 mb-1">
+                  <span className="font-semibold flex items-center gap-1">
+                    <Zap className="h-3 w-3" /> ENV DOCTOR
+                  </span>
+                  <div className="flex gap-1">
+                    <button type="button" onClick={() => void scanEnvHealth()}
+                      className="rounded bg-green-500/20 px-1.5 py-0.5 text-[8.5px] text-green-200 hover:bg-green-500/40">
+                      {envHealLoading ? "…" : "↻ Rescan"}
+                    </button>
+                    <button type="button" onClick={() => setShowEnvHeal(false)} className="text-white/40 hover:text-white px-1">✕</button>
+                  </div>
+                </div>
+                {!envHealth || envHealLoading ? (
+                  <div className="text-white/40 text-[9px]">{envHealLoading ? "Scanning environment…" : "Click Rescan"}</div>
+                ) : envHealth.healthy ? (
+                  <div className="text-green-300 text-[9px]">✓ All dev ports clear, no locks detected</div>
+                ) : (
+                  <div className="space-y-0.5 max-h-[80px] overflow-y-auto no-scrollbar">
+                    {envHealth.issues.map((issue) => (
+                      <div key={issue.id} className="flex items-center gap-1 rounded bg-black/30 px-1 py-0.5">
+                        <AlertTriangle className="h-2.5 w-2.5 text-red-400 shrink-0" />
+                        <span className="flex-1 truncate text-[9px] text-white/80">{issue.description}</span>
+                        <button
+                          type="button"
+                          disabled={healingId === issue.id}
+                          onClick={() => void healEnvIssue(issue)}
+                          className="shrink-0 rounded bg-green-500/30 px-1.5 py-0.5 text-[7.5px] text-green-200 hover:bg-green-500/50 disabled:opacity-50"
+                        >
+                          {healingId === issue.id ? "…" : "⚡ Fix"}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Conversation content */}            {content && (
               <div className="mb-1">
                 <div className="mb-1 flex items-center justify-between border-b border-white/[0.06] pb-0.5 text-[8.5px]">
                   <span className="font-semibold uppercase tracking-wider text-[7.5px] text-cyan-400/80">

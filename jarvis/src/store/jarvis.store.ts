@@ -94,6 +94,57 @@ export interface ScreenReticle {
   details?: string;
 }
 
+export interface ContextLeechState {
+  active: boolean;
+  meetingTopic?: string;
+  tacticalBullets: string[];
+  factChecks: string[];
+  suggestedQuestions: string[];
+  lastUpdated: number;
+}
+
+export interface GhostCopilotAlert {
+  active: boolean;
+  file: string;
+  line?: number;
+  errorSummary: string;
+  explanation: string;
+  proposedPatch: string;
+  originalSnippet?: string;
+  patchedSnippet?: string;
+  detectedAt: number;
+}
+
+export interface OmniFileItem {
+  name: string;
+  path: string;
+  size: string;
+  modified: string;
+  kind: "screenshot" | "pdf" | "code" | "doc" | "other";
+}
+
+export interface OmniQueryResult {
+  query: string;
+  totalFound: number;
+  files: OmniFileItem[];
+  scannedPath?: string;
+}
+
+export interface EnvHealthIssue {
+  id: string;
+  type: "port_collision" | "zombie_process" | "git_lock" | "disk_pressure" | "unknown";
+  description: string;
+  port?: number;
+  pid?: number;
+  fixAction: string;
+}
+
+export interface EnvHealthState {
+  healthy: boolean;
+  issues: EnvHealthIssue[];
+  lastChecked: number;
+}
+
 interface JarvisStore {
   // Core state
   state: JarvisState;
@@ -263,6 +314,22 @@ interface JarvisStore {
   startGhostWorker: (worker: Omit<GhostWorker, "id" | "createdAt"> & { id?: string }) => string;
   updateGhostWorker: (id: string, update: Partial<GhostWorker>) => void;
   removeGhostWorker: (id: string) => void;
+
+  /** Feature 1: Context Leech */
+  contextLeech: ContextLeechState | null;
+  setContextLeech: (state: ContextLeechState | null) => void;
+
+  /** Feature 3: Ghost Copilot */
+  ghostCopilot: GhostCopilotAlert | null;
+  setGhostCopilot: (alert: GhostCopilotAlert | null) => void;
+
+  /** Feature 4: Omni-Query */
+  omniQuery: OmniQueryResult | null;
+  setOmniQuery: (result: OmniQueryResult | null) => void;
+
+  /** Feature 6: Self-Healing Environment Daemon */
+  envHealth: EnvHealthState | null;
+  setEnvHealth: (health: EnvHealthState | null) => void;
 
   // ── Desktop orb bridge ─────────────────────────────────────────────────
   // The floating orb window mounts CommandBar hidden and drives it through
@@ -530,6 +597,19 @@ export const useJarvisStore = create<JarvisStore>((set) => ({
     })),
   removeGhostWorker: (id) =>
     set((state) => ({ ghostWorkers: state.ghostWorkers.filter((w) => w.id !== id) })),
+
+  // 4 New Jaw-Dropping Features
+  contextLeech: null,
+  setContextLeech: (contextLeech) => set({ contextLeech }),
+
+  ghostCopilot: null,
+  setGhostCopilot: (ghostCopilot) => set({ ghostCopilot }),
+
+  omniQuery: null,
+  setOmniQuery: (omniQuery) => set({ omniQuery }),
+
+  envHealth: null,
+  setEnvHealth: (envHealth) => set({ envHealth }),
 
   // Desktop orb bridge
   pendingCommand: null,

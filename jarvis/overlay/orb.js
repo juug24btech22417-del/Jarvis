@@ -292,6 +292,17 @@ ipcMain.on("orb:open-external", (_e, url) => {
     shell.openExternal(url);
   }
 });
+ipcMain.handle("orb:open-path", async (_e, filePath) => {
+  if (filePath && typeof filePath === "string") {
+    try {
+      const err = await shell.openPath(filePath);
+      return { ok: !err, error: err || null };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  }
+  return { ok: false, error: "Invalid path" };
+});
 
 ipcMain.on("orb:menu", () => {
   if (!liveWindow()) return;

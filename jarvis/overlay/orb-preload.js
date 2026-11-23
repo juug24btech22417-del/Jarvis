@@ -42,6 +42,8 @@ contextBridge.exposeInMainWorld("jarvisOrb", {
   resize: (size) => ipcRenderer.invoke("orb:resize", size),
   /** Open an external URL in the default browser. */
   openExternal: (url) => ipcRenderer.send("orb:open-external", url),
+  /** Open a file on disk with the default system application. */
+  openPath: (filePath) => ipcRenderer.invoke("orb:open-path", filePath),
   /** Open the full JARVIS desktop (panels, dashboards) in the browser. */
   openApp: () => ipcRenderer.send("orb:open-app"),
   /** Native right-click menu: show/hide, open the full app, reload, quit. */
