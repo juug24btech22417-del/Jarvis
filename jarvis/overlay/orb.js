@@ -17,7 +17,7 @@
 // stealth HUD (main.js), which must vanish from screen shares. The orb is meant
 // to be seen.
 
-const { app, BrowserWindow, ipcMain, globalShortcut, screen, Menu, shell, clipboard } = require("electron");
+const { app, BrowserWindow, ipcMain, globalShortcut, screen, Menu, shell, clipboard, desktopCapturer } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const http = require("http");
@@ -302,6 +302,15 @@ ipcMain.handle("orb:open-path", async (_e, filePath) => {
     }
   }
   return { ok: false, error: "Invalid path" };
+});
+
+ipcMain.handle("orb:get-active-windows", async () => {
+  try {
+    const sources = await desktopCapturer.getSources({ types: ["window"], fetchWindowIcons: false });
+    return sources.map((s) => s.name).filter(Boolean);
+  } catch {
+    return [];
+  }
 });
 
 ipcMain.on("orb:menu", () => {

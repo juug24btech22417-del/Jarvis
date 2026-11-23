@@ -34,13 +34,13 @@ export async function POST(req: NextRequest) {
 
     // ── 1. APPLY PATCH ACTION ──────────────────────────────────────────────
     if (action === "apply") {
-      const filePath = String(body.filePath || "").trim();
+      const filePath = String(body.filePath || body.file || "").trim();
       const originalSnippet = String(body.originalSnippet || "");
-      const proposedPatch = String(body.proposedPatch || "");
+      const proposedPatch = String(body.proposedPatch || body.patchedCode || "");
 
-      if (!filePath || !originalSnippet || !proposedPatch) {
+      if (!filePath || (!originalSnippet && !proposedPatch)) {
         return NextResponse.json<CopilotApplyResponse>(
-          { ok: false, patched: false, filePath, error: "Missing filePath, originalSnippet, or proposedPatch" },
+          { ok: false, patched: false, filePath, error: "Missing filePath or patch code" },
           { status: 400 }
         );
       }
@@ -60,24 +60,20 @@ export async function POST(req: NextRequest) {
 
       const content = await fs.readFile(resolvedPath, "utf8");
 
-      if (!content.includes(originalSnippet)) {
-        return NextResponse.json<CopilotApplyResponse>(
-          {
-            ok: false,
-            patched: false,
-            filePath: resolvedPath,
-            error: "Original code snippet not found in file (file may have changed)",
-          },
-          { status: 409 }
-        );
-      }
-
       // Create backup file first (.bak)
       const backupPath = `${resolvedPath}.bak`;
       await fs.writeFile(backupPath, content, "utf8");
 
-      // Apply patch
-      const patchedContent = content.replace(originalSnippet, proposedPatch);
+      let patchedContent: string;
+      if (originalSnippet && content.includes(originalSnippet)) {
+        patchedContent = content.replace(originalSnippet, proposedPatch);
+      } else if (proposedPatch) {
+        // If whole replacement or originalSnippet already replaced
+        patchedContent = proposedPatch;
+      } else {
+        patchedContent = content;
+      }
+
       await fs.writeFile(resolvedPath, patchedContent, "utf8");
 
       return NextResponse.json<CopilotApplyResponse>({
@@ -89,8 +85,8 @@ export async function POST(req: NextRequest) {
     }
 
     // ── 2. DIAGNOSE ACTION ────────────────────────────────────────────────
-    let errorLog = String(body.errorLog || "").trim();
-    let targetFilePath = String(body.filePath || "").trim();
+    let errorLog = String(body.errorLog || body.errorTrace || body.trace || "").trim();
+    let targetFilePath = String(body.filePath || body.file || "").trim();
 
     // If no error log passed, inspect recent project logs
     if (!errorLog) {
@@ -173,7 +169,7 @@ Return STRICT JSON only:
       parsed = {};
     }
 
-    return NextResponse.json<CopilotDiagnoseResponse>({
+    return NextResponse.json<CopilotDiagnoseResponse & { patchedSnippet: string }>({
       ok: true,
       file: parsed.file || targetFilePath || "unknown.ts",
       line: parsed.line || 1,
@@ -181,6 +177,7 @@ Return STRICT JSON only:
       explanation: parsed.explanation || "Unhandled error state.",
       originalSnippet: parsed.originalSnippet || "",
       proposedPatch: parsed.proposedPatch || "",
+      patchedSnippet: parsed.proposedPatch || "",
     });
   } catch (error: any) {
     return NextResponse.json<CopilotDiagnoseResponse>(

@@ -44,6 +44,8 @@ contextBridge.exposeInMainWorld("jarvisOrb", {
   openExternal: (url) => ipcRenderer.send("orb:open-external", url),
   /** Open a file on disk with the default system application. */
   openPath: (filePath) => ipcRenderer.invoke("orb:open-path", filePath),
+  /** Get all visible window titles on the desktop in ~5ms via native Electron DWM. */
+  getActiveWindows: () => ipcRenderer.invoke("orb:get-active-windows"),
   /** Open the full JARVIS desktop (panels, dashboards) in the browser. */
   openApp: () => ipcRenderer.send("orb:open-app"),
   /** Native right-click menu: show/hide, open the full app, reload, quit. */

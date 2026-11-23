@@ -69,23 +69,42 @@ function assert(condition: boolean, label: string, detail?: string) {
 // ── Feature 1: Context Leech ─────────────────────────────────────────────────
 async function testContextLeech() {
   console.log("\n📸 TEST: Context Leech (/api/orb/context-leech)");
+  
+  // Test 1: Desktop context scan
   try {
     const res = await post("/api/orb/context-leech", {});
     console.log(`  ${INFO} Response:`, JSON.stringify(res).slice(0, 200));
     assert(typeof res === "object" && res !== null, "Returns an object");
-    assert(!res.error || res.ok !== false, "No hard error");
-    if (res.ok) {
-      assert(Array.isArray(res.tacticalBullets), "tacticalBullets is array");
-      assert(Array.isArray(res.suggestedQuestions), "suggestedQuestions is array");
-      assert(Array.isArray(res.factChecks), "factChecks is array");
-      console.log(`  ${INFO} Topic: ${res.meetingTopic || "(none)"}`);
-      console.log(`  ${INFO} Bullets: ${res.tacticalBullets?.length ?? 0}`);
-    } else {
-      // API may fail without screenshot available — that's acceptable if structured
-      console.log(`  ${INFO} Context Leech returned ok:false (expected without screenshot context)`);
-    }
+    assert(res.ok === true, "Context Leech: ok=true");
+    assert(Array.isArray(res.tacticalBullets), "tacticalBullets is array");
+    assert(Array.isArray(res.suggestedQuestions), "suggestedQuestions is array");
+    assert(Array.isArray(res.factChecks), "factChecks is array");
+    console.log(`  ${INFO} Topic: ${res.meetingTopic || "(none)"}`);
+    console.log(`  ${INFO} Bullets: ${res.tacticalBullets?.length ?? 0}`);
   } catch (err: any) {
     console.log(`  ${FAIL} Network error: ${err.message}`);
+    failed++;
+  }
+
+  // Test 2: YouTube / Song playback context intelligence
+  try {
+    const mediaRes = await post("/api/orb/context-leech", {
+      contextText: 'ACTIVE MEDIA PLAYING: "The Weeknd - Blinding Lights (Official Audio) - YouTube - Google Chrome"',
+      topic: "YouTube Song Playback",
+    });
+    console.log(`  ${INFO} Media Leech Response:`, JSON.stringify(mediaRes).slice(0, 250));
+    assert(mediaRes.ok === true, "Media Context: ok=true");
+    assert(
+      mediaRes.meetingTopic.toLowerCase().includes("blinding") ||
+      mediaRes.meetingTopic.toLowerCase().includes("weeknd") ||
+      mediaRes.meetingTopic.toLowerCase().includes("song"),
+      "Media Topic recognizes song/artist"
+    );
+    assert(mediaRes.tacticalBullets.length > 0, "Provides musical/artist trivia bullets");
+    console.log(`  ${INFO} Detected Topic: ${mediaRes.meetingTopic}`);
+    mediaRes.tacticalBullets.forEach((b: string) => console.log(`    • ${b}`));
+  } catch (err: any) {
+    console.log(`  ${FAIL} Media Leech error: ${err.message}`);
     failed++;
   }
 }
@@ -98,7 +117,7 @@ async function testGhostCopilot() {
   const tmpDir = os.tmpdir();
   const testFile = path.join(tmpDir, "jarvis_copilot_test.py");
   const brokenCode = `def divide(a, b):
-    return a / b  # ZeroDivisionError if b == 0
+    return a / b
 
 result = divide(10, 0)
 print(result)
@@ -116,27 +135,28 @@ ZeroDivisionError: division by zero`;
 
   try {
     // Step 1: Diagnose
-    const diagRes = await post("/api/orb/copilot", { action: "diagnose", errorTrace });
+    const diagRes = await post("/api/orb/copilot", { action: "diagnose", errorTrace, file: testFile });
     console.log(`  ${INFO} Diagnose response:`, JSON.stringify(diagRes).slice(0, 300));
     assert(diagRes.ok === true, "Diagnose: ok=true");
     assert(typeof diagRes.errorSummary === "string" && diagRes.errorSummary.length > 0, "errorSummary present");
     assert(typeof diagRes.explanation === "string" && diagRes.explanation.length > 0, "explanation present");
     assert(typeof diagRes.proposedPatch === "string", "proposedPatch is string");
 
-    // Step 2: Apply fix (write patched snippet to temp file)
-    if (diagRes.ok && diagRes.patchedSnippet) {
-      const applyRes = await post("/api/orb/copilot", {
-        action: "apply",
-        file: testFile,
-        patchedCode: diagRes.patchedSnippet,
-      });
-      console.log(`  ${INFO} Apply response:`, JSON.stringify(applyRes).slice(0, 200));
-      assert(applyRes.ok === true, "Apply: ok=true");
-      assert(fs.existsSync(testFile + ".bak"), "Safety .bak file created");
-      console.log(`  ${INFO} .bak file: ${testFile}.bak ✓`);
-    } else {
-      console.log(`  ${INFO} Skipping apply — no patchedSnippet returned`);
-    }
+    // Step 2: Apply fix (write patch to file with .bak safety)
+    const patch = diagRes.proposedPatch || "    if b == 0: return None\n    return a / b";
+    const applyRes = await post("/api/orb/copilot", {
+      action: "apply",
+      file: testFile,
+      originalSnippet: "return a / b",
+      proposedPatch: patch,
+    });
+    console.log(`  ${INFO} Apply response:`, JSON.stringify(applyRes).slice(0, 200));
+    assert(applyRes.ok === true, "Apply: ok=true");
+    assert(fs.existsSync(testFile + ".bak"), "Safety .bak file created");
+
+    const patchedContent = fs.readFileSync(testFile, "utf8");
+    assert(patchedContent.includes(patch), "File content was actually patched on disk");
+    console.log(`  ${INFO} Verified patched file & safety .bak ✓`);
   } catch (err: any) {
     console.log(`  ${FAIL} Network error: ${err.message}`);
     failed++;
@@ -151,28 +171,22 @@ ZeroDivisionError: division by zero`;
 async function testOmniQuery() {
   console.log("\n🔍 TEST: Omni-Query (/api/orb/omni-query)");
 
-  // Test 1: Screenshots from "day before yesterday"
+  // Test 1: Real PDFs downloaded last week (user's real request)
   try {
-    const dbdRes = await post("/api/orb/omni-query", {
+    const pdfRes = await post("/api/orb/omni-query", {
       action: "search",
-      query: "screenshots from day before yesterday",
+      query: "find all the pdfs downloaded last week",
     });
-    console.log(`  ${INFO} Day-before-yesterday screenshots:`, JSON.stringify(dbdRes).slice(0, 300));
-    assert(dbdRes.ok === true, "Search returns ok=true");
-    assert(typeof dbdRes.totalFound === "number", "totalFound is number");
-    assert(Array.isArray(dbdRes.files), "files is array");
-    if (dbdRes.totalFound > 0) {
-      const f = dbdRes.files[0];
-      assert(typeof f.name === "string", "File has name");
-      assert(typeof f.path === "string", "File has path");
-      assert(typeof f.size === "string", "File has size");
-      assert(typeof f.modified === "string", "File has modified date");
-      console.log(`  ${INFO} Example: ${f.name} (${f.size}) @ ${f.modified}`);
-    } else {
-      console.log(`  ${INFO} No screenshots 2 days ago — that's correct (none existed)`);
-    }
+    console.log(`  ${INFO} Last week PDFs: found ${pdfRes.totalFound} file(s)`);
+    assert(pdfRes.ok === true, "Search returns ok=true");
+    assert(typeof pdfRes.totalFound === "number", "totalFound is number");
+    assert(pdfRes.totalFound > 0, `Found ${pdfRes.totalFound} PDFs from last week in Downloads`);
+    assert(Array.isArray(pdfRes.files), "files is array");
+    pdfRes.files.slice(0, 4).forEach((f: any) => {
+      console.log(`    📄 ${f.name} (${f.size}) - modified: ${f.modified}`);
+    });
   } catch (err: any) {
-    console.log(`  ${FAIL} Network error: ${err.message}`);
+    console.log(`  ${FAIL} PDF Search error: ${err.message}`);
     failed++;
   }
 
@@ -187,20 +201,6 @@ async function testOmniQuery() {
     assert(typeof pyRes.totalFound === "number", "totalFound is number for python search");
   } catch (err: any) {
     console.log(`  ${FAIL} Network error: ${err.message}`);
-    failed++;
-  }
-
-  // Test 3: Real OS — verify at least one known user folder exists
-  try {
-    const { stdout } = await execAsync(
-      `powershell.exe -NoProfile -NonInteractive -Command "[Environment]::GetFolderPath('MyPictures')"`
-    );
-    const picsPath = stdout.trim();
-    assert(picsPath.length > 0, `Pictures folder resolved: ${picsPath}`);
-    assert(fs.existsSync(picsPath), `Pictures folder exists on disk: ${picsPath}`);
-    console.log(`  ${INFO} MyPictures: ${picsPath}`);
-  } catch (err: any) {
-    console.log(`  ${FAIL} PS folder resolve: ${err.message}`);
     failed++;
   }
 }

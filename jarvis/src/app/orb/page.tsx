@@ -48,6 +48,7 @@ declare global {
       resize?(size: { width: number; height: number }): Promise<{ ok: boolean }>;
       openExternal?(url: string): void;
       openPath?(filePath: string): Promise<{ ok: boolean; error?: string }>;
+      getActiveWindows?(): Promise<string[]>;
       hide(): void;
       quit(): void;
       openApp(): void;
@@ -292,6 +293,17 @@ export default function OrbPage() {
     const id = window.setTimeout(() => inputRef.current?.focus(), 60);
     return () => window.clearTimeout(id);
   }, [inputOpen]);
+
+  // ── Dynamic window resize when card / panels open ────────────────────────
+  useEffect(() => {
+    if (window.jarvisOrb?.resize) {
+      if (cardOpen) {
+        void window.jarvisOrb.resize({ width: 320, height: 490 });
+      } else {
+        void window.jarvisOrb.resize({ width: 320, height: 330 });
+      }
+    }
+  }, [cardOpen]);
 
   // ── 1. Drag & Drop Ingestion Singularity ─────────────────────────────────
   const handleDrop = async (e: React.DragEvent) => {
@@ -581,10 +593,14 @@ export default function OrbPage() {
     setShowLeech(true);
     notify("Context Leech absorbing screen…");
     try {
+      let winTitles: string[] = [];
+      if (window.jarvisOrb?.getActiveWindows) {
+        winTitles = await window.jarvisOrb.getActiveWindows();
+      }
       const res = await fetch("/api/orb/context-leech", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ activeWindows: winTitles }),
       });
       const data = await res.json();
       if (data?.ok) {
@@ -1225,30 +1241,39 @@ export default function OrbPage() {
                 {!contextLeech || leechLoading ? (
                   <div className="text-white/40 text-[9px]">{leechLoading ? "Absorbing screen context…" : "Click Refresh to absorb screen"}</div>
                 ) : (
-                  <>
+                  <div className="max-h-[160px] overflow-y-auto pr-1 select-text" style={{ scrollbarWidth: "thin", scrollbarColor: "rgba(168,85,247,0.4) transparent" }}>
                     {contextLeech.meetingTopic && (
-                      <div className="text-violet-200 font-semibold mb-0.5 truncate">📌 {contextLeech.meetingTopic}</div>
+                      <div className="text-violet-200 font-semibold mb-1 text-[9.5px]">📌 {contextLeech.meetingTopic}</div>
                     )}
                     {contextLeech.tacticalBullets.length > 0 && (
-                      <div className="mb-1">
-                        <div className="text-violet-400/80 text-[8.5px] mb-0.5">TACTICAL BULLETS</div>
-                        {contextLeech.tacticalBullets.slice(0, 3).map((b, i) => (
-                          <div key={i} className="text-white/80 text-[9px] leading-tight">• {b}</div>
+                      <div className="mb-1.5">
+                        <div className="text-violet-400/80 text-[8px] font-bold uppercase tracking-wider mb-0.5">INTEL</div>
+                        {contextLeech.tacticalBullets.map((b, i) => (
+                          <div key={i} className="text-white/85 text-[9px] leading-[1.4] mb-0.5">• {b}</div>
+                        ))}
+                      </div>
+                    )}
+                    {contextLeech.factChecks.length > 0 && (
+                      <div className="mb-1.5">
+                        <div className="text-amber-400/80 text-[8px] font-bold uppercase tracking-wider mb-0.5">FACTS</div>
+                        {contextLeech.factChecks.map((f, i) => (
+                          <div key={i} className="text-amber-200/80 text-[9px] leading-[1.4] mb-0.5">✓ {f}</div>
                         ))}
                       </div>
                     )}
                     {contextLeech.suggestedQuestions.length > 0 && (
                       <div>
-                        <div className="text-violet-400/80 text-[8.5px] mb-0.5">PROBE QUESTIONS</div>
-                        {contextLeech.suggestedQuestions.slice(0, 2).map((q, i) => (
-                          <div key={i} className="text-cyan-300/80 text-[9px] leading-tight cursor-pointer hover:text-cyan-200"
+                        <div className="text-cyan-400/80 text-[8px] font-bold uppercase tracking-wider mb-0.5">ASK</div>
+                        {contextLeech.suggestedQuestions.map((q, i) => (
+                          <div key={i}
+                            className="text-cyan-300/80 text-[9px] leading-[1.4] cursor-pointer hover:text-cyan-200 mb-0.5"
                             onClick={() => useJarvisStore.getState().queueCommand(q)}>
                             → {q}
                           </div>
                         ))}
                       </div>
                     )}
-                  </>
+                  </div>
                 )}
               </div>
             )}
