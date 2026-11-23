@@ -294,17 +294,6 @@ export default function OrbPage() {
     return () => window.clearTimeout(id);
   }, [inputOpen]);
 
-  // ── Dynamic window resize when card / panels open ────────────────────────
-  useEffect(() => {
-    if (window.jarvisOrb?.resize) {
-      if (cardOpen) {
-        void window.jarvisOrb.resize({ width: 320, height: 490 });
-      } else {
-        void window.jarvisOrb.resize({ width: 320, height: 330 });
-      }
-    }
-  }, [cardOpen]);
-
   // ── 1. Drag & Drop Ingestion Singularity ─────────────────────────────────
   const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
@@ -845,6 +834,17 @@ export default function OrbPage() {
     showEnvHeal ||
     state === "thinking" ||
     state === "listening";
+
+  // ── Dynamic window resize when card / panels open ────────────────────────
+  useEffect(() => {
+    if (window.jarvisOrb?.resize) {
+      if (cardOpen) {
+        void window.jarvisOrb.resize({ width: 320, height: 490 });
+      } else {
+        void window.jarvisOrb.resize({ width: 320, height: 330 });
+      }
+    }
+  }, [cardOpen]);
 
   const activeState = state !== "idle" && state !== "sleep";
   const hintable = !activeState;
