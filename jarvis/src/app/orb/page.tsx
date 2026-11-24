@@ -35,6 +35,28 @@ import CommandBar from "@/components/panels/CommandBar";
 import OrbCore, { ORB_TONES, type Gaze } from "@/components/orb/OrbCore";
 import { useJarvisStore, type StashedClip, type GhostWorker } from "@/store/jarvis.store";
 
+type DevourTarget = {
+  title: string;
+  pid: number;
+  hwnd: string;
+  rect: { x: number; y: number; width: number; height: number };
+};
+
+type WindowCapture = {
+  ok: boolean;
+  title?: string;
+  dataUrl?: string;
+  width?: number;
+  height?: number;
+  mean?: number;
+  stddev?: number;
+  blank?: boolean;
+  error?: string;
+};
+
+type DevourPhase = "idle" | "locked" | "swallow" | "digest";
+type DevourDropPayload = { moved: boolean; target: DevourTarget | null };
+
 declare global {
   interface Window {
     jarvisOrb?: {
@@ -44,11 +66,17 @@ declare global {
       getClipboard?(): Promise<string>;
       setIgnore(ignore: boolean): Promise<{ ok: boolean }>;
       dragStart(): Promise<{ ok: boolean }>;
-      dragEnd(): Promise<{ ok: boolean; moved: boolean }>;
+      dragEnd(): Promise<{ ok: boolean; moved: boolean; shellOwned?: boolean }>;
       resize?(size: { width: number; height: number }): Promise<{ ok: boolean }>;
       openExternal?(url: string): void;
       openPath?(filePath: string): Promise<{ ok: boolean; error?: string }>;
       getActiveWindows?(): Promise<string[]>;
+      onDevourTarget?(cb: (target: DevourTarget | null) => void): () => void;
+      onDevourDrop?(cb: (payload: DevourDropPayload) => void): () => void;
+      onDevourCapture?(cb: (payload: { target: DevourTarget; capture: WindowCapture }) => void): () => void;
+      windowAt?(point?: { x: number; y: number }): Promise<DevourTarget | null>;
+      captureWindow?(title: string): Promise<WindowCapture>;
+      devourSupported?(): Promise<boolean>;
       hide(): void;
       quit(): void;
       openApp(): void;
@@ -178,6 +206,18 @@ export default function OrbPage() {
   const [envHealLoading, setEnvHealLoading] = useState(false);
   const [healingId, setHealingId] = useState<string | null>(null);
 
+  // ── Window Devourer ─────────────────────────────────────────────────────
+  // The shell reports what is under the orb while dragging; the page owns the
+  // theatre (card → gulp → digest) and the asking.
+  const [devourPhase, setDevourPhase] = useState<DevourPhase>("idle");
+  const [devourTarget, setDevourTarget] = useState<DevourTarget | null>(null);
+  const [devourShot, setDevourShot] = useState<string | null>(null);
+  const [devourBlank, setDevourBlank] = useState(false);
+  const [devoured, setDevoured] = useState<{ title: string; app: string; context: string } | null>(null);
+  const devourCardRef = useRef<HTMLDivElement>(null);
+  const orbWrapRef = useRef<HTMLDivElement>(null);
+  const devourTimer = useRef<number | null>(null);
+
   const notify = (msg: string) => {
     setStatusNotification(msg);
     setTimeout(() => setStatusNotification(null), 3600);
@@ -207,6 +247,24 @@ export default function OrbPage() {
     const host = window.jarvisOrb;
     if (!host) return;
 
+    let ignoring = true;
+    void host.setIgnore(true);
+
+    // Hit-testing runs off the shell's cursor samples, not DOM mousemove: the
+    // window is click-through until this runs, so a forwarded mousemove is a
+    // chicken-and-egg source. The shell knows exactly where the cursor is.
+    const applyHitTest = (clientX: number, clientY: number) => {
+      // A drag owns hit-testing (the shell makes the window click-through so it
+      // can see the window underneath); fighting it here would hide the target.
+      if (dragging.current) return;
+      const el = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+      const hot = !!el?.closest("[data-orb-hit]");
+      if (hot !== !ignoring) {
+        ignoring = !hot;
+        void host.setIgnore(ignoring);
+      }
+    };
+
     const stopCursor = host.onCursor((p) => {
       const cx = p.bx + p.w / 2;
       const cy = p.by + p.h * 0.24;
@@ -215,6 +273,7 @@ export default function OrbPage() {
         x: Math.max(-1, Math.min(1, (p.x - cx) / range)),
         y: Math.max(-1, Math.min(1, (p.y - cy) / range)),
       };
+      applyHitTest(p.x - p.bx, p.y - p.by);
     });
 
     const stopClip = host.onClipboardChange?.((text) => {
@@ -224,16 +283,7 @@ export default function OrbPage() {
       }
     });
 
-    let ignoring = true;
-    void host.setIgnore(true);
-    const onMove = (e: MouseEvent) => {
-      const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
-      const hot = !!el?.closest("[data-orb-hit]");
-      if (hot !== !ignoring) {
-        ignoring = !hot;
-        void host.setIgnore(ignoring);
-      }
-    };
+    const onMove = (e: MouseEvent) => applyHitTest(e.clientX, e.clientY);
     window.addEventListener("mousemove", onMove);
 
     return () => {
@@ -264,7 +314,11 @@ export default function OrbPage() {
       if (!dragging.current) return;
       dragging.current = false;
       const res = await host.dragEnd();
-      if (res && !res.moved) setInputOpen((v) => !v);
+      // When the shell owns the gesture it also reports the settle, so a click
+      // is not toggled twice.
+      if (res && !res.moved && !res.shellOwned) {
+        setInputOpen((v) => !v);
+      }
     };
     const onUp = () => void finish();
     const onMove = (e: PointerEvent) => {
@@ -784,6 +838,185 @@ export default function OrbPage() {
     }
   };
 
+  // ── Window Devourer ─────────────────────────────────────────────────────
+  /** The gulp: the target card leaves the world and becomes the orb. */
+  const swallow = useCallback(async () => {
+    setDevourPhase("swallow");
+    const card = devourCardRef.current;
+    const orb = orbWrapRef.current;
+    const reduced =
+      typeof window !== "undefined" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    if (card && orb && !reduced) {
+      const c = card.getBoundingClientRect();
+      const o = orb.getBoundingClientRect();
+      const dx = o.left + o.width / 2 - (c.left + c.width / 2);
+      const dy = o.top + o.height / 2 - (c.top + c.height / 2);
+      const flight = card.animate(
+        [
+          { transform: "translate3d(0,0,0) scale(1)", opacity: 1, filter: "blur(0px)", offset: 0 },
+          {
+            transform: `translate3d(${(dx * 0.42).toFixed(1)}px, ${(dy * 0.42).toFixed(1)}px, 0) scale(0.62)`,
+            opacity: 0.92,
+            filter: "blur(1px)",
+            offset: 0.5,
+          },
+          {
+            transform: `translate3d(${dx.toFixed(1)}px, ${dy.toFixed(1)}px, 0) scale(0.04) rotate(-3deg)`,
+            opacity: 0,
+            filter: "blur(6px)",
+            offset: 1,
+          },
+        ],
+        { duration: 520, easing: "cubic-bezier(0.32, 0.72, 0, 1)", fill: "forwards" }
+      );
+      await flight.finished.catch(() => {});
+    } else {
+      await new Promise((r) => window.setTimeout(r, 90));
+    }
+
+    setDevourPhase("digest");
+    if (devourTimer.current) window.clearTimeout(devourTimer.current);
+    devourTimer.current = window.setTimeout(() => {
+      setDevourPhase("idle");
+      setDevourShot(null);
+      setDevourBlank(false);
+    }, 2800);
+  }, []);
+
+  /** Ask about what was just swallowed — one model call, through the real pipeline. */
+  const digest = useCallback(async (target: DevourTarget, capture: WindowCapture | null) => {
+    const blank = !capture?.ok || !!capture?.blank;
+    try {
+      const res = await fetch("/api/orb/window-devour", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: target.title, blank, hasFrame: !!capture?.dataUrl }),
+      });
+      const data = await res.json();
+      if (!data?.ok) {
+        notify(data?.error || "Could not read that window");
+        return;
+      }
+
+      setDevoured({ title: data.raw, app: data.app, context: data.context });
+      notify(blank ? `Swallowed ${data.app} · frame protected` : `Swallowed ${data.app}`);
+
+      // The window's pixels become the context the assistant answers from.
+      if (capture?.dataUrl && !blank) {
+        useJarvisStore.getState().setCurrentScreenshot(capture.dataUrl);
+      }
+      useJarvisStore.getState().queueCommand(data.context);
+    } catch {
+      notify("Window Devourer: network error");
+    }
+  }, []);
+
+  const handleDevourDrop = useCallback(
+    (payload: DevourDropPayload) => {
+      const commit = (payload as { commit?: boolean } | null)?.commit === true;
+      const log = (window as unknown as { __jarvisDevourEvents?: string[] }).__jarvisDevourEvents;
+      log?.push(`drop:moved=${payload?.moved}:commit=${commit}:${payload?.target?.title ?? "none"}`);
+      if (!payload?.moved) {
+        setDevourPhase("idle");
+        setDevourTarget(null);
+        setInputOpen((v) => !v);
+        return;
+      }
+      if (!payload.target) {
+        setDevourPhase("idle");
+        setDevourTarget(null);
+        return;
+      }
+      // Moving the orb is not eating it: only a shift-committed drop swallows,
+      // so a casual drag across an app never spends a question.
+      if (!commit) {
+        setDevourPhase("idle");
+        setDevourTarget(null);
+        return;
+      }
+      setDevourShot(null);
+      setDevourBlank(false);
+      setDevourTarget(payload.target);
+      setDevourPhase("locked");
+      void swallow();
+    },
+    [swallow]
+  );
+
+  const handleDevourCapture = useCallback(
+    (payload: { target: DevourTarget; capture: WindowCapture }) => {
+      if (!payload?.capture) return;
+      if (payload.capture.ok && payload.capture.dataUrl) {
+        setDevourShot(payload.capture.dataUrl);
+        setDevourBlank(!!payload.capture.blank);
+      }
+      void digest(payload.target, payload.capture);
+    },
+    [digest]
+  );
+
+  useEffect(() => {
+    const log = (window as unknown as { __jarvisDevourEvents?: string[] }).__jarvisDevourEvents;
+    log?.push(`phase:${devourPhase}`);
+  }, [devourPhase]);
+
+  const dropRef = useRef(handleDevourDrop);
+  const captureRef = useRef(handleDevourCapture);
+  dropRef.current = handleDevourDrop;
+  captureRef.current = handleDevourCapture;
+
+  // The shell drives the gesture; these are its three reports.
+  useEffect(() => {
+    const host = window.jarvisOrb;
+    if (!host?.onDevourTarget) return;
+
+    const seen: string[] = [];
+    (window as unknown as { __jarvisDevourEvents?: string[] }).__jarvisDevourEvents = seen;
+
+    const stopTarget = host.onDevourTarget((target) => {
+      seen.push(target ? target.title : "(none)");
+      if (!target) {
+        setDevourTarget(null);
+        setDevourPhase((p) => (p === "locked" ? "idle" : p));
+        return;
+      }
+      setDevourTarget(target);
+      setDevourPhase((p) => (p === "idle" ? "locked" : p));
+    });
+    const stopDrop = host.onDevourDrop?.((payload) => dropRef.current(payload));
+    const stopCapture = host.onDevourCapture?.((payload) => captureRef.current(payload));
+
+    return () => {
+      stopTarget();
+      stopDrop?.();
+      stopCapture?.();
+      delete (window as unknown as { __jarvisDevourEvents?: string[] }).__jarvisDevourEvents;
+      if (devourTimer.current) window.clearTimeout(devourTimer.current);
+    };
+  }, []);
+
+  // Dev-only handle so the e2e suite can exercise the drop path without
+  // hijacking the physical mouse. Stripped from production bundles.
+  useEffect(() => {
+    if (process.env.NODE_ENV === "production") return;
+    const w = window as unknown as {
+      __jarvisDevourDrop?: (target: DevourTarget) => void;
+      __jarvisDevourCapture?: (target: DevourTarget) => Promise<WindowCapture | null>;
+    };
+    w.__jarvisDevourDrop = (target: DevourTarget) => dropRef.current({ moved: true, target });
+    w.__jarvisDevourCapture = async (target: DevourTarget) => {
+      const capture = (await window.jarvisOrb?.captureWindow?.(target.title)) ?? null;
+      if (capture) captureRef.current({ target, capture });
+      return capture;
+    };
+    return () => {
+      delete w.__jarvisDevourDrop;
+      delete w.__jarvisDevourCapture;
+    };
+  }, []);
+
   const submit = (e?: React.FormEvent) => {
     e?.preventDefault();
     const text = draft.trim();
@@ -800,6 +1033,14 @@ export default function OrbPage() {
     if (text.startsWith("/copilot")) { void triggerGhostCopilot(text.replace(/^\/copilot\s*/i, "")); setDraft(""); return; }
     if (text.startsWith("/omni")) { const q = text.replace(/^\/omni\s*/i, ""); setOmniInput(q); void runOmniSearch(q); setDraft(""); return; }
     if (text.startsWith("/heal")) { void scanEnvHealth(); setDraft(""); return; }
+    if (text === "/spit") {
+      setDevoured(null);
+      setDevourTarget(null);
+      setDevourShot(null);
+      notify("Released the window");
+      setDraft("");
+      return;
+    }
 
     if (text.startsWith("/ghost")) {
       void launchGhostWorker(text);
@@ -815,7 +1056,9 @@ export default function OrbPage() {
       return;
     }
 
-    useJarvisStore.getState().queueCommand(text);
+    // Once a window is inside the orb, follow-up questions are about it.
+    const focus = devoured ? `[FOCUS: ${devoured.title}]\n` : "";
+    useJarvisStore.getState().queueCommand(`${focus}${text}`);
     setDraft("");
     setInputOpen(false);
   };
@@ -832,6 +1075,7 @@ export default function OrbPage() {
     showCopilot ||
     showOmni ||
     showEnvHeal ||
+    devourPhase !== "idle" ||
     state === "thinking" ||
     state === "listening";
 
@@ -897,6 +1141,7 @@ export default function OrbPage() {
 
       {/* ── The Orb Core ── */}
       <div
+        ref={orbWrapRef}
         data-orb-hit
         onPointerDown={onOrbPointerDown}
         onDragOver={(e) => {
@@ -916,7 +1161,14 @@ export default function OrbPage() {
         className="group relative mt-3 h-[92px] w-[92px] cursor-grab touch-none active:cursor-grabbing"
         title="Click to talk · Drag to move · Drop file to ingest"
       >
-        <OrbCore gazeRef={gazeRef} isIngesting={isDraggingOver} />
+        <OrbCore
+          gazeRef={gazeRef}
+          isIngesting={isDraggingOver}
+          devour={
+            devourPhase === "swallow" ? "swallow" : devourPhase === "digest" ? "digest" : "idle"
+          }
+          devourImage={devourShot}
+        />
 
         <div className="pointer-events-none absolute inset-x-0 -bottom-1 h-3 text-center">
           <span
@@ -943,10 +1195,91 @@ export default function OrbPage() {
         </div>
       )}
 
+      {/* ── Window Devourer: the window the orb is about to eat ── */}
+      {devourPhase !== "idle" && devourTarget && (
+        <div
+          ref={devourCardRef}
+          className="devour-card"
+          aria-live="polite"
+          data-devour-phase={devourPhase}
+        >
+          <div className="devour-card__sheen" />
+          <div className="devour-card__eyebrow">
+            {devourPhase === "locked"
+              ? "⇧ + RELEASE TO SWALLOW"
+              : devourPhase === "swallow"
+                ? "ABSORBING"
+                : "DIGESTING"}
+          </div>
+          <div className="devour-card__title">{devourTarget.title}</div>
+          <div className="devour-card__meta">
+            <span className="devour-card__dot" />
+            {devourBlank ? "frame protected" : "live window"}
+          </div>
+          {devourShot && (
+            <img className="devour-card__shot" src={devourShot} alt="" draggable={false} />
+          )}
+        </div>
+      )}
+
+      <style>{`
+        .devour-card {
+          position: absolute; left: 44px; top: 112px; width: 232px;
+          padding: 9px 12px 11px; border-radius: 18px; overflow: hidden;
+          background: linear-gradient(158deg, rgba(18,30,42,0.94), rgba(6,11,18,0.96));
+          border: 1px solid rgba(150,225,255,0.22);
+          box-shadow: 0 22px 50px -14px rgba(0,0,0,0.9),
+                      0 1px 0 rgba(255,255,255,0.15) inset;
+          backdrop-filter: blur(18px) saturate(140%);
+          transform-origin: 50% 50%; will-change: transform, opacity, filter;
+          pointer-events: none;
+          animation: devour-in 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+        }
+        .devour-card__sheen {
+          position: absolute; inset: 0 0 auto 0; height: 45%;
+          background: linear-gradient(180deg, rgba(255,255,255,0.09), transparent);
+          pointer-events: none;
+        }
+        .devour-card__eyebrow {
+          font-family: var(--font-orbitron, inherit); font-size: 7px;
+          letter-spacing: 0.26em; color: rgba(141,227,255,0.75);
+        }
+        .devour-card__title {
+          margin-top: 3px; font-size: 11px; line-height: 1.35; font-weight: 600;
+          color: rgba(255,255,255,0.92);
+          display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+          overflow: hidden;
+        }
+        .devour-card__meta {
+          display: flex; align-items: center; gap: 5px; margin-top: 5px;
+          font-size: 8px; letter-spacing: 0.06em; color: rgba(255,255,255,0.38);
+        }
+        .devour-card__dot {
+          width: 4px; height: 4px; border-radius: 999px;
+          background: rgba(110,231,168,0.95);
+          box-shadow: 0 0 6px rgba(110,231,168,0.8);
+        }
+        .devour-card__shot {
+          display: block; width: 100%; height: 52px; margin-top: 8px;
+          object-fit: cover; border-radius: 10px;
+          opacity: 0.85; filter: saturate(115%);
+          box-shadow: 0 0 0 1px rgba(255,255,255,0.06) inset;
+        }
+        @keyframes devour-in {
+          from { opacity: 0; transform: translate3d(0, 7px, 0) scale(0.96); filter: blur(6px); }
+          to   { opacity: 1; transform: translate3d(0, 0, 0) scale(1); filter: blur(0); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .devour-card { animation: none; }
+        }
+      `}</style>
+
       {/* ── Quick Action Capabilities Dock (Features 1-5) ── */}
       <div
         data-orb-hit
-        className="mt-1 flex items-center gap-1 rounded-full border border-white/[0.07] bg-black/40 px-2 py-0.5 backdrop-blur transition-opacity duration-300"
+        className={`mt-1 flex items-center gap-1 rounded-full border border-white/[0.07] bg-black/40 px-2 py-0.5 backdrop-blur transition-opacity duration-300 ${
+          devourPhase !== "idle" ? "pointer-events-none opacity-0" : ""
+        }`}
       >
         {/* Reticle Mode (Feature 2) */}
         <button
@@ -1037,7 +1370,9 @@ export default function OrbPage() {
       {/* ── New Features Second Dock Row ── */}
       <div
         data-orb-hit
-        className="mt-0.5 flex items-center gap-1 rounded-full border border-white/[0.05] bg-black/30 px-2 py-0.5 backdrop-blur"
+        className={`mt-0.5 flex items-center gap-1 rounded-full border border-white/[0.05] bg-black/30 px-2 py-0.5 backdrop-blur transition-opacity duration-300 ${
+          devourPhase !== "idle" ? "pointer-events-none opacity-0" : ""
+        }`}
       >
         {/* Context Leech (Feature 1) */}
         <button

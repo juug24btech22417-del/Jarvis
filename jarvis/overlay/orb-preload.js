@@ -36,6 +36,32 @@ contextBridge.exposeInMainWorld("jarvisOrb", {
   dragStart: () => ipcRenderer.invoke("orb:drag-start"),
   dragEnd: () => ipcRenderer.invoke("orb:drag-end"),
 
+  // ── Window Devourer ───────────────────────────────────────────────────
+  /** The window the orb is currently hovering during a drag, or null. */
+  onDevourTarget: (cb) => {
+    const handler = (_e, target) => cb(target);
+    ipcRenderer.on("orb:devour-target", handler);
+    return () => ipcRenderer.removeListener("orb:devour-target", handler);
+  },
+  /** Fired once on mouse-up with the window that was under the orb. */
+  onDevourDrop: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on("orb:devour-drop", handler);
+    return () => ipcRenderer.removeListener("orb:devour-drop", handler);
+  },
+  /** The captured frame for the window that was swallowed (arrives after drop). */
+  onDevourCapture: (cb) => {
+    const handler = (_e, capture) => cb(capture);
+    ipcRenderer.on("orb:devour-capture", handler);
+    return () => ipcRenderer.removeListener("orb:devour-capture", handler);
+  },
+  /** Which window is at a point (screen px). Omit the point for the cursor. */
+  windowAt: (point) => ipcRenderer.invoke("orb:window-at", point || null),
+  /** Snapshot one window by title. */
+  captureWindow: (title) => ipcRenderer.invoke("orb:capture-window", title),
+  /** True when the shell can hit-test windows on this platform. */
+  devourSupported: () => ipcRenderer.invoke("orb:devour-supported"),
+
   hide: () => ipcRenderer.send("orb:hide"),
   quit: () => ipcRenderer.send("orb:quit"),
   /** Resize the orb companion window smoothly. */

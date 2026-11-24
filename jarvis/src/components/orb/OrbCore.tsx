@@ -54,12 +54,18 @@ export default function OrbCore({
   gazeRef,
   active = true,
   isIngesting = false,
+  devour = "idle",
+  devourImage = null,
 }: {
   gazeRef: React.MutableRefObject<Gaze>;
   /** False while the window is hidden — parks the loop entirely. */
   active?: boolean;
   /** True when a file or item is being dragged over the orb for ingestion. */
   isIngesting?: boolean;
+  /** Window Devourer: the sphere physically swallows the target card. */
+  devour?: "idle" | "swallow" | "digest";
+  /** The swallowed window's frame, held inside the glass while it answers. */
+  devourImage?: string | null;
 }) {
   const state = useJarvisStore((s) => s.state);
   const tone = ORB_TONES[state] ?? ORB_TONES.idle;
@@ -84,6 +90,15 @@ export default function OrbCore({
   const satelliteRef = useRef<SVGGElement>(null);
   const intakeRef = useRef<SVGGElement>(null);
   const reticleRef = useRef<SVGGElement>(null);
+
+  // The swallow is an event, not a state: the frame loop reads a timestamp so
+  // the deformation plays once even if React re-renders mid-gulp.
+  const devourRef = useRef(devour);
+  devourRef.current = devour;
+  const gulpAt = useRef(-1);
+  useEffect(() => {
+    if (devour === "swallow") gulpAt.current = performance.now();
+  }, [devour]);
 
   useEffect(() => {
     if (!active) return;
@@ -202,12 +217,22 @@ export default function OrbCore({
           : 0;
       headTilt += (targetTilt - headTilt) * Math.min(1, dt * 4.5);
 
+      // Swallow: the sphere takes the card in — a single soft gulp, then it
+      // settles. 760ms is long enough to read as weight, short enough to feel
+      // like a reflex rather than an animation.
+      let gulp = 0;
+      if (gulpAt.current >= 0) {
+        const gp = (now - gulpAt.current) / 760;
+        if (gp >= 1) gulpAt.current = -1;
+        else gulp = Math.sin(Math.PI * gp);
+      }
+
       const totalRotate = (squish * 2.4 + headTilt).toFixed(2);
       sphereRef.current?.setAttribute(
         "transform",
-        `translate(0 ${(breath * 0.5).toFixed(2)}) rotate(${totalRotate}) scale(${(
-          scale * (1 + squish * 0.024)
-        ).toFixed(4)} ${(scale * (1 - squish * 0.02)).toFixed(4)})`
+        `translate(0 ${(breath * 0.5 - gulp * 1.4).toFixed(2)}) rotate(${totalRotate}) scale(${(
+          scale * (1 + squish * 0.024) * (1 + gulp * 0.13)
+        ).toFixed(4)} ${(scale * (1 - squish * 0.02) * (1 - gulp * 0.16)).toFixed(4)})`
       );
 
       // Interior plasma — the fluid light inside the glass. Eased in and out, so
@@ -270,11 +295,15 @@ export default function OrbCore({
       // ── Jaw-Dropping Features Visual Drivers ──────────────────────────
       // Feature 1: Ingestion Singularity Vortex
       const ingesting = isIngesting || !!st.orbIngestFeedback?.active;
+      const devouring = devourRef.current !== "idle" || gulp > 0.02;
       if (intakeRef.current) {
-        if (ingesting) {
-          intakeAngle += dt * 320;
+        if (ingesting || devouring) {
+          intakeAngle += dt * (ingesting ? 320 : 540);
           intakeRef.current.setAttribute("transform", `rotate(${intakeAngle.toFixed(2)})`);
-          intakeRef.current.setAttribute("opacity", "0.85");
+          intakeRef.current.setAttribute(
+            "opacity",
+            devouring ? (0.32 + gulp * 0.6).toFixed(2) : "0.85"
+          );
         } else {
           intakeRef.current.setAttribute("opacity", "0");
         }
@@ -485,6 +514,21 @@ export default function OrbCore({
               <circle ref={blobARef} r="20" fill="url(#orbBlobA)" />
               <circle ref={blobBRef} r="15" fill="url(#orbBlobB)" />
             </g>
+
+            {/* The swallowed window, held behind the glass. This is the proof
+                that something really went in — you can see it in there. */}
+            {devourImage && (
+              <image
+                href={devourImage}
+                x={-R}
+                y={-R}
+                width={R * 2}
+                height={R * 2}
+                preserveAspectRatio="xMidYMid slice"
+                opacity="0.3"
+                style={{ mixBlendMode: "screen" }}
+              />
+            )}
           </g>
 
           <circle r={R} fill="none" stroke="#FFFFFF" strokeOpacity="0.34" strokeWidth="0.7" />
@@ -494,7 +538,7 @@ export default function OrbCore({
         <circle ref={rippleRef} r={R} fill="none" stroke="var(--orb-accent)" strokeWidth="0.6" opacity="0" />
 
         {/* Feature 1: Ingestion Singularity Vortex */}
-        <g ref={intakeRef} opacity="0">
+        <g ref={intakeRef} data-orb-intake opacity="0">
           <circle
             r={R + 13}
             fill="none"
