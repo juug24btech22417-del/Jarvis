@@ -30,6 +30,8 @@ import {
   FolderOpen,
   AlertTriangle,
   Wifi,
+  FileText,
+  Paperclip,
 } from "lucide-react";
 import CommandBar from "@/components/panels/CommandBar";
 import OrbCore, { ORB_TONES, type Gaze } from "@/components/orb/OrbCore";
@@ -176,6 +178,44 @@ export default function OrbPage() {
   const setOmniQuery = useJarvisStore((s) => s.setOmniQuery);
   const envHealth = useJarvisStore((s) => s.envHealth);
   const setEnvHealth = useJarvisStore((s) => s.setEnvHealth);
+  const stagedFile = useJarvisStore((s) => s.stagedFile);
+  const setStagedFile = useJarvisStore((s) => s.setStagedFile);
+
+  const orbFileInputRef = useRef<HTMLInputElement>(null);
+  const [orbUploading, setOrbUploading] = useState(false);
+
+  const handleOrbFileUpload = async (file: File) => {
+    setOrbUploading(true);
+    notify(`Uploading ${file.name}…`);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch("/api/files/upload", { method: "POST", body: formData });
+      const data = await res.json();
+      if (data.success) {
+        useJarvisStore.getState().setStagedFile({
+          name: data.name,
+          path: data.path,
+          size: data.size,
+          type: data.type,
+        });
+        notify(`Staged ${data.name} in File Explorer`);
+        useJarvisStore.getState().addMessage({
+          role: "assistant",
+          content: `Uploaded "${data.name}" (${data.size}) into File Explorer (Downloads/JarvisUploads). You can now ask me to rename it, delete it, move it, or review it.`,
+        });
+        setInputOpen(true);
+        setDraft(`rename it to `);
+        setTimeout(() => inputRef.current?.focus(), 80);
+      } else {
+        notify(`Upload failed: ${data.error || "error"}`);
+      }
+    } catch (err: any) {
+      notify(`Upload error: ${err.message || "failed"}`);
+    } finally {
+      setOrbUploading(false);
+    }
+  };
 
   const gazeRef = useRef<Gaze>({ x: 0, y: 0 });
   const inputRef = useRef<HTMLInputElement>(null);
@@ -356,7 +396,31 @@ export default function OrbPage() {
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       const file = e.dataTransfer.files[0];
       setOrbIngestFeedback({ active: true, label: file.name, kind: "file" });
-      notify(`Absorbing ${file.name}…`);
+      notify(`Absorbing & staging ${file.name}…`);
+
+      // Upload and stage in File Explorer (Downloads/JarvisUploads)
+      try {
+        const formData = new FormData();
+        formData.append("file", file);
+        const res = await fetch("/api/files/upload", { method: "POST", body: formData });
+        const data = await res.json();
+        if (data.success) {
+          useJarvisStore.getState().setStagedFile({
+            name: data.name,
+            path: data.path,
+            size: data.size,
+            type: data.type,
+          });
+          notify(`Staged ${data.name} in File Explorer`);
+          useJarvisStore.getState().addMessage({
+            role: "assistant",
+            content: `Absorbed "${data.name}" (${data.size}) into File Explorer (Downloads/JarvisUploads). Staged for commands like rename, delete, move, or review.`,
+          });
+          setInputOpen(true);
+        }
+      } catch (err: any) {
+        console.error("Drop upload failed:", err);
+      }
 
       if (file.type.startsWith("image/")) {
         const reader = new FileReader();
@@ -375,11 +439,14 @@ export default function OrbPage() {
       try {
         const text = await file.text();
         const snippet = text.slice(0, 3500);
-        useJarvisStore.getState().queueCommand(
-          `[INGESTED FILE: ${file.name}]\nFile content snippet:\n\n${snippet}\n\nReview this file, explain what it does concisely, and point out any bugs or key logic.`
-        );
+        // Only queue text prompt if file is text/code/readable
+        if (!/[\x00-\x08\x0E-\x1F]/.test(snippet.slice(0, 500))) {
+          useJarvisStore.getState().queueCommand(
+            `[INGESTED FILE: ${file.name}]\nFile content snippet:\n\n${snippet}\n\nReview this file, explain what it does concisely, and point out any bugs or key logic.`
+          );
+        }
       } catch (err: any) {
-        notify(`Could not read file: ${err?.message || "error"}`);
+        /* ignore binary file preview */
       }
       setOrbIngestFeedback(null);
       return;
@@ -1075,6 +1142,7 @@ export default function OrbPage() {
     showCopilot ||
     showOmni ||
     showEnvHeal ||
+    !!stagedFile ||
     devourPhase !== "idle" ||
     state === "thinking" ||
     state === "listening";
@@ -1426,6 +1494,29 @@ export default function OrbPage() {
             </span>
           )}
         </button>
+
+        {/* Upload File to File Explorer */}
+        <input
+          ref={orbFileInputRef}
+          type="file"
+          className="hidden"
+          onChange={(e) => {
+            if (e.target.files && e.target.files[0]) {
+              void handleOrbFileUpload(e.target.files[0]);
+              e.target.value = "";
+            }
+          }}
+        />
+        <button
+          type="button"
+          onClick={() => orbFileInputRef.current?.click()}
+          title="Upload file to File Explorer (rename / delete / move / manage)"
+          className={`rounded-full p-1 transition-colors ${
+            orbUploading ? "animate-pulse text-emerald-300" : stagedFile ? "bg-emerald-500/30 text-emerald-300" : "text-white/40 hover:text-emerald-300"
+          }`}
+        >
+          <Upload className="h-3 w-3" />
+        </button>
       </div>
 
       {/* ── The Card & Panels ── */}
@@ -1773,6 +1864,25 @@ export default function OrbPage() {
                 <div className="no-scrollbar max-h-[140px] overflow-y-auto text-[11px] leading-[1.55] text-white/[0.82] whitespace-pre-wrap">
                   {content}
                 </div>
+              </div>
+            )}
+
+            {/* Staged File Banner for File Explorer Control */}
+            {stagedFile && (
+              <div className="mb-1.5 flex items-center justify-between rounded bg-emerald-950/70 border border-emerald-500/40 px-2 py-1 text-[9px] text-emerald-300">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <FileText className="h-3 w-3 text-emerald-400 shrink-0" />
+                  <span className="truncate font-mono font-medium">{stagedFile.name}</span>
+                  <span className="text-emerald-400/60 font-mono">({stagedFile.size})</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => useJarvisStore.getState().setStagedFile(null)}
+                  className="ml-1 text-emerald-400/60 hover:text-white transition-colors"
+                  title="Clear staged file"
+                >
+                  ✕
+                </button>
               </div>
             )}
 

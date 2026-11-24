@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback, useLayoutEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Mic, Send, Square, VolumeX, Camera, Monitor } from "lucide-react";
+import { Mic, Send, Square, VolumeX, Camera, Monitor, Paperclip, FileText, X } from "lucide-react";
 import VoiceVisualizer from "@/components/ui/VoiceVisualizer";
 import { useJarvisVoice } from "@/hooks/useVoice";
 import { useJarvisStore } from "@/store/jarvis.store";
@@ -323,6 +323,51 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
   const { getBattery } = useBatteryStatus();
   const { getNetworkInfo } = useNetworkStatus();
 
+  // Staged file for File Explorer control & uploads
+  const stagedFile = useJarvisStore((s) => s.stagedFile);
+  const setStagedFile = useJarvisStore((s) => s.setStagedFile);
+  const [isUploadingFile, setIsUploadingFile] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileUpload = async (file: File) => {
+    setIsUploadingFile(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch("/api/files/upload", {
+        method: "POST",
+        body: formData,
+      });
+      const data = await res.json();
+      if (data.success) {
+        setStagedFile({
+          name: data.name,
+          path: data.path,
+          size: data.size,
+          type: data.type,
+        });
+        const uploadMsg = `Uploaded "${data.name}" (${data.size}) into File Explorer (Downloads/JarvisUploads). You can now ask me to rename it, delete it, move it, or examine it.`;
+        addMessage({
+          role: "assistant",
+          content: uploadMsg,
+        });
+        speak(`Uploaded ${data.name}. Ready for your command.`);
+      } else {
+        addMessage({
+          role: "assistant",
+          content: `Upload failed: ${data.error || "Unknown error"}`,
+        });
+      }
+    } catch (err: any) {
+      addMessage({
+        role: "assistant",
+        content: `Failed to upload file: ${err?.message || "network error"}`,
+      });
+    } finally {
+      setIsUploadingFile(false);
+    }
+  };
+
   // Screen capture state
   const [isCapturing, setIsCapturing] = useState(false);
 
@@ -513,6 +558,55 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
     if (/\b(avengers[\s,]+assemble|assemble\s+the\s+avengers|avengers\s+assembled?)\b/i.test(lower)) {
       startAssemble();
       return "Avengers… assemble.";
+    }
+
+    // ─── FILE EXPLORER OPERATING SYSTEM CONTROL ─────────────────────────────
+    // Universal file control: rename, delete, move, copy, create folders, reveal
+    // Works for any format (.pdf, .py, images, docs) and resolves pronouns ("it", "this")
+    const isFileCommand =
+      /^(?:rename|change\s+(?:the\s+)?name\s+of)\b/i.test(lower) ||
+      /^(?:delete|remove|trash|destroy)\b[\s\S]*?\b(?:file|folder|it|this|\.\w+)\b/i.test(lower) ||
+      /^(?:move|copy)\b[\s\S]*?\bto\b/i.test(lower) ||
+      /^(?:create|make|new)\s+(?:a\s+)?folder\b/i.test(lower) ||
+      /^(?:reveal|open)\b[\s\S]*?\b(?:in\s+explorer|folder|directory)\b/i.test(lower);
+
+    if (isFileCommand) {
+      try {
+        const currentStaged = useJarvisStore.getState().stagedFile;
+        const res = await fetch("/api/files/manage", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            command: text,
+            contextFile: currentStaged,
+          }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          if (data.action === "rename" && data.newPath) {
+            useJarvisStore.getState().setStagedFile({
+              name: data.newName,
+              path: data.newPath,
+              size: currentStaged?.size || "",
+              type: currentStaged?.type || "",
+            });
+          } else if (data.action === "delete") {
+            useJarvisStore.getState().setStagedFile(null);
+          } else if (data.action === "move" && data.destPath) {
+            useJarvisStore.getState().setStagedFile({
+              name: data.fileName,
+              path: data.destPath,
+              size: currentStaged?.size || "",
+              type: currentStaged?.type || "",
+            });
+          }
+          return data.message || "File Explorer action completed, Boss.";
+        } else {
+          return `File operation failed: ${data.error || "Unknown error"}`;
+        }
+      } catch (err: any) {
+        return `File Explorer error: ${err.message || "Request failed"}`;
+      }
     }
 
     // ── LIVE BROWSING (fires first, and wins) ──────────────────────────────
@@ -4628,6 +4722,25 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
             <VoiceVisualizer barCount={56} height={22} />
           </div>
 
+          {/* Staged file chip for File Explorer */}
+          {stagedFile && (
+            <div className="flex items-center justify-between gap-2 px-3 py-1 mb-2 rounded-lg bg-cyan-950/60 border border-cyan-500/30 text-xs text-cyan-300 w-fit backdrop-blur">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <FileText className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                <span className="font-mono max-w-[220px] truncate">{stagedFile.name}</span>
+                <span className="text-[10px] text-cyan-400/60 font-mono">({stagedFile.size})</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setStagedFile(null)}
+                className="ml-1 text-cyan-400/60 hover:text-white transition-colors"
+                title="Clear staged file"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+          )}
+
           {/* Controls row */}
           <div className="flex items-center gap-2">
             {/* Stop button — appears while JARVIS speaks/thinks; siblings glide via layout */}
@@ -4785,6 +4898,31 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
               <div className="w-4 h-4 border-2 border-reactor-core border-t-transparent rounded-full animate-spin" />
             ) : (
               <Camera className="w-4 h-4 text-reactor-core" />
+            )}
+          </button>
+
+          {/* File Upload button for File Explorer */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            className="hidden"
+            onChange={(e) => {
+              if (e.target.files && e.target.files[0]) {
+                void handleFileUpload(e.target.files[0]);
+                e.target.value = "";
+              }
+            }}
+          />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isUploadingFile}
+            className="p-2 rounded-full bg-panel-glass hover:bg-panel-border disabled:opacity-30 transition-colors relative overflow-hidden"
+            title="Upload file to File Explorer (Downloads/JarvisUploads)"
+          >
+            {isUploadingFile ? (
+              <div className="w-4 h-4 border-2 border-reactor-core border-t-transparent rounded-full animate-spin" />
+            ) : (
+              <Paperclip className="w-4 h-4 text-reactor-core" />
             )}
           </button>
 

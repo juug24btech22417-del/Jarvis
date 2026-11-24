@@ -331,6 +331,10 @@ interface JarvisStore {
   envHealth: EnvHealthState | null;
   setEnvHealth: (health: EnvHealthState | null) => void;
 
+  /** Active / Staged file in File Explorer for operations */
+  stagedFile: { name: string; path: string; size: string; type: string } | null;
+  setStagedFile: (file: { name: string; path: string; size: string; type: string } | null) => void;
+
   // ── Desktop orb bridge ─────────────────────────────────────────────────
   // The floating orb window mounts CommandBar hidden and drives it through
   // these two fields, so asking from the orb runs the identical pipeline.
@@ -610,6 +614,9 @@ export const useJarvisStore = create<JarvisStore>((set) => ({
 
   envHealth: null,
   setEnvHealth: (envHealth) => set({ envHealth }),
+
+  stagedFile: null,
+  setStagedFile: (stagedFile) => set({ stagedFile }),
 
   // Desktop orb bridge
   pendingCommand: null,
