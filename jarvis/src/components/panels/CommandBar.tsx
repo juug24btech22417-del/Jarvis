@@ -334,6 +334,10 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
     try {
       const formData = new FormData();
       formData.append("file", file);
+      const realPath = (file as any).path;
+      if (realPath) {
+        formData.append("filePath", realPath);
+      }
       const res = await fetch("/api/files/upload", {
         method: "POST",
         body: formData,
@@ -346,22 +350,22 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
           size: data.size,
           type: data.type,
         });
-        const uploadMsg = `Uploaded "${data.name}" (${data.size}) into File Explorer (Downloads/JarvisUploads). You can now ask me to rename it, delete it, move it, or examine it.`;
+        const uploadMsg = `Selected "${data.name}" (${data.size}) in File Explorer (${data.path}). You can now ask me to rename it, delete it, move it, or open it.`;
         addMessage({
           role: "assistant",
           content: uploadMsg,
         });
-        speak(`Uploaded ${data.name}. Ready for your command.`);
+        speak(`Loaded ${data.name}. Ready for your command.`);
       } else {
         addMessage({
           role: "assistant",
-          content: `Upload failed: ${data.error || "Unknown error"}`,
+          content: `File selection failed: ${data.error || "Unknown error"}`,
         });
       }
     } catch (err: any) {
       addMessage({
         role: "assistant",
-        content: `Failed to upload file: ${err?.message || "network error"}`,
+        content: `Failed to load file: ${err?.message || "network error"}`,
       });
     } finally {
       setIsUploadingFile(false);
@@ -563,16 +567,30 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
     // ─── FILE EXPLORER OPERATING SYSTEM CONTROL ─────────────────────────────
     // Universal file control: rename, delete, move, copy, create folders, reveal
     // Works for any format (.pdf, .py, images, docs) and resolves pronouns ("it", "this")
+    const currentStaged = useJarvisStore.getState().stagedFile;
+    const cleanCmd = lower
+      .replace(/^(?:hey\s+)?jarvis[,:\s]*/i, "")
+      .replace(/^(?:please|could\s+you(?:\s+please)?|can\s+you(?:\s+please)?)\s*/i, "")
+      .trim();
+
     const isFileCommand =
-      /^(?:rename|change\s+(?:the\s+)?name\s+of)\b/i.test(lower) ||
-      /^(?:delete|remove|trash|destroy)\b[\s\S]*?\b(?:file|folder|it|this|\.\w+)\b/i.test(lower) ||
-      /^(?:move|copy)\b[\s\S]*?\bto\b/i.test(lower) ||
-      /^(?:create|make|new)\s+(?:a\s+)?folder\b/i.test(lower) ||
-      /^(?:reveal|open)\b[\s\S]*?\b(?:in\s+explorer|folder|directory)\b/i.test(lower);
+      // 1. If a file is staged, any command mentioning common file operations
+      (currentStaged && /\b(rename|delete|remove|trash|move|copy|duplicate|reveal|open|show|what|check)\b/i.test(cleanCmd)) ||
+      // 2. Explicit rename
+      /\b(?:rename|change\s+(?:the\s+)?name\s+of)\b/i.test(cleanCmd) ||
+      // 3. Delete / remove
+      /\b(?:delete|remove|trash|destroy)\b[\s\S]*?\b(?:file|folder|directory|it|this|document|screenshot|\.\w{2,5})\b/i.test(cleanCmd) ||
+      // 4. Move or copy
+      /\b(?:move|copy|duplicate)\b[\s\S]*?\bto\b/i.test(cleanCmd) ||
+      // 5. Create folder
+      /\b(?:create|make|new)\s+(?:a\s+)?(?:folder|directory)\b/i.test(cleanCmd) ||
+      // 6. Open or reveal in File Explorer
+      /\b(?:reveal|open|show)\b[\s\S]*?\b(?:in\s+(?:file\s+)?explorer|file\s+explorer|downloads\s+folder|desktop\s+folder|documents\s+folder)\b/i.test(cleanCmd) ||
+      // 7. List files
+      /\b(?:list|show|what)\s+(?:all\s+)?(?:the\s+)?files\b[\s\S]*?\b(?:in|on)\b/i.test(cleanCmd);
 
     if (isFileCommand) {
       try {
-        const currentStaged = useJarvisStore.getState().stagedFile;
         const res = await fetch("/api/files/manage", {
           method: "POST",
           headers: { "Content-Type": "application/json" },

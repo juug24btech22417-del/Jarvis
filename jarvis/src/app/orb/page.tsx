@@ -186,10 +186,14 @@ export default function OrbPage() {
 
   const handleOrbFileUpload = async (file: File) => {
     setOrbUploading(true);
-    notify(`Uploading ${file.name}…`);
+    notify(`Selecting ${file.name}…`);
     try {
       const formData = new FormData();
       formData.append("file", file);
+      const realPath = (file as any).path;
+      if (realPath) {
+        formData.append("filePath", realPath);
+      }
       const res = await fetch("/api/files/upload", { method: "POST", body: formData });
       const data = await res.json();
       if (data.success) {
@@ -202,16 +206,16 @@ export default function OrbPage() {
         notify(`Staged ${data.name} in File Explorer`);
         useJarvisStore.getState().addMessage({
           role: "assistant",
-          content: `Uploaded "${data.name}" (${data.size}) into File Explorer (Downloads/JarvisUploads). You can now ask me to rename it, delete it, move it, or review it.`,
+          content: `Selected "${data.name}" (${data.size}) in File Explorer (${data.path}). You can now ask me to rename it, delete it, move it, or review it.`,
         });
         setInputOpen(true);
         setDraft(`rename it to `);
         setTimeout(() => inputRef.current?.focus(), 80);
       } else {
-        notify(`Upload failed: ${data.error || "error"}`);
+        notify(`Selection failed: ${data.error || "error"}`);
       }
     } catch (err: any) {
-      notify(`Upload error: ${err.message || "failed"}`);
+      notify(`Selection error: ${err.message || "failed"}`);
     } finally {
       setOrbUploading(false);
     }
@@ -398,10 +402,14 @@ export default function OrbPage() {
       setOrbIngestFeedback({ active: true, label: file.name, kind: "file" });
       notify(`Absorbing & staging ${file.name}…`);
 
-      // Upload and stage in File Explorer (Downloads/JarvisUploads)
+      // Stage in File Explorer directly in place
       try {
         const formData = new FormData();
         formData.append("file", file);
+        const realPath = (file as any).path;
+        if (realPath) {
+          formData.append("filePath", realPath);
+        }
         const res = await fetch("/api/files/upload", { method: "POST", body: formData });
         const data = await res.json();
         if (data.success) {
@@ -414,12 +422,12 @@ export default function OrbPage() {
           notify(`Staged ${data.name} in File Explorer`);
           useJarvisStore.getState().addMessage({
             role: "assistant",
-            content: `Absorbed "${data.name}" (${data.size}) into File Explorer (Downloads/JarvisUploads). Staged for commands like rename, delete, move, or review.`,
+            content: `Selected "${data.name}" (${data.size}) in File Explorer (${data.path}). You can now ask me to rename it, delete it, move it, or review it.`,
           });
           setInputOpen(true);
         }
       } catch (err: any) {
-        console.error("Drop upload failed:", err);
+        console.error("Drop staging failed:", err);
       }
 
       if (file.type.startsWith("image/")) {

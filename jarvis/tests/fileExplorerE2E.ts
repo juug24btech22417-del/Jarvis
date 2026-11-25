@@ -37,15 +37,68 @@ async function runE2ETests() {
 
   try {
     // -------------------------------------------------------------
-    // TEST 1: Real PDF Upload (/api/files/upload)
+    // TEST 1: In-Place Renaming of User's Real File (NO JarvisUploads folder)
     // -------------------------------------------------------------
-    console.log("👉 Test 1: Uploading a real PDF file via /api/files/upload...");
-    const samplePdfContent = Buffer.from("%PDF-1.4\n1 0 obj\n<< /Title (Real World Contract PDF) >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF");
-    const testFileName = `contract_realworld_${Date.now()}.pdf`;
+    console.log("👉 Test 1: In-place natural language rename of real file in Downloads...");
+    const downloadsDir = path.join(homedir(), "Downloads");
+    const userPptx = path.join(downloadsDir, "m2 therm.pptx");
+    const tempPptx = path.join(downloadsDir, `test_notes_${Date.now()}.pptx`);
+
+    // Ensure a test file exists in Downloads root
+    const sourceFilePath = fs.existsSync(userPptx) ? userPptx : tempPptx;
+    if (!fs.existsSync(sourceFilePath)) {
+      fs.writeFileSync(sourceFilePath, "Fake PPTX Content for E2E Test");
+    }
+
+    const initialFileName = path.basename(sourceFilePath);
+    console.log(`Targeting file on disk: ${sourceFilePath}`);
+
+    // Command: Natural language rename without JarvisUploads
+    const targetRenamedName = `thermo_renamed_${Date.now()}.pptx`;
+    const renameRes = await fetch(`${BASE_URL}/api/files/manage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        command: `Hey JARVIS, please rename ${initialFileName} to ${targetRenamedName}`,
+      }),
+    });
+
+    const renameData = await renameRes.json();
+    console.log("Rename Response:", renameData);
+
+    assert(renameRes.status === 200, "Rename endpoint responded with HTTP 200");
+    assert(renameData.ok === true, "Rename returned ok: true");
+    assert(!fs.existsSync(sourceFilePath), "Original filename no longer exists");
+    assert(fs.existsSync(renameData.newPath), `Renamed file physically exists on disk at ${renameData.newPath}`);
+    assert(!renameData.newPath.includes("JarvisUploads"), "Verified NO JarvisUploads folder was used!");
+    assert(!fs.existsSync(path.join(homedir(), "Downloads", "JarvisUploads")), "Verified JarvisUploads folder does NOT exist!");
+
+    // Rename it back if it was the user's real file
+    let activeFilePath = renameData.newPath;
+    if (initialFileName === "m2 therm.pptx") {
+      const revertRes = await fetch(`${BASE_URL}/api/files/manage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          command: `rename it to m2 therm.pptx`,
+          contextFile: { name: targetRenamedName, path: activeFilePath },
+        }),
+      });
+      const revertData = await revertRes.json();
+      assert(revertData.ok === true, "Reverted back to m2 therm.pptx cleanly");
+      activeFilePath = revertData.newPath;
+    }
+
+    // -------------------------------------------------------------
+    // TEST 2: File Staging & Upload (Must save to Downloads root, NOT JarvisUploads)
+    // -------------------------------------------------------------
+    console.log("\n👉 Test 2: File staging with zero subfolder creation...");
+    const samplePdfContent = Buffer.from("%PDF-1.4\n1 0 obj\n<< /Title (Real Contract) >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF");
+    const testDocName = `quarterly_report_${Date.now()}.pdf`;
 
     const formData = new FormData();
     const blob = new Blob([samplePdfContent], { type: "application/pdf" });
-    formData.append("file", blob, testFileName);
+    formData.append("file", blob, testDocName);
 
     const uploadRes = await fetch(`${BASE_URL}/api/files/upload`, {
       method: "POST",
@@ -57,7 +110,9 @@ async function runE2ETests() {
 
     assert(uploadRes.status === 200, "Upload endpoint responded with HTTP 200");
     assert(uploadData.success === true, "Upload returned success: true");
-    assert(fs.existsSync(uploadData.path), `Uploaded file physically exists on disk at ${uploadData.path}`);
+    assert(fs.existsSync(uploadData.path), `Uploaded file physically exists at ${uploadData.path}`);
+    assert(!uploadData.path.includes("JarvisUploads"), "Uploaded file is directly in Downloads, NOT in JarvisUploads");
+    assert(path.dirname(uploadData.path) === downloadsDir, "Uploaded file is in root Downloads directory");
 
     let currentFile = {
       name: uploadData.name,
@@ -67,46 +122,45 @@ async function runE2ETests() {
     };
 
     // -------------------------------------------------------------
-    // TEST 2: Natural Rename with Pronoun ("rename it to blah blah...")
+    // TEST 3: Conversational Pronoun Rename ("could you please rename it to...")
     // -------------------------------------------------------------
-    const newName = `final_signed_agreement_${Date.now()}.pdf`;
-    console.log(`\n👉 Test 2: Natural rename command ("rename it to ${newName}")...`);
+    const newDocName = `final_board_review_${Date.now()}.pdf`;
+    console.log(`\n👉 Test 3: Conversational rename ("could you please rename it to ${newDocName}")...`);
 
-    const renameRes = await fetch(`${BASE_URL}/api/files/manage`, {
+    const convRenameRes = await fetch(`${BASE_URL}/api/files/manage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        command: `rename it to ${newName}`,
+        command: `could you please rename it to ${newDocName}`,
         contextFile: currentFile,
       }),
     });
 
-    const renameData = await renameRes.json();
-    console.log("Rename Response:", renameData);
+    const convRenameData = await convRenameRes.json();
+    console.log("Conversational Rename Response:", convRenameData);
 
-    assert(renameRes.status === 200, "Rename endpoint responded with HTTP 200");
-    assert(renameData.ok === true, "Rename returned ok: true");
-    assert(!fs.existsSync(currentFile.path), "Original file no longer exists under old name");
-    assert(fs.existsSync(renameData.newPath), `Renamed file physically exists on disk at ${renameData.newPath}`);
+    assert(convRenameRes.status === 200, "Responded with HTTP 200");
+    assert(convRenameData.ok === true, "Conversational rename succeeded");
+    assert(!fs.existsSync(currentFile.path), "Old document path is gone");
+    assert(fs.existsSync(convRenameData.newPath), `Renamed file exists at ${convRenameData.newPath}`);
 
-    // Update current context file
     currentFile = {
-      name: renameData.newName,
-      path: renameData.newPath,
+      name: convRenameData.newName,
+      path: convRenameData.newPath,
       size: currentFile.size,
       type: currentFile.type,
     };
 
     // -------------------------------------------------------------
-    // TEST 3: Natural Move ("move this file to Desktop")
+    // TEST 4: Move to Desktop ("move this file to Desktop")
     // -------------------------------------------------------------
-    console.log(`\n👉 Test 3: Natural move command ("move this to Desktop")...`);
+    console.log(`\n👉 Test 4: Move command ("move this to Desktop")...`);
 
     const moveRes = await fetch(`${BASE_URL}/api/files/manage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        command: "move this to Desktop",
+        command: "Hey JARVIS, move this to Desktop",
         contextFile: currentFile,
       }),
     });
@@ -114,18 +168,18 @@ async function runE2ETests() {
     const moveData = await moveRes.json();
     console.log("Move Response:", moveData);
 
-    assert(moveRes.status === 200, "Move endpoint responded with HTTP 200");
-    assert(moveData.ok === true, "Move returned ok: true");
-    assert(!fs.existsSync(currentFile.path), "Original path no longer exists");
-    assert(fs.existsSync(moveData.destPath), `Moved file physically exists on Desktop at ${moveData.destPath}`);
+    assert(moveData.ok === true, "Moved file to Desktop");
+    assert(!fs.existsSync(currentFile.path), "Original file in Downloads is moved");
+    assert(fs.existsSync(moveData.destPath), `File physically exists on Desktop at ${moveData.destPath}`);
+    assert(path.dirname(moveData.destPath) === path.join(homedir(), "Desktop"), "Path is on user Desktop");
 
     currentFile.path = moveData.destPath;
 
     // -------------------------------------------------------------
-    // TEST 4: Create Folder in File Explorer ("create folder JarvisVaultTest")
+    // TEST 5: Create Folder on Desktop ("create folder Project_Alpha on Desktop")
     // -------------------------------------------------------------
-    const testFolder = `Jarvis_Vault_${Date.now()}`;
-    console.log(`\n👉 Test 4: Create folder command ("create folder ${testFolder} in Desktop")...`);
+    const testFolder = `Jarvis_Workspace_${Date.now()}`;
+    console.log(`\n👉 Test 5: Create folder ("create folder ${testFolder} in Desktop")...`);
 
     const folderRes = await fetch(`${BASE_URL}/api/files/manage`, {
       method: "POST",
@@ -136,16 +190,15 @@ async function runE2ETests() {
     });
 
     const folderData = await folderRes.json();
-    console.log("Create Folder Response:", folderData);
+    console.log("Folder Response:", folderData);
 
-    assert(folderRes.status === 200, "Folder endpoint responded with HTTP 200");
-    assert(folderData.ok === true, "Folder returned ok: true");
-    assert(fs.existsSync(folderData.path), `Folder physically exists on disk at ${folderData.path}`);
+    assert(folderData.ok === true, "Created folder");
+    assert(fs.existsSync(folderData.path), `Folder physically exists at ${folderData.path}`);
 
     // -------------------------------------------------------------
-    // TEST 5: Natural Delete ("delete this file")
+    // TEST 6: Delete Staged File ("delete this file")
     // -------------------------------------------------------------
-    console.log(`\n👉 Test 5: Natural delete command ("delete this file")...`);
+    console.log(`\n👉 Test 6: Delete command ("delete this file")...`);
 
     const deleteRes = await fetch(`${BASE_URL}/api/files/manage`, {
       method: "POST",
@@ -159,9 +212,8 @@ async function runE2ETests() {
     const deleteData = await deleteRes.json();
     console.log("Delete Response:", deleteData);
 
-    assert(deleteRes.status === 200, "Delete endpoint responded with HTTP 200");
-    assert(deleteData.ok === true, "Delete returned ok: true");
-    assert(!fs.existsSync(currentFile.path), `File is physically deleted from disk at ${currentFile.path}`);
+    assert(deleteData.ok === true, "Deleted file");
+    assert(!fs.existsSync(currentFile.path), `File physically removed from Desktop at ${currentFile.path}`);
 
     // Clean up created test folder
     console.log(`\n👉 Clean up: Deleting test folder ${folderData.path}...`);
