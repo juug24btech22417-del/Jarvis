@@ -209,7 +209,7 @@ export default function OrbPage() {
           content: `Selected "${data.name}" (${data.size}) in File Explorer (${data.path}). You can now ask me to rename it, delete it, move it, or review it.`,
         });
         setInputOpen(true);
-        setDraft(`rename it to `);
+        setDraft("");
         setTimeout(() => inputRef.current?.focus(), 80);
       } else {
         notify(`Selection failed: ${data.error || "error"}`);
@@ -1092,7 +1092,7 @@ export default function OrbPage() {
     };
   }, []);
 
-  const submit = (e?: React.FormEvent) => {
+  const submit = async (e?: React.FormEvent) => {
     e?.preventDefault();
     const text = draft.trim();
     if (!text) return;
@@ -1129,6 +1129,73 @@ export default function OrbPage() {
     if (text.startsWith("/circle") || text.startsWith("/act")) {
       void triggerCircleAct(text);
       return;
+    }
+
+    // ── Direct File Explorer Command Handling in Orb ──
+    const currentStaged = useJarvisStore.getState().stagedFile;
+    const cleanLower = text.toLowerCase().trim();
+    const isFileCmd =
+      (currentStaged && /\b(rename|delete|remove|trash|move|copy|duplicate|reveal|open|show|what|check)\b/i.test(cleanLower)) ||
+      /\b(?:rename|change\s+(?:the\s+)?name\s+of)\b/i.test(cleanLower) ||
+      /\b(?:delete|remove|trash|destroy)\b[\s\S]*?\b(?:file|folder|directory|it|this|document|screenshot|\.\w{2,5})\b/i.test(cleanLower) ||
+      /\b(?:move|copy|duplicate)\b[\s\S]*?\bto\b/i.test(cleanLower) ||
+      /\b(?:create|make|new)\s+(?:a\s+)?(?:folder|directory)\b/i.test(cleanLower) ||
+      /\b(?:reveal|open|show)\b[\s\S]*?\b(?:in\s+(?:file\s+)?explorer|file\s+explorer|downloads\s+folder|desktop\s+folder|documents\s+folder)\b/i.test(cleanLower);
+
+    if (isFileCmd) {
+      setDraft("");
+      setInputOpen(false);
+      notify("Processing File Explorer command…");
+      try {
+        const res = await fetch("/api/files/manage", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            command: text,
+            contextFile: currentStaged,
+          }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          if (data.action === "rename" && data.newPath) {
+            useJarvisStore.getState().setStagedFile({
+              name: data.newName,
+              path: data.newPath,
+              size: currentStaged?.size || "",
+              type: currentStaged?.type || "",
+            });
+          } else if (data.action === "delete") {
+            useJarvisStore.getState().setStagedFile(null);
+          } else if (data.action === "move" && data.destPath) {
+            useJarvisStore.getState().setStagedFile({
+              name: data.fileName,
+              path: data.destPath,
+              size: currentStaged?.size || "",
+              type: currentStaged?.type || "",
+            });
+          }
+          const msg = data.message || "File Explorer action completed.";
+          useJarvisStore.getState().addMessage({
+            role: "assistant",
+            content: msg,
+          });
+          setBubbleOpen(true);
+          notify(msg);
+          return;
+        } else {
+          const errMsg = `File operation failed: ${data.error || "Unknown error"}`;
+          useJarvisStore.getState().addMessage({
+            role: "assistant",
+            content: errMsg,
+          });
+          setBubbleOpen(true);
+          notify(errMsg);
+          return;
+        }
+      } catch (err: any) {
+        notify(`File error: ${err.message || "failed"}`);
+        return;
+      }
     }
 
     // Once a window is inside the orb, follow-up questions are about it.
@@ -1915,7 +1982,7 @@ export default function OrbPage() {
                       setDraft("");
                     }
                   }}
-                  placeholder="Ask, /ghost, /target, /circle…"
+                  placeholder={stagedFile ? "Ask or command: rename it to..., delete, move..." : "Ask, /ghost, /target, /circle…"}
                   className="min-w-0 flex-1 bg-transparent px-0.5 text-[11px] text-white/90 outline-none placeholder:text-white/[0.28]"
                   autoComplete="off"
                   spellCheck={false}

@@ -551,10 +551,12 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
 
   // Process system control commands (volume, clipboard, battery, network)
   const processSystemCommand = async (text: string): Promise<string | null> => {
+    // If text starts with an orb window focus tag like [FOCUS: ...], extract the actual command
+    const pureText = text.replace(/^\[FOCUS:[\s\S]*?\]\s*/i, "").trim();
     // Ingested files, code reviews, orb system tags, and structured payloads
     // should NEVER be intercepted as local system commands or missions.
-    if (text.startsWith("[")) return null;
-    const lower = text.toLowerCase();
+    if (pureText.startsWith("[")) return null;
+    const lower = pureText.toLowerCase();
 
     // ─── AVENGERS ASSEMBLE ───────────────────────────────────────────────
     // Absolute top priority: this is the cinematic easter egg. Matches
@@ -595,7 +597,7 @@ export default function CommandBar({ onCalculate, onOpenWhatsapp, onOpenPhoneRem
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            command: text,
+            command: pureText,
             contextFile: currentStaged,
           }),
         });
