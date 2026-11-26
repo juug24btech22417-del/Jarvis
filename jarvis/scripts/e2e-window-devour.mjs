@@ -359,12 +359,17 @@ try {
         console.log("      the OS did not move the cursor — gesture result is not meaningful");
       }
 
+      // A plain drag is a silent move: no card may appear until Shift is held.
+      const quietDrag = !(await page.$(".devour-card"));
+      check("a plain drag shows no card", quietDrag, quietDrag ? "nothing raised" : "card appeared");
+
+      // Commit: holding shift is what raises the preview card.
+      shiftDown();
       cardSeen = await page
         .waitForSelector(".devour-card", { timeout: 2500 })
         .then(() => true)
         .catch(() => false);
-      shiftDown();
-      await sleep(90);
+      await sleep(120);
       mouseUp();
       await sleep(90);
       shiftUp();
@@ -383,7 +388,7 @@ try {
       check(
         `the physical drag locked onto ${NEEDLE}`,
         cardSeen || appeared,
-        cardSeen ? "preview while dragging" : appeared ? "on release" : "no card"
+        cardSeen ? "preview while shift held" : appeared ? "on release" : "no card"
       );
       cardSeen = cardSeen || appeared;
     }

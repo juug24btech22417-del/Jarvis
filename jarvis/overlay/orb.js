@@ -406,26 +406,23 @@ function writeBounds() {
 /** Default spot: bottom-right of the primary work area, clear of the taskbar. */
 function defaultPosition() {
   const wa = screen.getPrimaryDisplay().workArea;
-  return { x: wa.x + wa.width - WIDTH - 24, y: wa.y + wa.height - HEIGHT - 16 };
+  return {
+    x: Math.round(wa.x + wa.width - WIDTH - 40),
+    y: Math.round(wa.y + wa.height - HEIGHT - 40),
+  };
 }
 
-/** Keep the orb on a display that still exists (monitors get unplugged). */
+/** Keep the orb on a display that still exists and within visible bounds. */
 function clampToDisplays(pos) {
   try {
-    const ok = screen.getAllDisplays().some((d) => {
-      const wa = d.workArea;
-      return (
-        pos.x + WIDTH > wa.x + 60 &&
-        pos.x < wa.x + wa.width - 60 &&
-        pos.y + 80 > wa.y &&
-        pos.y < wa.y + wa.height - 80
-      );
-    });
-    if (!ok) return defaultPosition();
+    const wa = screen.getPrimaryDisplay().workArea;
+    const x = Math.max(wa.x + 20, Math.min(pos.x, wa.x + wa.width - WIDTH - 20));
+    const y = Math.max(wa.y + 20, Math.min(pos.y, wa.y + wa.height - HEIGHT - 20));
+    return { x: Math.round(x), y: Math.round(y) };
   } catch {
-    /* no display info — trust the file */
+    /* fallback to default */
   }
-  return pos;
+  return defaultPosition();
 }
 
 // ── Server readiness ──────────────────────────────────────────────────────
@@ -510,6 +507,12 @@ function startCursorStream() {
 // than the orb parked on top of it, and the physical mouse button (not a DOM
 // pointerup that can never arrive) decides when the bite lands.
 const VK_LBUTTON = 0x01;
+const VK_SHIFT = 0x10;
+
+function isShiftDown() {
+  const api = natives();
+  return !!api && (Number(api.GetAsyncKeyState(VK_SHIFT)) & 0x8000) !== 0;
+}
 
 let drag = null;
 let hoverTarget = null;
@@ -540,6 +543,7 @@ ipcMain.handle("orb:drag-start", () => {
     at: Date.now(),
     timer: null,
     probeAt: 0,
+    misses: 0,
     api,
   };
   if (api) win.setIgnoreMouseEvents(true, { forward: true });
@@ -569,7 +573,23 @@ ipcMain.handle("orb:drag-start", () => {
       }
       if (Date.now() - drag.probeAt > 80) {
         drag.probeAt = Date.now();
-        setHover(windowAt(cur));
+        // The card is the commit preview: nothing is reported until Shift is
+        // held, so a plain drag is a silent move and costs no hit-testing.
+        const shifting = (Number(drag.api.GetAsyncKeyState(VK_SHIFT)) & 0x8000) !== 0;
+        if (!shifting) {
+          drag.misses = 0;
+          setHover(null);
+        } else {
+          const hit = windowAt(cur);
+          // A single miss (a tooltip, a window mid-move) must not snatch the
+          // card away: only a run of misses drops the preview.
+          if (hit) {
+            drag.misses = 0;
+            setHover(hit);
+          } else if (++drag.misses >= 4) {
+            setHover(null);
+          }
+        }
       }
     }
     // A pointerup that never arrives (focus stolen mid-drag) must not leave the
@@ -597,7 +617,12 @@ function finishDrag() {
   const d = endDrag();
   if (!d) return;
   if (d.moved) writeBounds();
-  const target = d.moved ? hoverTarget : null;
+  let target = d.moved ? hoverTarget : null;
+  // Trust the point under the cursor at the moment of release over the last
+  // hover probe: one missed probe must never drop the window the user aimed at.
+  if (d.moved && d.native && isShiftDown()) {
+    target = windowAt(screen.getCursorScreenPoint()) || target;
+  }
 
   // The page toggles the composer on a click, so every drag has to settle with
   // an answer — even when nothing was eaten. The drop goes first: clearing the
@@ -605,9 +630,7 @@ function finishDrag() {
   // A plain drag only repositions the orb: holding Shift when the button comes
   // up is the commit gesture, so sliding the orb across the screen never spends
   // a question by accident.
-  const api = natives();
-  const commit =
-    !!target && !!api && (Number(api.GetAsyncKeyState(0x10 /* VK_SHIFT */)) & 0x8000) !== 0;
+  const commit = !!target && isShiftDown();
   if (DEBUG) {
     console.log(
       `[orb] devour drop: moved=${d.moved} target=${target ? target.title : "(none)"} commit=${commit}`
@@ -736,12 +759,19 @@ ipcMain.on("orb:menu", () => {
 
 function toggleOrb() {
   if (!liveWindow()) return;
-  if (win.isVisible()) {
+  const isVis = win.isVisible();
+  console.log(`[orb] toggleOrb called: wasVisible=${isVis}`);
+  if (isVis && !win.isMinimized()) {
     win.hide();
+    console.log("[orb] hidden");
     return;
   }
+  if (win.isMinimized()) win.restore();
   win.show();
+  win.focus();
+  win.setAlwaysOnTop(true, "screen-saver");
   win.moveTop();
+  console.log("[orb] shown at bounds:", win.getBounds());
 }
 
 // ── Window ─────────────────────────────────────────────────────────────────
@@ -754,9 +784,6 @@ function createWindow(startUrl) {
     x: pos.x,
     y: pos.y,
     frame: false,
-    // The whole point. Unlike the stealth HUD (which needs a solid window so it
-    // can stay exempt from screen capture), the orb is meant to look like it is
-    // floating on the desktop, so the window itself is see-through.
     transparent: true,
     backgroundColor: "#00000000",
     hasShadow: false,
@@ -765,25 +792,27 @@ function createWindow(startUrl) {
     minimizable: false,
     fullscreenable: false,
     alwaysOnTop: true,
-    skipTaskbar: true,
-    // Focusable: you have to be able to type into it.
+    skipTaskbar: false,
     focusable: true,
     title: "JARVIS ORB",
     webPreferences: {
       preload: path.join(__dirname, "orb-preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
-      // The orb must keep animating while you work in another app.
       backgroundThrottling: false,
     },
   });
 
-  // Above full-screen windows and on every virtual desktop.
   win.setAlwaysOnTop(true, "screen-saver");
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  // Start transparent to the mouse; the page turns hit-testing on when the
-  // cursor is over the orb, the bubble or the input.
   win.setIgnoreMouseEvents(true, { forward: true });
+
+  win.once("ready-to-show", () => {
+    win.show();
+    win.focus();
+    win.moveTop();
+    console.log("[orb] ready-to-show: visible at", win.getBounds());
+  });
 
   win.loadURL(startUrl || ORB_URL);
 
@@ -796,6 +825,9 @@ function createWindow(startUrl) {
 
   win.webContents.on("did-finish-load", () => {
     console.log(`[orb] loaded ${win.webContents.getURL().slice(0, 80)}`);
+    win.show();
+    win.focus();
+    win.moveTop();
     startCursorStream();
     startClipboardWatcher();
   });
@@ -805,8 +837,6 @@ function createWindow(startUrl) {
     endDrag();
   });
 
-  // The page never grants itself permissions it does not need; the orb only
-  // records audio for speech input.
   win.webContents.session.setPermissionRequestHandler((_wc, permission, callback) => {
     callback(permission === "media");
   });
@@ -820,9 +850,13 @@ app.whenReady().then(async () => {
     armServerWatch();
   }
 
-  const ok = globalShortcut.register(TOGGLE_ACCEL, toggleOrb);
-  if (!ok) console.warn(`[orb] another app already owns ${TOGGLE_ACCEL} — summon key disabled`);
-  else console.log(`[orb] ${TOGGLE_ACCEL} shows/hides the orb`);
+  const hotkeys = [TOGGLE_ACCEL, "Alt+Shift+O", "Control+Alt+O"];
+  for (const hk of hotkeys) {
+    try {
+      const ok = globalShortcut.register(hk, toggleOrb);
+      if (ok) console.log(`[orb] ${hk} shows/hides the orb`);
+    } catch {}
+  }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
