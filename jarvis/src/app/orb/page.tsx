@@ -1139,6 +1139,8 @@ export default function OrbPage() {
       /\b(?:rename|change\s+(?:the\s+)?name\s+of)\b/i.test(cleanLower) ||
       /\b(?:delete|remove|trash|destroy)\b[\s\S]*?\b(?:file|folder|directory|it|this|document|screenshot|\.\w{2,5})\b/i.test(cleanLower) ||
       /\b(?:move|copy|duplicate)\b[\s\S]*?\bto\b/i.test(cleanLower) ||
+      (!!currentStaged &&
+        /\b(?:put|place|send|transfer|shift|take|drag)\b[\s\S]*?\b(?:to|into|in|on|onto)\b/i.test(cleanLower)) ||
       /\b(?:create|make|new)\s+(?:a\s+)?(?:folder|directory)\b/i.test(cleanLower) ||
       /\b(?:reveal|open|show)\b[\s\S]*?\b(?:in\s+(?:file\s+)?explorer|file\s+explorer|downloads\s+folder|desktop\s+folder|documents\s+folder)\b/i.test(cleanLower);
 

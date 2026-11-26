@@ -5,9 +5,50 @@ import path from "path";
 import { homedir } from "os";
 import { exec } from "child_process";
 import { promisify } from "util";
+import {
+  fallbackTable,
+  resolveDestination,
+  type FolderTable,
+} from "@/lib/files/destinations";
 
 const execAsync = promisify(exec);
 export const runtime = "nodejs";
+
+// The real shell folders. Documents and Pictures are commonly redirected into
+// OneDrive (and localised), so joining homedir() by hand invents a second
+// "Documents" folder that the user never sees. Read it once, then cache.
+let tablePromise: Promise<FolderTable> | null = null;
+function folderTable(): Promise<FolderTable> {
+  if (!tablePromise) {
+    const fallback = fallbackTable(homedir());
+    if (process.platform !== "win32") {
+      tablePromise = Promise.resolve(fallback);
+    } else {
+      tablePromise = execAsync(
+        `powershell -NoProfile -Command "[Console]::OutputEncoding=[Text.Encoding]::UTF8; ` +
+          `$o=[ordered]@{desktop=[Environment]::GetFolderPath('Desktop');` +
+          `downloads=(Join-Path $env:USERPROFILE 'Downloads');` +
+          `documents=[Environment]::GetFolderPath('MyDocuments');` +
+          `pictures=[Environment]::GetFolderPath('MyPictures');` +
+          `videos=[Environment]::GetFolderPath('MyVideos');` +
+          `music=[Environment]::GetFolderPath('MyMusic')};` +
+          `$o | ConvertTo-Json -Compress"`,
+        { timeout: 5000, windowsHide: true }
+      )
+        .then(({ stdout }) => {
+          const parsed = JSON.parse(stdout.trim()) as Partial<FolderTable>;
+          const table = { ...fallback };
+          for (const key of Object.keys(fallback) as (keyof FolderTable)[]) {
+            const value = parsed[key]?.trim();
+            if (value) table[key] = value;
+          }
+          return table;
+        })
+        .catch(() => fallback);
+    }
+  }
+  return tablePromise;
+}
 
 // Common directory shortcuts
 function resolveKnownDir(name?: string): string {
@@ -168,8 +209,10 @@ function parseDeterministicCommand(cmd: string, contextFile?: { name: string; pa
     }
   }
 
-  // Pattern: "move [it/file] to <folder>"
-  const moveMatch = text.match(/^move\s+(?:the\s+file\s+|file\s+|it\s+|this\s+|this\s+file\s+)?["']?([^"'\n]+?)["']?\s+to\s+["']?([^"'\n]+)["']?$/i);
+  // Pattern: "move/put/send/take [it/file] to|into|on <folder>"
+  const moveMatch = text.match(
+    /^(?:move|put|place|send|transfer|shift|take|drag)\s+(?:the\s+file\s+|file\s+|it\s+|this\s+|this\s+file\s+)?["']?([^"'\n]+?)["']?\s+(?:to|into|in|on|onto)\s+["']?([^"'\n]+)["']?$/i
+  );
   if (moveMatch) {
     let source = moveMatch[1].trim();
     const targetDir = moveMatch[2].trim();
@@ -180,7 +223,9 @@ function parseDeterministicCommand(cmd: string, contextFile?: { name: string; pa
   }
 
   // Pattern: "move to <folder>"
-  const moveToMatch = text.match(/^move\s+to\s+["']?([^"'\n]+)["']?$/i);
+  const moveToMatch = text.match(
+    /^(?:move|put|place|send|transfer|shift|take|drag)\s+(?:it\s+|this\s+|the\s+file\s+)?(?:to|into|in|on|onto)\s+["']?([^"'\n]+)["']?$/i
+  );
   if (moveToMatch) {
     const targetDir = moveToMatch[1].trim();
     const source = contextFile?.path || contextFile?.name || "latest_download";
@@ -401,13 +446,47 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: false, error: `File not found in File Explorer: ${rawSource}` }, { status: 404 });
       }
 
-      const destDir = resolveKnownDir(targetDir);
+      const destDir = resolveDestination(targetDir, await folderTable());
+      if (!destDir) {
+        // Guessing here is what produced a "Moved to Downloads" message for a
+        // typo while the file stayed put. Say so instead.
+        return NextResponse.json(
+          {
+            ok: false,
+            error: `I don't know where "${targetDir}" is. Try desktop, downloads, documents, pictures, videos or music.`,
+          },
+          { status: 400 }
+        );
+      }
       await fs.mkdir(destDir, { recursive: true });
 
       const fileName = path.basename(resolvedSource);
       const destPath = path.join(destDir, fileName);
 
+      const samePath =
+        path.resolve(destPath).toLowerCase() === path.resolve(resolvedSource).toLowerCase();
+      if (samePath) {
+        return NextResponse.json({
+          ok: true,
+          action: "move",
+          unchanged: true,
+          sourcePath: resolvedSource,
+          destPath,
+          fileName,
+          destDir,
+          message: `'${fileName}' is already in ${destDir} — nothing to move.`,
+        });
+      }
+
       await fs.rename(resolvedSource, destPath);
+
+      // Never report a move that did not happen.
+      if (!fsSync.existsSync(destPath) || fsSync.existsSync(resolvedSource)) {
+        return NextResponse.json(
+          { ok: false, error: `The move did not complete — '${fileName}' is still in ${path.dirname(resolvedSource)}.` },
+          { status: 500 }
+        );
+      }
 
       return NextResponse.json({
         ok: true,
