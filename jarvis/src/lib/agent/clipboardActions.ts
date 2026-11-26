@@ -15,6 +15,7 @@ import {
   findAction,
   type ClipKind,
 } from "@/lib/agent/clipboardDetect";
+import { detectMcq, mcqClipboardTask } from "@/lib/agent/mcq";
 
 export interface ClipActionResult {
   kind: ClipKind;
@@ -231,6 +232,12 @@ export async function runClipAction(args: {
   const label = KIND_META[kind]?.label ?? "Snippet";
   const task = TASKS[actionId];
   const text = (args.text ?? "").trim().slice(0, 6000);
+  // A pasted quiz must come back as an answer key, not a paragraph. Only the
+  // actions that actually produce answers get the format override.
+  const mcq = /^(?:answer|exam_answer|solve)$/.test(actionId) ? detectMcq(text) : null;
+  const instruction = [task?.task ?? "Do the most useful thing with this snippet.", mcq ? mcqClipboardTask(mcq) : ""]
+    .filter(Boolean)
+    .join("\n\n");
 
   // ── Zero-cost actions ──
   if (actionId === "open") {
@@ -277,7 +284,7 @@ export async function runClipAction(args: {
     raw = await analyzeImage({
       image: args.image,
       actionLabel,
-      instruction: task?.task ?? "Analyze this image.",
+      instruction,
     });
   } else {
     const contextLine = args.source ? `Copied from: ${args.source}\n` : "";
@@ -287,7 +294,7 @@ export async function runClipAction(args: {
         contextLine,
         `Detected kind: ${label} (${kind})`,
         `Chosen action: ${actionLabel}`,
-        `Instruction: ${task?.task ?? "Do the most useful thing with this snippet."}`,
+        `Instruction: ${instruction}`,
         "",
         "Snippet:",
         '"""',

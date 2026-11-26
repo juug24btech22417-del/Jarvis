@@ -5,6 +5,7 @@ import { promisify } from "util";
 import fs from "fs";
 import path from "path";
 import { parseCommand, JARVISContext, buildSystemPrompt, parseIntentWithLLM, PERSONALITY_WRAPPER_PROMPT } from "@/lib/jarvis/personality";
+import { detectMcq, mcqChatDirective } from "@/lib/agent/mcq";
 
 const execAsync = promisify(exec);
 import { retrieveRelevantMemories, formatMemoryContextAsPrompt } from "@/lib/memory/retriever";
@@ -636,6 +637,9 @@ async function getSystemStatus() {
 
 // Generate offline response based on user input
 function generateOfflineResponse(lastMessage: string, reason: "no_llm" | "rate_limited" = "no_llm", stats?: any): string {
+  // A pasted quiz can mention time, dates or temperature and must still get
+  // quiz treatment instead of a canned "today is…" reply.
+  const isQuiz = detectMcq(lastMessage) !== null;
   const rateLimitedNote =
     reason === "rate_limited"
       ? " Every free OpenRouter model I tried is rate-limited right now — give it a minute and try again."
@@ -662,18 +666,18 @@ function generateOfflineResponse(lastMessage: string, reason: "no_llm" | "rate_l
   }
 
   // Time/Date - more flexible patterns
-  if (lastMessage.match(/what'?s?\s*time|current\s*time|time\s*is\s*it|tell\s*me\s*the\s*time|what\s*time\s+is\s+it/)) {
+  if (!isQuiz && lastMessage.match(/what'?s?\s*time|current\s*time|time\s*is\s*it|tell\s*me\s*the\s*time|what\s*time\s+is\s+it/)) {
     const now = new Date();
     const timeString = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
     return `The current time is ${timeString}, Boss.`;
   }
-  if (lastMessage.match(/what'?s?\s*(today'?s?\s*)?date|today|what\s*day|current\s*date/)) {
+  if (!isQuiz && lastMessage.match(/what'?s?\s*(today'?s?\s*)?date|today|what\s*day|current\s*date/)) {
     const now = new Date();
     return `Today is ${now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}, Boss.`;
   }
 
   // Weather - no API key
-  if (lastMessage.includes("weather") || lastMessage.includes("temperature")) {
+  if (!isQuiz && (lastMessage.includes("weather") || lastMessage.includes("temperature"))) {
     return "I'm unable to fetch live weather data in offline mode, Boss. To enable weather updates, please connect to the internet and add an OpenWeatherMap API key.";
   }
 
@@ -1272,6 +1276,10 @@ export async function POST(request: Request) {
 
     const userTone = detectTone(lastUserMessage, messages, "Dhruv");
     let enhancedSystemPrompt = memoryContext ? `${systemPrompt}\n\n${memoryContext}` : systemPrompt;
+    // A pasted quiz must come back as a numbered answer key, not a paragraph —
+    // the orb, the command bar and Telegram all arrive here.
+    const mcq = detectMcq(lastUserMessage);
+    if (mcq) enhancedSystemPrompt += mcqChatDirective(mcq);
     if (carePromptBlock) enhancedSystemPrompt += carePromptBlock;
 
     // Inject dynamic relationship, tone & address adaptation
@@ -1377,7 +1385,9 @@ const nvidiaApiKey = process.env.NVIDIA_API_KEY;
     const hasWeatherApi = weatherApiKey && weatherApiKey.trim() !== "" && weatherApiKey !== "your-api-key-here";
     const hasSerperApi = serperApiKey && serperApiKey.trim() !== "" && serperApiKey !== "your-api-key-here";
 
-    if (hasWeatherApi && (lastMessage.includes("weather") || lastMessage.includes("temperature"))) {
+    // Quizzes often mention temperature/weather — never answer those with a
+    // live weather lookup instead of the answer key.
+    if (!mcq && hasWeatherApi && (lastMessage.includes("weather") || lastMessage.includes("temperature"))) {
       try {
         const cityMatch = lastMessage.match(/weather (?:in|at|for)?\s*(.+?)(?:\?|$|today|now|currently)/i);
         const city = cityMatch ? cityMatch[1].trim() : "Delhi";
