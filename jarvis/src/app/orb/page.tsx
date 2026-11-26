@@ -59,6 +59,20 @@ type WindowCapture = {
 type DevourPhase = "idle" | "locked" | "swallow" | "digest";
 type DevourDropPayload = { moved: boolean; target: DevourTarget | null };
 
+/** One icon in the feature burst behind the composer's sparkle button. */
+type FeatureChip = {
+  key: string;
+  title: string;
+  icon: React.ReactNode;
+  active: boolean;
+  activeClass: string;
+  idleClass: string;
+  badge?: number;
+  badgeClass?: string;
+  pulse?: boolean;
+  run: () => void;
+};
+
 declare global {
   interface Window {
     jarvisOrb?: {
@@ -227,6 +241,9 @@ export default function OrbPage() {
   const copilotInputRef = useRef<HTMLInputElement>(null);
   const [inputOpen, setInputOpen] = useState(false);
   const [bubbleOpen, setBubbleOpen] = useState(false);
+  // The feature dock lives behind one button next to the composer — nothing
+  // hangs under the orb until it is asked for.
+  const [showFeatures, setShowFeatures] = useState(false);
   const [draft, setDraft] = useState("");
 
   // Feature modal trays
@@ -1210,6 +1227,7 @@ export default function OrbPage() {
   const accent = (ORB_TONES[state] ?? ORB_TONES.idle).accent;
   const activeGhost = ghostWorkers.find((w) => w.status === "running" || w.status === "waiting_approval");
   const cardOpen =
+    showFeatures ||
     inputOpen ||
     bubbleOpen ||
     showStash ||
@@ -1228,6 +1246,8 @@ export default function OrbPage() {
   useEffect(() => {
     if (window.jarvisOrb?.resize) {
       if (cardOpen) {
+        // Fixed height: the feature burst borrows room from the conversation
+        // pane instead of making the whole window grow.
         void window.jarvisOrb.resize({ width: 320, height: 490 });
       } else {
         void window.jarvisOrb.resize({ width: 320, height: 330 });
@@ -1417,184 +1437,28 @@ export default function OrbPage() {
         @media (prefers-reduced-motion: reduce) {
           .devour-card { animation: none; }
         }
+        /* Feature burst — grows out of the orb */
+        .feature-burst {
+          transform-origin: 50% -46px;
+          animation: burst-in 280ms cubic-bezier(0.2, 0.9, 0.3, 1.25) both;
+        }
+        @keyframes burst-in {
+          from { opacity: 0; transform: translateY(-16px) scale(0.5); filter: blur(6px); }
+          to   { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+        }
+        .feature-chip {
+          animation: chip-in 380ms cubic-bezier(0.2, 0.9, 0.3, 1.4) both;
+          opacity: 0;
+        }
+        .feature-chip svg { width: 10px; height: 10px; }
+        @keyframes chip-in {
+          from { opacity: 0; transform: translate3d(0, -18px, 0) scale(0.35); filter: blur(4px); }
+          to   { opacity: 1; transform: translate3d(0, 0, 0) scale(1); filter: blur(0); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .feature-burst, .feature-chip { animation: none; opacity: 1; }
+        }
       `}</style>
-
-      {/* ── Quick Action Capabilities Dock (Features 1-5) ── */}
-      <div
-        data-orb-hit
-        className={`mt-1 flex items-center gap-1 rounded-full border border-white/[0.07] bg-black/40 px-2 py-0.5 backdrop-blur transition-opacity duration-300 ${
-          devourPhase !== "idle" ? "pointer-events-none opacity-0" : ""
-        }`}
-      >
-        {/* Reticle Mode (Feature 2) */}
-        <button
-          type="button"
-          onClick={toggleReticle}
-          title="Target Screen Reticle (Element Auto-Pilot)"
-          className={`rounded-full p-1 transition-colors ${
-            screenReticle?.active ? "bg-cyan-500/30 text-cyan-300" : "text-white/40 hover:text-cyan-300"
-          }`}
-        >
-          <Crosshair className="h-3 w-3" />
-        </button>
-
-        {/* Multi-Clip Stash (Feature 3) */}
-        <button
-          type="button"
-          onClick={() => setShowStash((v) => !v)}
-          title="Clipboard Magic Stash"
-          className={`relative rounded-full p-1 transition-colors ${
-            showStash ? "bg-amber-500/30 text-amber-300" : "text-white/40 hover:text-amber-300"
-          }`}
-        >
-          <Layers className="h-3 w-3" />
-          {clipboardStash.length > 0 && (
-            <span className="absolute -top-0.5 -right-0.5 flex h-2.5 w-2.5 items-center justify-center rounded-full bg-amber-400 text-[7px] font-bold text-black">
-              {clipboardStash.length}
-            </span>
-          )}
-        </button>
-
-        {/* Ghost Worker (Feature 4) */}
-        <button
-          type="button"
-          onClick={() => {
-            if (activeGhost) {
-              setShowGhost((v) => !v);
-              return;
-            }
-            if (!draft.trim()) {
-              setInputOpen(true);
-              setDraft("/ghost ");
-              notify("Type Ghost mission & press Enter");
-              setTimeout(() => inputRef.current?.focus(), 80);
-              return;
-            }
-            void launchGhostWorker();
-          }}
-          title="Autonomous Ghost Worker"
-          className={`rounded-full p-1 transition-colors ${
-            activeGhost ? "bg-emerald-500/30 text-emerald-300 animate-pulse" : "text-white/40 hover:text-emerald-300"
-          }`}
-        >
-          <Bot className="h-3 w-3" />
-        </button>
-
-        {/* Circle-to-Act (Feature 5) */}
-        <button
-          type="button"
-          onClick={() => {
-            if (!draft.trim()) {
-              setInputOpen(true);
-              setDraft("/act ");
-              notify("Type screen instruction & press Enter (or leave blank to inspect)");
-              setTimeout(() => inputRef.current?.focus(), 80);
-              return;
-            }
-            void triggerCircleAct();
-          }}
-          title="Circle-to-Act Screen Teleportation"
-          className="rounded-full p-1 text-white/40 transition-colors hover:text-purple-300"
-        >
-          <CircleDot className="h-3 w-3" />
-        </button>
-
-        {/* Clear Conversation */}
-        {(messages.length > 0 || bubbleText) && (
-          <button
-            type="button"
-            onClick={handleClearConvo}
-            title="Clear Conversation"
-            className="rounded-full p-1 text-white/40 transition-colors hover:text-rose-400"
-          >
-            <Trash2 className="h-3 w-3" />
-          </button>
-        )}
-      </div>
-
-      {/* ── New Features Second Dock Row ── */}
-      <div
-        data-orb-hit
-        className={`mt-0.5 flex items-center gap-1 rounded-full border border-white/[0.05] bg-black/30 px-2 py-0.5 backdrop-blur transition-opacity duration-300 ${
-          devourPhase !== "idle" ? "pointer-events-none opacity-0" : ""
-        }`}
-      >
-        {/* Context Leech (Feature 1) */}
-        <button
-          type="button"
-          onClick={() => void triggerContextLeech()}
-          title="Context Leech: absorb screen & get tactical co-pilot notes (/leech)"
-          className={`rounded-full p-1 transition-colors ${
-            leechLoading ? "animate-pulse text-violet-300" : showLeech && contextLeech ? "bg-violet-500/30 text-violet-300" : "text-white/40 hover:text-violet-300"
-          }`}
-        >
-          <Eye className="h-3 w-3" />
-        </button>
-
-        {/* Ghost Copilot (Feature 3) */}
-        <button
-          type="button"
-          onClick={() => { setShowCopilot((v) => !v); if (!showCopilot) setTimeout(() => copilotInputRef.current?.focus(), 80); }}
-          title="Ghost Copilot: paste error trace → get AI patch (/copilot)"
-          className={`rounded-full p-1 transition-colors ${
-            copilotLoading ? "animate-pulse text-orange-300" : showCopilot ? "bg-orange-500/30 text-orange-300" : "text-white/40 hover:text-orange-300"
-          }`}
-        >
-          <Bug className="h-3 w-3" />
-        </button>
-
-        {/* Omni-Query (Feature 4) */}
-        <button
-          type="button"
-          onClick={() => { setShowOmni((v) => !v); if (!showOmni) setTimeout(() => omniInputRef.current?.focus(), 80); }}
-          title="Omni-Query: search any file with natural language (/omni)"
-          className={`rounded-full p-1 transition-colors ${
-            omniLoading ? "animate-pulse text-sky-300" : showOmni ? "bg-sky-500/30 text-sky-300" : "text-white/40 hover:text-sky-300"
-          }`}
-        >
-          <Search className="h-3 w-3" />
-        </button>
-
-        {/* Env Heal (Feature 6) */}
-        <button
-          type="button"
-          onClick={() => void scanEnvHealth()}
-          title="Self-Healing Env: scan & fix port collisions, git locks (/heal)"
-          className={`relative rounded-full p-1 transition-colors ${
-            envHealLoading ? "animate-pulse text-green-300" : showEnvHeal ? "bg-green-500/30 text-green-300" : "text-white/40 hover:text-green-300"
-          }`}
-        >
-          <Zap className="h-3 w-3" />
-          {envHealth && !envHealth.healthy && (
-            <span className="absolute -top-0.5 -right-0.5 flex h-2.5 w-2.5 items-center justify-center rounded-full bg-red-500 text-[7px] font-bold text-white">
-              {envHealth.issues.length}
-            </span>
-          )}
-        </button>
-
-        {/* Upload File to File Explorer */}
-        <input
-          ref={orbFileInputRef}
-          type="file"
-          className="hidden"
-          onChange={(e) => {
-            if (e.target.files && e.target.files[0]) {
-              void handleOrbFileUpload(e.target.files[0]);
-              e.target.value = "";
-            }
-          }}
-        />
-        <button
-          type="button"
-          onClick={() => orbFileInputRef.current?.click()}
-          title="Upload file to File Explorer (rename / delete / move / manage)"
-          className={`rounded-full p-1 transition-colors ${
-            orbUploading ? "animate-pulse text-emerald-300" : stagedFile ? "bg-emerald-500/30 text-emerald-300" : "text-white/40 hover:text-emerald-300"
-          }`}
-        >
-          <Upload className="h-3 w-3" />
-        </button>
-      </div>
 
       {/* ── The Card & Panels ── */}
       <div className="relative mt-1.5 w-full px-3">
@@ -1922,6 +1786,187 @@ export default function OrbPage() {
               </div>
             )}
 
+            {/* ── Feature burst — one tap from the composer, out of the orb ── */}
+            {showFeatures && (
+              <div
+                data-orb-hit
+                className="feature-burst mb-1 grid grid-cols-5 gap-0.5 rounded-lg border border-white/[0.07] bg-black/50 p-0.5 backdrop-blur"
+              >
+                {([
+                  {
+                    key: "reticle",
+                    title: "Target Screen Reticle (Element Auto-Pilot)",
+                    icon: <Crosshair className="h-3 w-3" />,
+                    active: !!screenReticle?.active,
+                    activeClass: "bg-cyan-500/25 text-cyan-300 border-cyan-400/30",
+                    idleClass: "hover:text-cyan-300",
+                    run: () => void toggleReticle(),
+                  },
+                  {
+                    key: "stash",
+                    title: "Clipboard Magic Stash",
+                    icon: <Layers className="h-3 w-3" />,
+                    active: showStash,
+                    activeClass: "bg-amber-500/25 text-amber-300 border-amber-400/30",
+                    idleClass: "hover:text-amber-300",
+                    badge: clipboardStash.length,
+                    badgeClass: "bg-amber-400 text-black",
+                    run: () => setShowStash((v) => !v),
+                  },
+                  {
+                    key: "ghost",
+                    title: "Autonomous Ghost Worker",
+                    icon: <Bot className="h-3 w-3" />,
+                    active: !!activeGhost,
+                    activeClass: "bg-emerald-500/25 text-emerald-300 border-emerald-400/30 animate-pulse",
+                    idleClass: "hover:text-emerald-300",
+                    run: () => {
+                      if (activeGhost) {
+                        setShowGhost((v) => !v);
+                        return;
+                      }
+                      if (!draft.trim()) {
+                        setInputOpen(true);
+                        setDraft("/ghost ");
+                        notify("Type Ghost mission & press Enter");
+                        setTimeout(() => inputRef.current?.focus(), 80);
+                        return;
+                      }
+                      void launchGhostWorker();
+                    },
+                  },
+                  {
+                    key: "circle",
+                    title: "Circle-to-Act Screen Teleportation",
+                    icon: <CircleDot className="h-3 w-3" />,
+                    active: showCircle,
+                    activeClass: "bg-purple-500/25 text-purple-300 border-purple-400/30",
+                    idleClass: "hover:text-purple-300",
+                    run: () => {
+                      if (!draft.trim()) {
+                        setInputOpen(true);
+                        setDraft("/act ");
+                        notify("Type screen instruction & press Enter (or leave blank to inspect)");
+                        setTimeout(() => inputRef.current?.focus(), 80);
+                        return;
+                      }
+                      void triggerCircleAct();
+                    },
+                  },
+                  {
+                    key: "leech",
+                    title: "Context Leech: absorb screen & get tactical notes (/leech)",
+                    icon: <Eye className="h-3 w-3" />,
+                    active: showLeech && !!contextLeech,
+                    activeClass: "bg-violet-500/25 text-violet-300 border-violet-400/30",
+                    idleClass: "hover:text-violet-300",
+                    pulse: leechLoading,
+                    run: () => void triggerContextLeech(),
+                  },
+                  {
+                    key: "copilot",
+                    title: "Ghost Copilot: paste an error trace → get an AI patch (/copilot)",
+                    icon: <Bug className="h-3 w-3" />,
+                    active: showCopilot,
+                    activeClass: "bg-orange-500/25 text-orange-300 border-orange-400/30",
+                    idleClass: "hover:text-orange-300",
+                    pulse: copilotLoading,
+                    run: () => {
+                      setShowCopilot((v) => !v);
+                      setTimeout(() => copilotInputRef.current?.focus(), 80);
+                    },
+                  },
+                  {
+                    key: "omni",
+                    title: "Omni-Query: search any file in natural language (/omni)",
+                    icon: <Search className="h-3 w-3" />,
+                    active: showOmni,
+                    activeClass: "bg-sky-500/25 text-sky-300 border-sky-400/30",
+                    idleClass: "hover:text-sky-300",
+                    pulse: omniLoading,
+                    run: () => {
+                      setShowOmni((v) => !v);
+                      setTimeout(() => omniInputRef.current?.focus(), 80);
+                    },
+                  },
+                  {
+                    key: "heal",
+                    title: "Self-Healing Env: scan & fix port collisions, git locks (/heal)",
+                    icon: <Zap className="h-3 w-3" />,
+                    active: showEnvHeal,
+                    activeClass: "bg-green-500/25 text-green-300 border-green-400/30",
+                    idleClass: "hover:text-green-300",
+                    pulse: envHealLoading,
+                    badge: envHealth && !envHealth.healthy ? envHealth.issues.length : 0,
+                    badgeClass: "bg-red-500 text-white",
+                    run: () => void scanEnvHealth(),
+                  },
+                  {
+                    key: "upload",
+                    title: "Upload a file to File Explorer (rename / delete / move)",
+                    icon: <Upload className="h-3 w-3" />,
+                    active: !!stagedFile,
+                    activeClass: "bg-emerald-500/25 text-emerald-300 border-emerald-400/30",
+                    idleClass: "hover:text-emerald-300",
+                    pulse: orbUploading,
+                    run: () => orbFileInputRef.current?.click(),
+                  },
+                  ...(messages.length > 0 || bubbleText
+                    ? [
+                        {
+                          key: "clear",
+                          title: "Clear Conversation",
+                          icon: <Trash2 className="h-3 w-3" />,
+                          active: false,
+                          activeClass: "",
+                          idleClass: "hover:text-rose-400",
+                          run: handleClearConvo,
+                        },
+                      ]
+                    : []),
+                ] as FeatureChip[]).map((f, i) => (
+                  <button
+                    key={f.key}
+                    type="button"
+                    onClick={() => {
+                      f.run();
+                      // A tray that just opened needs the room; give it back.
+                      if (f.key !== "upload") setShowFeatures(false);
+                    }}
+                    title={f.title}
+                    style={{ animationDelay: `${40 + i * 28}ms` }}
+                    className={`feature-chip relative flex h-5 items-center justify-center rounded border text-white/45 transition-colors ${
+                      f.active
+                        ? f.activeClass
+                        : `border-white/[0.05] bg-white/[0.02] ${f.idleClass}`
+                    } ${f.pulse ? "animate-pulse" : ""}`}
+                  >
+                    {f.icon}
+                    {!!f.badge && (
+                      <span
+                        className={`absolute -top-1 -right-1 flex h-2.5 w-2.5 items-center justify-center rounded-full text-[6.5px] font-bold ${f.badgeClass}`}
+                      >
+                        {f.badge}
+                      </span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Hidden file input for the Upload chip */}
+            <input
+              ref={orbFileInputRef}
+              type="file"
+              className="hidden"
+              onChange={(e) => {
+                if (e.target.files && e.target.files[0]) {
+                  void handleOrbFileUpload(e.target.files[0]);
+                  e.target.value = "";
+                }
+              }}
+            />
+
             {/* Conversation content */}            {content && (
               <div className="mb-1">
                 <div className="mb-1 flex items-center justify-between border-b border-white/[0.06] pb-0.5 text-[8.5px]">
@@ -1938,7 +1983,11 @@ export default function OrbPage() {
                     <span>Clear</span>
                   </button>
                 </div>
-                <div className="no-scrollbar max-h-[140px] overflow-y-auto text-[11px] leading-[1.55] text-white/[0.82] whitespace-pre-wrap">
+                <div
+                  className={`no-scrollbar overflow-y-auto text-[11px] leading-[1.55] text-white/[0.82] whitespace-pre-wrap ${
+                    showFeatures ? "max-h-[88px]" : "max-h-[140px]"
+                  }`}
+                >
                   {content}
                 </div>
               </div>
@@ -1963,8 +2012,9 @@ export default function OrbPage() {
               </div>
             )}
 
-            {/* Input Composer */}
-            {inputOpen && (
+            {/* Input Composer — also stays up while the feature burst is open,
+                so the sparkle button never disappears from under the pointer. */}
+            {(inputOpen || showFeatures) && (
               <form
                 onSubmit={submit}
                 className={`flex items-center gap-1 ${
@@ -1989,6 +2039,20 @@ export default function OrbPage() {
                   autoComplete="off"
                   spellCheck={false}
                 />
+                <button
+                  type="button"
+                  onClick={() => setShowFeatures((v) => !v)}
+                  className={`shrink-0 rounded-full p-1 transition-colors ${
+                    showFeatures ? "bg-cyan-500/20 text-cyan-300" : "text-white/40 hover:text-cyan-300"
+                  }`}
+                  title="Features"
+                >
+                  <Sparkles
+                    className={`h-3 w-3 transition-transform duration-300 ${
+                      showFeatures ? "rotate-45 scale-110" : ""
+                    }`}
+                  />
+                </button>
                 <button
                   type="button"
                   onClick={() => useJarvisStore.getState().queueVoiceToggle()}
